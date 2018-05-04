@@ -5,10 +5,31 @@
 
 #pragma once
 
+#if ENABLE_OOP_NATIVE_CODEGEN
+class ProcessContext
+{
+private:
+    uint refCount;
+
+public:
+    HANDLE processHandle;
+    intptr_t chakraBaseAddress;
+    intptr_t crtBaseAddress;
+
+    ProcessContext(HANDLE processHandle, intptr_t chakraBaseAddress, intptr_t crtBaseAddress);
+    ~ProcessContext();
+    void AddRef();
+    void Release();
+    bool HasRef();
+
+};
+
 class ServerThreadContext : public ThreadContextInfo
 {
 public:
-    ServerThreadContext(ThreadContextDataIDL * data);
+    typedef BVSparseNode<JitArenaAllocator> BVSparseNode;
+
+    ServerThreadContext(ThreadContextDataIDL * data, ProcessContext* processContext);
     ~ServerThreadContext();
 
     virtual HANDLE GetProcessHandle() const override;
@@ -19,7 +40,7 @@ public:
 
     virtual intptr_t GetThreadStackLimitAddr() const override;
 
-#if defined(ENABLE_SIMDJS) && (defined(_M_IX86) || defined(_M_X64))
+#ifdef ENABLE_WASM_SIMD
     virtual intptr_t GetSimdTempAreaAddr(uint8 tempIndex) const override;
 #endif
 
@@ -27,50 +48,53 @@ public:
     virtual intptr_t GetImplicitCallFlagsAddr() const override;
     virtual intptr_t GetBailOutRegisterSaveSpaceAddr() const override;
 
-    virtual PreReservedVirtualAllocWrapper * GetPreReservedVirtualAllocator() override;
+    PreReservedSectionAllocWrapper * GetPreReservedSectionAllocator();
 
     virtual bool IsNumericProperty(Js::PropertyId propId) override;
 
-    ptrdiff_t GetChakraBaseAddressDifference() const;
-    ptrdiff_t GetCRTBaseAddressDifference() const;
+    virtual ptrdiff_t GetChakraBaseAddressDifference() const override;
+    virtual ptrdiff_t GetCRTBaseAddressDifference() const override;
 
-    CodeGenAllocators * GetCodeGenAllocators();
-    CustomHeap::CodePageAllocators * GetCodePageAllocators();
-    void RemoveFromNumericPropertySet(Js::PropertyId reclaimedId);
-    void AddToNumericPropertySet(Js::PropertyId propertyId);
-    void SetWellKnownHostTypeId(Js::TypeId typeId) { this->wellKnownHostTypeHTMLAllCollectionTypeId = typeId; }
-#if DYNAMIC_INTERPRETER_THUNK || defined(ASMJS_PLAT)
-    CustomHeap::CodePageAllocators * GetThunkPageAllocators();
+    OOPCodeGenAllocators * GetCodeGenAllocators();
+#if defined(_CONTROL_FLOW_GUARD) && !defined(_M_ARM)
+    OOPJITThunkEmitter * GetJITThunkEmitter();
 #endif
+    CustomHeap::OOPCodePageAllocators * GetThunkPageAllocators();
+    CustomHeap::OOPCodePageAllocators  * GetCodePageAllocators();
+    SectionAllocWrapper * GetSectionAllocator();
+    void UpdateNumericPropertyBV(BVSparseNode * newProps);
+    void SetWellKnownHostTypeId(Js::TypeId typeId) { this->wellKnownHostTypeIds[WellKnownHostType_HTMLAllCollection] = typeId; }
     void AddRef();
     void Release();
     void Close();
     PageAllocator * GetForegroundPageAllocator();
-#ifdef STACK_BACK_TRACE
     DWORD GetRuntimePid() { return m_pid; }
-#endif
 
-private:
     intptr_t GetRuntimeChakraBaseAddress() const;
     intptr_t GetRuntimeCRTBaseAddress() const;
 
-    typedef JsUtil::BaseHashSet<Js::PropertyId, HeapAllocator, PrimeSizePolicy, Js::PropertyId,
-        DefaultComparer, JsUtil::SimpleHashedEntry, JsUtil::AsymetricResizeLock> PropertySet;
-    PropertySet * m_numericPropertySet;
+    static intptr_t GetJITCRTBaseAddress();
 
-    PreReservedVirtualAllocWrapper m_preReservedVirtualAllocator;
-#if DYNAMIC_INTERPRETER_THUNK || defined(ASMJS_PLAT)
-    CustomHeap::CodePageAllocators m_thunkPageAllocators;
+private:
+    ProcessContext* processContext;
+
+    BVSparse<HeapAllocator> * m_numericPropertyBV;
+
+    PreReservedSectionAllocWrapper m_preReservedSectionAllocator;
+    SectionAllocWrapper m_sectionAllocator;
+    CustomHeap::OOPCodePageAllocators m_thunkPageAllocators;
+    CustomHeap::OOPCodePageAllocators  m_codePageAllocators;
+    OOPCodeGenAllocators m_codeGenAlloc;
+#if defined(_CONTROL_FLOW_GUARD) && !defined(_M_ARM)
+    OOPJITThunkEmitter m_jitThunkEmitter;
 #endif
-    CustomHeap::CodePageAllocators m_codePageAllocators;
-    CodeGenAllocators m_codeGenAlloc;
     // only allocate with this from foreground calls (never from CodeGen calls)
     PageAllocator m_pageAlloc;
-
     ThreadContextDataIDL m_threadContextData;
 
     DWORD m_pid; //save client process id for easier diagnose
-    
-    intptr_t m_jitCRTBaseAddress;
+
+    CriticalSection m_cs;
     uint m_refCount;
 };
+#endif

@@ -68,17 +68,14 @@ namespace Js {
         types = 0;
         if (!walker.IsCallerGlobalFunction())
         {
-            int64 numberOfArguments = walker.GetCallInfo()->Count;
+            const CallInfo callInfo = walker.GetCallInfo();
+            int64 numberOfArguments = callInfo.Count;
             if (numberOfArguments > 0) numberOfArguments --; // Don't consider 'this'
-            if (walker.GetCallInfo()->Flags & Js::CallFlags_ExtraArg)
-            {
-                Assert(numberOfArguments > 0 );
-                // skip the last FrameDisplay argument.
-                numberOfArguments--;
-            }
             for (int64 j = 0; j < numberOfArguments && j < MaxNumberOfDisplayedArgumentsInStack; j ++)
             {
-                types |= ObjectToTypeCode(walker.GetJavascriptArgs()[j]) << 3*j; // maximal code is 7, so we can use 3 bits to store it
+                // Since the Args are only used to get the type, no need to box the Vars to
+                // move them to the heap from the stack
+                types |= ObjectToTypeCode(walker.GetJavascriptArgs(false /*boxArgsAndDeepCopy*/)[j]) << 3 * j; // maximal code is 7, so we can use 3 bits to store it
             }
             if (numberOfArguments > MaxNumberOfDisplayedArgumentsInStack)
             {

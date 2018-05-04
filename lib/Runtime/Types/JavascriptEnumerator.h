@@ -28,17 +28,19 @@ namespace Js {
         //
         // Moves to the next element and gets the current value.
         // PropertyId: Sets the propertyId of the current value.
-        // In some cases, i.e. arrays, propertyId is not returned successfully.
+        //     In some cases, i.e. arrays, propertyId is not returned successfully.
+        //     Must be initialized to at least NoProperty on all paths.
         // Returns: NULL if there are no more elements.
         //
         // Note: in the future we  might want to enumerate specialPropertyIds
         // If that code is added in this base class use JavaScriptRegExpEnumerator.h/cpp
         // as a reference and then remove it. If you have already made the edits before
         // seeing this comment please just consolidate the changes.
-        virtual Var MoveAndGetNext(PropertyId& propertyId, PropertyAttributes* attributes = nullptr) = 0;
+        virtual JavascriptString * MoveAndGetNext(PropertyId& propertyId, PropertyAttributes* attributes = nullptr) = 0;
 
 
         static bool Is(Var aValue);
         static JavascriptEnumerator* FromVar(Var varValue);
+        static JavascriptEnumerator* UnsafeFromVar(Var varValue);
     };
 }

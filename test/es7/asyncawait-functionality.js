@@ -294,7 +294,7 @@ var tests = [
         body: function (index) {
             {
                 async function asyncMethod(x, y, z) {
-                    var lambdaExp = async(a, b, c) => a * b * c; 
+                    var lambdaExp = async(a, b, c) => a * b * c;
                     var lambdaResult = await lambdaExp(x, y, z);
                     return lambdaResult;
                 }
@@ -551,7 +551,7 @@ var tests = [
                 }
             }, err => {
                 print(`Test #${index} - Error err = ${err}`);
-            });  
+            });
         }
     },
     {
@@ -569,7 +569,7 @@ var tests = [
                 }
             }, err => {
                 print(`Test #${index} - Error err = ${err}`);
-            });  
+            });
         }
     },
     {
@@ -587,7 +587,7 @@ var tests = [
                 }
             }, err => {
                 print(`Test #${index} - Error err = ${err}`);
-            });  
+            });
         }
     },
     {
@@ -731,7 +731,7 @@ var tests = [
             }, err => {
                 echo(`Test #${index} - Error in multiple awaits with branching in a function err = ${err}`);
             });
-            
+
             af3().then(result => {
                 if (result === 2) {
                     echo(`Test #${index} - Success functions completes the second await call`);
@@ -794,14 +794,14 @@ var tests = [
                     print(`Test #${index} - Failed an unexpected exception was thrown = ${err}`);
                 }
             });
-        }  
+        }
     },
     {
         name: "Awaiting a function with multiple awaits",
         body: function (index) {
             async function af1(a, b) {
                 return await af2();
-                
+
                 async function af2() {
                     a = await a * a;
                     b = await b * b;
@@ -892,7 +892,7 @@ var tests = [
             var obj = {
                 async af() {
                     this.b = await this.a + 10;
-                    return this; 
+                    return this;
                 },
                 a : 1,
                 b : 0
@@ -934,12 +934,142 @@ var tests = [
                 echo(`Test #${index} - Error async function and arguments.callee called with err = ${err}`);
             });
         }
+    },
+    {
+        name: "Async and arguments.caller",
+        body: function (index) {
+            var func = function () {
+                return func.caller;
+            }
+            async function asyncMethod(flag, value) {
+                if (!flag) {
+                    return await func();
+                }
+                return value * value;
+            }
+
+            asyncMethod().then(
+                result => {
+                    if (result === asyncMethod) {
+                        echo(`Test #${index} - Success async function returned through caller property is the same as the original async function`);
+                    } else {
+                        echo(`Test #${index} - Failed async function returned through the caller property is not the same as the original async function = ${result}`);
+                    }
+                    result(true, 10).then(
+                        r => {
+                            if (r === 100) {
+                                echo(`Test #${index} - Success async function returned through caller property behaves the same way as the original async function`);
+                            } else {
+                                echo(`Test #${index} - Failed async function returned through caller property behaves different from the original async function with value = ${r}`);
+                            }
+                        },
+                        e => {
+                            echo(`Test #${index} - Failed while trying to execute the async function returned through caller property with err = ${e}`);
+                        }
+                    );
+                },
+                error => {
+                    echo(`Test #${index} - Failed while trying to retrieve the async function through caller property with err = ${error}`);
+                }
+            )
+        }
+    },
+    {
+        name: "Async and split scope",
+        body: function (index) {
+            async function asyncMethod1(b) {
+                return b() + 100;
+            }
+            async function asynMethod2(a = 10, b = () => a) {
+                if (a === 10) {
+                    echo(`Test #${index} - Success initial value of the formal is the same as the default param value`);
+                } else {
+                    echo(`Test #${index} - Failed initial value of the formal is not the same as the default param value, expected 10, result = ${a}`);
+                }
+                a = await asyncMethod1(b);
+                if (a === 110) {
+                    echo(`Test #${index} - Success updated value of the formal is the same as the value returned from the second async function`);
+                } else {
+                    echo(`Test #${index} - Failed updated value of the formal is not the same as the value returned from the second async function, expected 110, result = ${a}`);
+                }
+                return b;
+            }
+            asynMethod2().then(
+                result => {
+                    if (result() === 110) {
+                        echo(`Test #${index} - Success value returned through await is assigned to the formal`);
+                    } else {
+                        echo(`Test #${index} - Failed value returned through the await is different from the expected 110, result = ${result()}`);
+                    }
+                },
+                error => {
+                    echo(`Test #${index} - Failed error while trying to return through the await in a split scope function, expected 100, error = ${error}`);
+                }
+            );
+
+            async function asyncMethod3(b) {
+                return b() + 100;
+            }
+            async function asynMethod4(a = 10, b = () => a) {
+                if (a === 10) {
+                    echo(`Test #${index} - Success initial value of the body symbol is the same as the default param value`);
+                } else {
+                    echo(`Test #${index} - Failed initial value of the body symbol is not the same as the default param value, expected 10, result = ${a}`);
+                }
+                var a = await asyncMethod3(b);
+                if (a === 110) {
+                    echo(`Test #${index} - Success updated value of the body symbol is the same as the value returned from the second async function`);
+                } else {
+                    echo(`Test #${index} - Failed updated value of the body symbol is not the same as the value returned from the second async function, expected 110, result = ${a}`);
+                }
+                return b;
+            }
+            asynMethod4().then(
+                result => {
+                    if (result() === 10) {
+                        echo(`Test #${index} - Success value returned through await is not assigned to the formal`);
+                    } else {
+                        echo(`Test #${index} - Failed value of the formal is different from the expected 10, result = ${result()}`);
+                    }
+                },
+                error => {
+                    echo(`Test #${index} - Failed error while trying to return through the await in a split scope function with duplicate symbol in the body, expected 100, error = ${error}`);
+                }
+            );
+        }
+    },
+    {
+        name: "`then` is called with both onFulfilled and onRejected",
+        body: function (index) {
+            async function bar() {
+                throw new Error("Whoops");
+            }
+
+            async function foo() {
+                try {
+                    await bar();
+                } catch (e){
+                    echo(`Test #${index} - Success caught the expected exception`);
+                }
+            }
+
+            var oldThen = Promise.prototype.then;
+            Promise.prototype.then = function(thenx, catchx) {
+                echo(`Test #${index} - then: ${!!thenx}, catch: ${!!catchx}`)
+                return oldThen.apply(this, arguments);
+            }
+
+            foo();
+
+            Promise.prototype.then = oldThen;
+        }
     }
 ];
 
-var index = 1;
+function runTest(test, index) {
+    // make index be 1-based for pretty output
+    ++index;
 
-function runTest(test) {
     echo('Executing test #' + index + ' - ' + test.name);
 
     try {
@@ -947,8 +1077,6 @@ function runTest(test) {
     } catch(e) {
         echo('Caught exception: ' + e);
     }
-
-    index++;
 }
 
 tests.forEach(runTest);

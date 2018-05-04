@@ -18,6 +18,7 @@ public:
         IR::Instr * instr;
         uint argCount;
         uint argRestoreAdjustCount;
+        bool isOrphanedCall;
     } StartCallInfo;
 #else
     typedef uint StartCallInfo;
@@ -27,12 +28,8 @@ public:
         bailOutOffset(bailOutOffset), bailOutFunc(bailOutFunc),
         byteCodeUpwardExposedUsed(nullptr), polymorphicCacheIndex((uint)-1), startCallCount(0), startCallInfo(nullptr), bailOutInstr(nullptr),
         totalOutParamCount(0), argOutSyms(nullptr), bailOutRecord(nullptr), wasCloned(false), isInvertedBranch(false), sharedBailOutKind(true), outParamInlinedArgSlot(nullptr),
-        liveVarSyms(nullptr), liveLosslessInt32Syms(nullptr),
-        liveFloat64Syms(nullptr), liveSimd128F4Syms(nullptr),
-        liveSimd128I4Syms(nullptr), liveSimd128I8Syms(nullptr), liveSimd128I16Syms(nullptr),
-        liveSimd128U4Syms(nullptr), liveSimd128U8Syms(nullptr), liveSimd128U16Syms(nullptr),
-        liveSimd128B4Syms(nullptr), liveSimd128B8Syms(nullptr), liveSimd128B16Syms(nullptr),
-        liveSimd128D2Syms(nullptr), branchConditionOpnd(nullptr),
+        liveVarSyms(nullptr), liveLosslessInt32Syms(nullptr), liveFloat64Syms(nullptr),
+        branchConditionOpnd(nullptr),
         stackLiteralBailOutInfoCount(0), stackLiteralBailOutInfo(nullptr)
     {
         Assert(bailOutOffset != Js::Constants::NoByteCodeOffset);
@@ -42,7 +39,8 @@ public:
 #if DBG
         wasCopied = false;
 #endif
-        this->capturedValues.argObjSyms = nullptr;
+        this->capturedValues = JitAnew(bailOutFunc->m_alloc, CapturedValues);
+        this->capturedValues->refCount = 1;
         this->usedCapturedValues.argObjSyms = nullptr;
     }
     void Clear(JitArenaAllocator * allocator);
@@ -52,7 +50,7 @@ public:
     void FinalizeOffsets(__in_ecount(count) int * offsets, uint count, Func *func, BVSparse<JitArenaAllocator> *bvInlinedArgSlot);
 #endif
 
-    void RecordStartCallInfo(uint i, uint argRestoreAdjustCount, IR::Instr *instr);
+    void RecordStartCallInfo(uint i, IR::Instr *instr);
     uint GetStartCallOutParamCount(uint i) const;
 #ifdef _M_IX86
     bool NeedsStartCallAdjust(uint i, const IR::Instr * instr) const;
@@ -78,7 +76,7 @@ public:
 #endif
     uint32 bailOutOffset;
     BailOutRecord * bailOutRecord;
-    CapturedValues capturedValues;                                      // Values we know about after forward pass
+    CapturedValues* capturedValues;                                      // Values we know about after forward pass
     CapturedValues usedCapturedValues;                                  // Values that need to be restored in the bail out
     BVSparse<JitArenaAllocator> * byteCodeUpwardExposedUsed;            // Non-constant stack syms that needs to be restored in the bail out
     uint polymorphicCacheIndex;
@@ -100,20 +98,6 @@ public:
     BVSparse<JitArenaAllocator> * liveVarSyms;
     BVSparse<JitArenaAllocator> * liveLosslessInt32Syms;                // These are only the live int32 syms that fully represent the var-equivalent sym's value (see GlobOpt::FillBailOutInfo)
     BVSparse<JitArenaAllocator> * liveFloat64Syms;
-
-    // SIMD_JS
-    BVSparse<JitArenaAllocator> * liveSimd128F4Syms;
-    BVSparse<JitArenaAllocator> * liveSimd128I4Syms;
-    BVSparse<JitArenaAllocator> * liveSimd128I8Syms;
-    BVSparse<JitArenaAllocator> * liveSimd128I16Syms;
-    BVSparse<JitArenaAllocator> * liveSimd128U4Syms;
-    BVSparse<JitArenaAllocator> * liveSimd128U8Syms;
-    BVSparse<JitArenaAllocator> * liveSimd128U16Syms;
-    BVSparse<JitArenaAllocator> * liveSimd128B4Syms;
-    BVSparse<JitArenaAllocator> * liveSimd128B8Syms;
-    BVSparse<JitArenaAllocator> * liveSimd128B16Syms;
-    BVSparse<JitArenaAllocator> * liveSimd128D2Syms;
-
     int * outParamOffsets;
 
     BVSparse<JitArenaAllocator> * outParamInlinedArgSlot;
@@ -200,12 +184,7 @@ public:
     }
 
 public:
-    template <size_t N>
-    void FillNativeRegToByteCodeRegMap(uint (&nativeRegToByteCodeRegMap)[N]);
-
-    void IsOffsetNativeIntOrFloat(uint offsetIndex, int argOutSlotStart, bool * pIsFloat64, bool * pIsInt32,
-        bool * pIsSimd128F4, bool * pIsSimd128I4, bool * pIsSimd128I8, bool * pIsSimd128I16,
-        bool * pIsSimd128U4, bool * pIsSimd128U8, bool * pIsSimd128U16, bool * pIsSimd128B4, bool * pIsSimd128B8, bool * pIsSimd128B16) const;
+    void IsOffsetNativeIntOrFloat(uint offsetIndex, int argOutSlotStart, bool * pIsFloat64, bool * pIsInt32) const;
 
     template <typename Fn>
     void MapStartCallParamCounts(Fn fn);
@@ -232,7 +211,7 @@ protected:
         Js::RegSlot returnValueRegSlot;
     };
     static Js::Var BailOutCommonNoCodeGen(Js::JavascriptCallStackLayout * layout, BailOutRecord const * bailOutRecord,
-        uint32 bailOutOffset, void * returnAddress, IR::BailOutKind bailOutKind, Js::Var branchValue = nullptr, Js::Var * registerSaves = nullptr,
+        uint32 bailOutOffset, void * returnAddress, IR::BailOutKind bailOutKind, Js::Var branchValue, Js::Var * registerSaves,
         BailOutReturnValue * returnValue = nullptr, void * argoutRestoreAddress = nullptr);
     static Js::Var BailOutCommon(Js::JavascriptCallStackLayout * layout, BailOutRecord const * bailOutRecord,
         uint32 bailOutOffset, void * returnAddress, IR::BailOutKind bailOutKind, Js::ImplicitCallFlags savedImplicitCallFlags, Js::Var branchValue = nullptr, BailOutReturnValue * returnValue = nullptr, void * argoutRestoreAddress = nullptr);
@@ -249,11 +228,12 @@ protected:
     static void BailOutInlinedHelper(Js::JavascriptCallStackLayout * layout, BailOutRecord const *& bailOutRecord, uint32 bailOutOffset, void * returnAddress,
         IR::BailOutKind bailOutKind, Js::Var * registerSaves, BailOutReturnValue * returnValue, Js::ScriptFunction ** innerMostInlinee, bool isInLoopBody, Js::Var branchValue = nullptr);
     static uint32 BailOutFromLoopBodyHelper(Js::JavascriptCallStackLayout * layout, BailOutRecord const * bailOutRecord,
-        uint32 bailOutOffset, IR::BailOutKind bailOutKind, Js::Var branchValue = nullptr, Js::Var * registerSaves = nullptr, BailOutReturnValue * returnValue = nullptr);
+        uint32 bailOutOffset, IR::BailOutKind bailOutKind, Js::Var branchValue, Js::Var * registerSaves, BailOutReturnValue * returnValue = nullptr);
 
     static void UpdatePolymorphicFieldAccess(Js::JavascriptFunction *  function, BailOutRecord const * bailOutRecord);
 
-    static void ScheduleFunctionCodeGen(Js::ScriptFunction * function, Js::ScriptFunction * innerMostInlinee, BailOutRecord const * bailOutRecord, IR::BailOutKind bailOutKind, Js::ImplicitCallFlags savedImplicitCallFlags, void * returnAddress);
+    static void ScheduleFunctionCodeGen(Js::ScriptFunction * function, Js::ScriptFunction * innerMostInlinee, BailOutRecord const * bailOutRecord, IR::BailOutKind bailOutKind, 
+                                        uint32 actualBailOutOffset, Js::ImplicitCallFlags savedImplicitCallFlags, void * returnAddress);
     static void ScheduleLoopBodyCodeGen(Js::ScriptFunction * function, Js::ScriptFunction * innerMostInlinee, BailOutRecord const * bailOutRecord, IR::BailOutKind bailOutKind);
     static void CheckPreemptiveRejit(Js::FunctionBody* executeFunction, IR::BailOutKind bailOutKind, BailOutRecord* bailoutRecord, uint8& callsOrIterationsCount, int loopNumber);
     void RestoreValues(IR::BailOutKind bailOutKind, Js::JavascriptCallStackLayout * layout, Js::InterpreterStackFrame * newInstance, Js::ScriptContext * scriptContext,
@@ -263,10 +243,7 @@ protected:
         void * argoutRestoreAddress = nullptr) const;
     void RestoreValue(IR::BailOutKind bailOutKind, Js::JavascriptCallStackLayout * layout, Js::Var * values, Js::ScriptContext * scriptContext,
         bool fromLoopBody, Js::Var * registerSaves, Js::InterpreterStackFrame * newInstance, Js::Var* pArgumentsObject, void * argoutRestoreAddress,
-        uint regSlot, int offset, bool isLocal, bool isFloat64, bool isInt32,
-        bool isSimd128F4, bool isSimd128I4, bool isSimd128I8, bool isSimd128I16,
-        bool isSimd128U4, bool isSimd128U8, bool isSimd128U16, bool isSimd128B4, bool isSimd128B8, bool isSimd128B16 ) const;
-    void RestoreInlineFrame(InlinedFrameLayout *inlinedFrame, Js::JavascriptCallStackLayout * layout, Js::Var * registerSaves);
+        uint regSlot, int offset, bool isLocal, bool isFloat64, bool isInt32) const;
 
     void AdjustOffsetsForDiagMode(Js::JavascriptCallStackLayout * layout, Js::ScriptFunction * function) const;
 
@@ -286,17 +263,9 @@ protected:
     {
         BVFixed * argOutFloat64Syms;        // Used for float-type-specialized ArgOut symbols. Index = [0 .. BailOutInfo::totalOutParamCount].
         BVFixed * argOutLosslessInt32Syms;  // Used for int-type-specialized ArgOut symbols (which are native int and for bailout we need tagged ints).
-        // SIMD_JS
-        BVFixed * argOutSimd128F4Syms;
-        BVFixed * argOutSimd128I4Syms;
-        BVFixed * argOutSimd128I8Syms;
-        BVFixed * argOutSimd128I16Syms;
-        BVFixed * argOutSimd128U4Syms;
-        BVFixed * argOutSimd128U8Syms;
-        BVFixed * argOutSimd128U16Syms;
-        BVFixed * argOutSimd128B4Syms;
-        BVFixed * argOutSimd128B8Syms;
-        BVFixed * argOutSimd128B16Syms;
+#ifdef _M_IX86
+        BVFixed * isOrphanedArgSlot;
+#endif
         uint * startCallOutParamCounts;
         int * outParamOffsets;
         uint startCallCount;
@@ -306,17 +275,9 @@ protected:
         {
             FixupNativeDataPointer(argOutFloat64Syms, chunkList);
             FixupNativeDataPointer(argOutLosslessInt32Syms, chunkList);
-            FixupNativeDataPointer(argOutSimd128F4Syms, chunkList);
-            FixupNativeDataPointer(argOutSimd128I4Syms, chunkList);
-            FixupNativeDataPointer(argOutSimd128I8Syms, chunkList);
-            FixupNativeDataPointer(argOutSimd128I16Syms, chunkList);
-            FixupNativeDataPointer(argOutSimd128U4Syms, chunkList);
-            FixupNativeDataPointer(argOutSimd128U8Syms, chunkList);
-            FixupNativeDataPointer(argOutSimd128U16Syms, chunkList);
-            FixupNativeDataPointer(argOutSimd128B4Syms, chunkList);
-            FixupNativeDataPointer(argOutSimd128B8Syms, chunkList);
-            FixupNativeDataPointer(argOutSimd128B16Syms, chunkList);
-
+#ifdef _M_IX86
+            FixupNativeDataPointer(isOrphanedArgSlot, chunkList);
+#endif
             // special handling for startCallOutParamCounts and outParamOffsets, becuase it points to middle of the allocation
             uint* startCallOutParamCountsStart = startCallOutParamCounts - startCallIndex;
             NativeCodeData::AddFixupEntry(startCallOutParamCounts, startCallOutParamCountsStart, &this->startCallOutParamCounts, this, chunkList);
@@ -443,17 +404,6 @@ struct GlobalBailOutRecordDataRow
     unsigned regSlot : 30;
     unsigned isFloat : 1;
     unsigned isInt : 1;
-    // SIMD_JS
-    unsigned isSimd128F4 : 1;
-    unsigned isSimd128I4 : 1;
-    unsigned isSimd128I8 : 1;
-    unsigned isSimd128I16 : 1;
-    unsigned isSimd128B4 : 1;
-    unsigned isSimd128B8 : 1;
-    unsigned isSimd128B16 : 1;
-    unsigned isSimd128U4 : 1;
-    unsigned isSimd128U8 : 1;
-    unsigned isSimd128U16 : 1;
 };
 
 struct GlobalBailOutRecordDataTable
@@ -475,9 +425,7 @@ struct GlobalBailOutRecordDataTable
     bool isScopeObjRestored     : 1;
 
     void Finalize(NativeCodeData::Allocator *allocator, JitArenaAllocator *tempAlloc);
-    void AddOrUpdateRow(JitArenaAllocator *allocator, uint32 bailOutRecordId, uint32 regSlot, bool isFloat, bool isInt,
-        bool isSimd128F4, bool isSimd128I4, bool isSimd128I8, bool isSimd128I16, bool isSimd128U4, bool isSimd128U8, bool isSimd128U16, bool isSimd128B4, bool isSimd128B8, bool isSimd128B16,
-        int32 offset, uint *lastUpdatedRowIndex);
+    void AddOrUpdateRow(JitArenaAllocator *allocator, uint32 bailOutRecordId, uint32 regSlot, bool isFloat, bool isInt, int32 offset, uint *lastUpdatedRowIndex);
 
     template<class Fn>
     void IterateGlobalBailOutRecordTableRows(uint32 bailOutRecordId, Fn callback)

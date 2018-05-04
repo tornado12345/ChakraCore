@@ -10,7 +10,7 @@ namespace Js
     class JavascriptTypedNumber : public RecyclableObject
     {
     private:
-        T m_value;
+        Field(T) m_value;
         inline JavascriptTypedNumber(T value, StaticType * type) : RecyclableObject(type), m_value(value)
         {
 #if DBG
@@ -32,6 +32,14 @@ namespace Js
         static Var ToVar(T nValue, ScriptContext* scriptContext);
 
         static JavascriptTypedNumber<T>* FromVar(Var value)
+        {
+            AssertOrFailFastMsg(JavascriptOperators::GetTypeId(value) == TypeIds_Int64Number ||
+                JavascriptOperators::GetTypeId(value) == TypeIds_UInt64Number, "invalid typed number");
+
+            return static_cast<JavascriptTypedNumber<T>*>(value);
+        };
+
+        static JavascriptTypedNumber<T>* UnsafeFromVar(Var value)
         {
 #if DBG
             AssertMsg(JavascriptOperators::GetTypeId(value) == TypeIds_Int64Number ||

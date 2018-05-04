@@ -11,22 +11,22 @@ namespace Js
     protected:
         DEFINE_VTABLE_CTOR(ModuleNamespaceEnumerator, JavascriptEnumerator);
         ModuleNamespaceEnumerator(ModuleNamespace* nsObject, EnumeratorFlags flags, ScriptContext* scriptContext);
-        BOOL Init(ForInCache * forInCache);
+        BOOL Init(EnumeratorCache * enumeratorCache);
 
     public:
-        static ModuleNamespaceEnumerator* New(ModuleNamespace* nsObject, EnumeratorFlags flags, ScriptContext* scriptContext, ForInCache * forInCache);        
+        static ModuleNamespaceEnumerator* New(ModuleNamespace* nsObject, EnumeratorFlags flags, ScriptContext* scriptContext, EnumeratorCache * enumeratorCache);
         virtual void Reset() override;
-        virtual Var MoveAndGetNext(PropertyId& propertyId, PropertyAttributes* attributes = nullptr) override;
+        virtual JavascriptString * MoveAndGetNext(PropertyId& propertyId, PropertyAttributes* attributes = nullptr) override;
         virtual Var GetCurrentValue() { Assert(false); return nullptr; }
 
     private:
-        ModuleNamespace* nsObject;
-        JavascriptStaticEnumerator symbolEnumerator;
-        ModuleNamespace::UnambiguousExportMap* nonLocalMap;
-        BigPropertyIndex currentLocalMapIndex;
-        BigPropertyIndex currentNonLocalMapIndex;
-        bool doneWithLocalExports;
-        bool doneWithSymbol;
-        EnumeratorFlags flags;
+        Field(ModuleNamespace*) nsObject;
+        Field(JavascriptStaticEnumerator) symbolEnumerator;
+        Field(ModuleNamespace::UnambiguousExportMap*) nonLocalMap;
+        Field(BigPropertyIndex) currentLocalMapIndex;
+        Field(BigPropertyIndex) currentNonLocalMapIndex;
+        Field(bool) doneWithExports;
+        Field(bool) doneWithSymbol;
+        Field(EnumeratorFlags) flags;
     };
 }

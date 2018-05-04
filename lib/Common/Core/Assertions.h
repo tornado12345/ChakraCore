@@ -10,16 +10,16 @@
 #if defined(DBG) && !defined(DIAG_DAC)
 
 // AutoDebug functions that are only available in DEBUG builds
-_declspec(selectany) int AssertCount = 0;
-_declspec(selectany) int AssertsToConsole = false;
+extern int AssertCount;
+extern int AssertsToConsole;
 
 #if _WIN32
 _declspec(thread, selectany) int IsInAssert = false;
 #elif !defined(__IOS__)
-__declspec(thread, selectany) int IsInAssert = false;
+extern __declspec(thread) int IsInAssert;
 #else
-// todo: implement thread local variable for iOS ??
-__declspec(selectany) int IsInAssert = false;
+ // todo: implement thread local variable for iOS ??
+extern int IsInAssert;
 #endif
 
 #if !defined(USED_IN_STATIC_LIB)
@@ -75,6 +75,18 @@ __declspec(selectany) int IsInAssert = false;
 #define AnalysisAssert(x)               Assert(x); __analysis_assume(x)
 #define AnalysisAssertMsg(x, comment)   AssertMsg(x, comment); __analysis_assume(x)
 
+#ifdef DBG
+#define AssertOrFailFast(x)                 Assert(x)
+#define AssertOrFailFastMsg(x, msg)         AssertMsg(x, msg)
+#define AnalysisAssertOrFailFast(x)         AnalysisAssert(x)
+#define AnalysisAssertOrFailFastMsg(x, msg) AnalysisAssertMsg(x, msg)
+#else
+#define AssertOrFailFast(x)                 do { if (!(x)) { Js::Throw::FatalInternalError(); } } while (false)
+#define AssertOrFailFastMsg(x, msg)         AssertOrFailFast(x)
+#define AnalysisAssertOrFailFast(x)         AssertOrFailFast(x)
+#define AnalysisAssertOrFailFastMsg(x, msg) AssertOrFailFast(x)
+#endif
+
 #define Unused(var) var;
 
 #define UNREACHED   (0)
@@ -121,18 +133,3 @@ struct IsSame<T1, T1>
         IsTrue = true
     };
 };
-
-// From Legacy engine - don't use
-
-#define AssertPvCb(pv, cb)       AssertMsg(0 != (pv) || 0 == (cb), "bad ptr")
-#define AssertPvCbN(pv, cb)      //NO-OP
-#define AssertPvCbR(pv, cb)      AssertMsg(0 != (pv) || 0 == (cb), "bad ptr")
-#define AssertPsz(psz)           AssertMsg(0 != (psz), "bad psz")
-#define AssertPszN(psz)          //NO-OP
-
-#define AssertMem(pvar)          AssertPvCb(pvar, sizeof(*(pvar)))
-#define AssertMemN(pvar)         AssertPvCbN(pvar, sizeof(*(pvar)))
-#define AssertMemR(pvar)         AssertPvCbR(pvar, sizeof(*(pvar)))
-#define AssertArrMem(prgv, cv)   AssertPvCb(prgv, (cv) * sizeof(*(prgv)))
-#define AssertArrMemR(prgv, cv)  AssertPvCbR(prgv, (cv) * sizeof(*(prgv)))
-#define AssertThis()             Assert(0 != (this) && (this)->AssertValid())

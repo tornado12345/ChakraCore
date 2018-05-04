@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Condition="'$(ChakraBuildPathImported)'!='true'" Project="$(SolutionDir)Chakra.Build.Paths.props" />
   <Import Project="$(BuildConfigPropsPath)Chakra.Build.ProjectConfiguration.props" />
@@ -39,6 +39,8 @@
       </AdditionalIncludeDirectories>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>RuntimeLanguagePch.h</PrecompiledHeaderFile>
+      <!-- # Check out https://osgwiki.com/wiki/Dev_14_Migration for more details about -Zc:implicitNoexcept- -->
+      <AdditionalOptions>-Zc:implicitNoexcept- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -86,13 +88,13 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)DynamicProfileMutator.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)DynamicProfileStorage.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)ExecutionMode.cpp" />
-    <ClCompile Include="$(MSBuildThisFileDirectory)FunctionCodeGenJitTimeData.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)FunctionCodeGenRuntimeData.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)InlineCache.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)JavascriptExceptionObject.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)JavascriptExceptionOperators.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)JavascriptMathOperators.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)ProfilingHelpers.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)SimdInt64x2Operation.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)SimdFloat32x4Operation.cpp">
       <ExcludedFromBuild Condition="'$(Platform)'!='ARM' AND '$(Platform)'!='Arm64'">true</ExcludedFromBuild>
     </ClCompile>
@@ -171,12 +173,13 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)RuntimeLanguagePch.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
-    <ClCompile Include="$(MSBuildThisFileDirectory)JavascriptNativeOperators.cpp" />
-    <ClCompile Include="$(MSBuildThisFileDirectory)ObjTypeSpecFldInfo.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)ModuleNamespace.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)SourceTextModuleRecord.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)WAsmjsUtils.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)ModuleNamespaceEnumerator.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)WebAssemblySource.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)ConstructorCache.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)PrototypeChainCache.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="amd64\StackFrame.h">
@@ -186,6 +189,7 @@
       <ExcludedFromBuild Condition="'$(Platform)'!='ARM'">true</ExcludedFromBuild>
     </ClInclude>
     <ClInclude Include="AsmJs.h" />
+    <ClInclude Include="AsmJsArrayBufferViews.h" />
     <ClInclude Include="AsmJsByteCodeGenerator.h" />
     <ClInclude Include="AsmJsCodeGenerator.h" />
     <ClInclude Include="AsmJsEncoder.h">
@@ -200,6 +204,7 @@
     <ClInclude Include="AsmJsTypes.h" />
     <ClInclude Include="AsmJsUtils.h" />
     <ClInclude Include="CacheOperators.h" />
+    <ClInclude Include="ConstructorCache.h" />
     <ClInclude Include="i386\AsmJsInstructionTemplate.h">
       <ExcludedFromBuild Condition="'$(Platform)'!='Win32'">true</ExcludedFromBuild>
     </ClInclude>
@@ -211,7 +216,6 @@
     <ClInclude Include="EvalMapRecord.h" />
     <ClInclude Include="ExecutionMode.h" />
     <ClInclude Include="ExecutionModes.h" />
-    <ClInclude Include="FunctionCodeGenJitTimeData.h" />
     <ClInclude Include="FunctionCodeGenRuntimeData.h" />
     <ClInclude Include="i386\StackFrame.h">
       <ExcludedFromBuild Condition="'$(Platform)'!='Win32'">true</ExcludedFromBuild>
@@ -220,11 +224,10 @@
     <ClInclude Include="InlineCachePointerArray.h" />
     <ClInclude Include="JavascriptExceptionOperators.h" />
     <ClInclude Include="JavascriptMathOperators.h" />
-    <ClInclude Include="JavascriptNativeOperators.h" />
-    <ClInclude Include="ObjTypeSpecFldInfo.h" />
     <ClInclude Include="ModuleNamespace.h" />
     <ClInclude Include="ModuleNamespaceEnumerator.h" />
     <ClInclude Include="ProfilingHelpers.h" />
+    <ClInclude Include="PrototypeChainCache.h" />
     <ClInclude Include="SourceDynamicProfileManager.h" />
     <ClInclude Include="ModuleRecordBase.h" />
     <ClInclude Include="SourceTextModuleRecord.h" />
@@ -240,6 +243,7 @@
     <ClInclude Include="JavascriptStackWalker.h" />
     <ClInclude Include="SimdFloat32x4Operation.h" />
     <ClInclude Include="SimdFloat64x2Operation.h" />
+    <ClInclude Include="SimdInt64x2Operation.h" />
     <ClInclude Include="SimdInt32x4Operation.h" />
     <ClInclude Include="SimdInt16x8Operation.h" />
     <ClInclude Include="SimdInt8x16Operation.h" />
@@ -254,8 +258,12 @@
     <ClInclude Include="TaggedInt.h" />
     <ClInclude Include="RuntimeLanguagePch.h" />
     <ClInclude Include="WAsmjsUtils.h" />
+    <ClInclude Include="WebAssemblySource.h" />
   </ItemGroup>
   <ItemGroup>
+    <MASM Include="$(MSBuildThisFileDirectory)amd64\JavascriptConversionA.asm">
+      <ExcludedFromBuild Condition="'$(Platform)'!='x64'">true</ExcludedFromBuild>
+    </MASM>
     <MASM Include="$(MSBuildThisFileDirectory)amd64\JavascriptOperatorsA.asm">
       <ExcludedFromBuild Condition="'$(Platform)'!='x64'">true</ExcludedFromBuild>
     </MASM>

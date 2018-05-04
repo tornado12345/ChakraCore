@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <regress-exe>
   <test>
     <default>
@@ -10,7 +10,6 @@
   <test>
     <default>
       <files>cachedscope_2.js</files>
-      <tags>BugFix</tags>
     </default>
   </test>
   <test>
@@ -57,7 +56,6 @@
     <default>
       <files>closure-funcexpr-eval.js</files>
       <baseline>closure-funcexpr-eval-3.baseline</baseline>
-      <tags>fail_mutators</tags>
     </default>
   </test>
   <test>
@@ -82,14 +80,14 @@
     <default>
       <files>delaycapture-loopbody.js</files>
       <compile-flags>-lic:1 -off:simplejit -bgjit- -off:stackfunc -InitializeInterpreterSlotsWithInvalidStackVar</compile-flags>
-      <tags>exclude_fre</tags>
+      <tags>exclude_test</tags>
     </default>
   </test>
   <test>
     <default>
       <files>delaycapture-loopbody2.js</files>
       <compile-flags>-lic:1 -bgjit- -InitializeInterpreterSlotsWithInvalidStackVar</compile-flags>
-      <tags>exclude_fre</tags>
+      <tags>exclude_test</tags>
     </default>
   </test>
   <test>
@@ -97,7 +95,7 @@
       <files>initcachedscope.js</files>
       <compile-flags>-recyclerstress -force:cachedscope</compile-flags>
       <baseline>initcachedscope.baseline</baseline>
-      <tags>exclude_fre,Slow</tags>
+      <tags>exclude_test,Slow</tags>
     </default>
   </test>
   <test>
@@ -126,7 +124,13 @@
       <files>invalcachedscope.js</files>
       <compile-flags>-force:deferparse -Intl-</compile-flags>
       <baseline>invalcachedscope.baseline</baseline>
-      <tags>exclude_fre</tags>
+      <tags>exclude_test</tags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>invalcachedscope-caller.js</files>
+      <baseline>invalcachedscope-caller.baseline</baseline>
     </default>
   </test>
   <test>
@@ -134,21 +138,52 @@
       <files>bug_OS_2299723.js</files>
       <baseline>bug_OS_2299723.baseline</baseline>
       <compile-flags>-force:cachedscope</compile-flags>
-      <tags>BugFix</tags>
     </default>
   </test>
   <test>
     <default>
       <files>bug_OS_2671095.js</files>
       <compile-flags>-forcedeferparse -force:cachedscope</compile-flags>
-      <tags>BugFix</tags>
     </default>
   </test>
   <test>
     <default>
       <files>bug_OS_2903083.js</files>
       <compile-flags>-force:cachedscope</compile-flags>
-      <tags>BugFix</tags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>bug_OS_9781249.js</files>
+      <compile-flags>-forcejitloopbody -force:inline -force:rejit</compile-flags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>bug_OS_9008744.js</files>
+      <tags>exclude_dynapogo</tags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>bug_OS_10735999.js</files>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>copy-prop-stack-slot.js</files>
+      <baseline>copy-prop-stack-slot.baseline</baseline>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>bug_OS_13412380.js</files>
+      <tags>exclude_dynapogo</tags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>update-funcexpr.js</files>
     </default>
   </test>
 </regress-exe>

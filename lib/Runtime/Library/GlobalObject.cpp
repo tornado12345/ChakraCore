@@ -26,7 +26,9 @@ namespace Js
         GlobalObject* globalObject = RecyclerNewPlus(scriptContext->GetRecycler(),
             sizeof(Var) * InlineSlotCapacity, GlobalObject, globalType, scriptContext);
 
+#if ENABLE_FIXED_FIELDS
         globalTypeHandler->SetSingletonInstanceIfNeeded(scriptContext->GetRecycler()->CreateWeakReferenceHandle<DynamicObject>(globalObject));
+#endif
 
         return globalObject;
     }
@@ -43,7 +45,8 @@ namespace Js
     void GlobalObject::Initialize(ScriptContext * scriptContext)
     {
         Assert(type->javascriptLibrary == nullptr);
-        JavascriptLibrary* localLibrary = RecyclerNewFinalized(scriptContext->GetRecycler(), JavascriptLibrary, this);
+        Recycler * recycler = scriptContext->GetRecycler();
+        JavascriptLibrary* localLibrary = RecyclerNewFinalized(recycler, JavascriptLibrary, this, recycler);
         scriptContext->SetLibrary(localLibrary);
         type->javascriptLibrary = localLibrary;
         scriptContext->InitializeCache();
@@ -53,10 +56,16 @@ namespace Js
 
     bool GlobalObject::Is(Var aValue)
     {
-        return RecyclableObject::Is(aValue) && (RecyclableObject::FromVar(aValue)->GetTypeId() == TypeIds_GlobalObject);
+        return RecyclableObject::Is(aValue) && (RecyclableObject::UnsafeFromVar(aValue)->GetTypeId() == TypeIds_GlobalObject);
     }
 
     GlobalObject* GlobalObject::FromVar(Var aValue)
+    {
+        AssertOrFailFastMsg(Is(aValue), "Ensure var is actually a 'GlobalObject'");
+        return static_cast<GlobalObject*>(aValue);
+    }
+
+    GlobalObject* GlobalObject::UnsafeFromVar(Var aValue)
     {
         AssertMsg(Is(aValue), "Ensure var is actually a 'GlobalObject'");
         return static_cast<GlobalObject*>(aValue);
@@ -117,7 +126,7 @@ namespace Js
 
     BOOL GlobalObject::ReserveGlobalProperty(PropertyId propertyId)
     {
-        if (DynamicObject::HasProperty(propertyId))
+        if (JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::HasPropertyQuery(propertyId, nullptr /*info*/)))
         {
             return false;
         }
@@ -485,7 +494,7 @@ namespace Js
     }
 
 #endif /* IR_VIEWER */
-    Var GlobalObject::EntryEvalHelper(ScriptContext* scriptContext, RecyclableObject* function, CallInfo callInfo, Js::Arguments& args)
+    Var GlobalObject::EntryEvalHelper(ScriptContext* scriptContext, RecyclableObject* function, Js::Arguments& args)
     {
         FrameDisplay* environment = (FrameDisplay*)&NullFrameDisplay;
         ModuleID moduleID = kmodGlobal;
@@ -493,31 +502,16 @@ namespace Js
         // TODO: Handle call from global scope, strict mode
         BOOL isIndirect = FALSE;
 
-        if (args.Info.Flags & CallFlags_ExtraArg)
+        if (args.IsDirectEvalCall())
         {
             // This was recognized as an eval call at compile time. The last one or two args are internal to us.
             // Argcount will be one of the following when called from global code
             //  - eval("...")     : argcount 3 : this, evalString, frameDisplay
             //  - eval.call("..."): argcount 2 : this(which is string) , frameDisplay
-            if (args.Info.Count >= 2)
+            if (args.Info.Count >= 1)
             {
-                environment = (FrameDisplay*)(args[args.Info.Count - 1]);
-
-                // Check for a module root passed from the caller. If it's there, use its module ID to compile the eval.
-                // when called inside a module root, module root would be added before the frame display in above scenarios
-
-                // ModuleRoot is optional
-                //  - eval("...")     : argcount 3/4 : this, evalString , [module root], frameDisplay
-                //  - eval.call("..."): argcount 2/3 : this(which is string) , [module root], frameDisplay
-
+                environment = args.GetFrameDisplay();
                 strictMode = environment->GetStrictMode();
-
-                if (args.Info.Count >= 3 && JavascriptOperators::GetTypeId(args[args.Info.Count - 2]) == TypeIds_ModuleRoot)
-                {
-                    moduleID = ((Js::ModuleRoot*)(RecyclableObject::FromVar(args[args.Info.Count - 2])))->GetModuleID();
-                    args.Info.Count--;
-                }
-                args.Info.Count--;
             }
         }
         else
@@ -545,7 +539,7 @@ namespace Js
 
         scriptContext->CheckEvalRestriction();
 
-        return EntryEvalHelper(scriptContext, function, callInfo, args);
+        return EntryEvalHelper(scriptContext, function, args);
     }
 
     // This function is used to decipher eval function parameters and we don't want the stack arguments optimization by C++ compiler so turning off the optimization
@@ -559,11 +553,11 @@ namespace Js
         JavascriptLibrary* library = function->GetLibrary();
         ScriptContext* scriptContext = library->GetScriptContext();
 
-        return EntryEvalHelper(scriptContext, function, callInfo, args);
+        return EntryEvalHelper(scriptContext, function, args);
     }
 
     Var GlobalObject::VEval(JavascriptLibrary* library, FrameDisplay* environment, ModuleID moduleID, bool strictMode, bool isIndirect,
-        Arguments& args, bool isLibraryCode, bool registerDocument, uint32 additionalGrfscr)
+        Arguments& args, bool isLibraryCode, bool registerDocument, uint32 additionalGrfscr, ScriptContext* debugEvalScriptContext)
     {
         Assert(library);
         ScriptContext* scriptContext = library->GetScriptContext();
@@ -587,16 +581,25 @@ namespace Js
             return evalArg;
         }
 
+#ifdef ENABLE_SCRIPT_DEBUGGING
         // It might happen that no script parsed on this context (scriptContext) till now,
         // so this Eval acts as the first source compile for scriptContext, transition to debugMode as needed
         scriptContext->TransitionToDebugModeIfFirstSource(/* utf8SourceInfo = */ nullptr);
+#endif
 
+        ScriptFunction *pfuncScript = nullptr;
         JavascriptString *argString = JavascriptString::FromVar(evalArg);
-        ScriptFunction *pfuncScript;
         char16 const * sourceString = argString->GetSz();
         charcount_t sourceLen = argString->GetLength();
         FastEvalMapString key(sourceString, sourceLen, moduleID, strictMode, isLibraryCode);
-        if (!scriptContext->IsInEvalMap(key, isIndirect, &pfuncScript))
+
+
+
+        // PropertyString's buffer references to PropertyRecord's inline buffer, if both PropertyString and PropertyRecord are collected
+        // we'll leave the PropertyRecord's interior buffer pointer in the EvalMap. So do not use evalmap if we are evaluating PropertyString
+        bool useEvalMap = !VirtualTableInfo<PropertyString>::HasVirtualTable(argString) && debugEvalScriptContext == nullptr; // Don't use the cache in case of debugEval
+        bool found = useEvalMap && scriptContext->IsInEvalMap(key, isIndirect, &pfuncScript);
+        if (!found || (!isIndirect && pfuncScript->GetEnvironment() != &NullFrameDisplay))
         {
             uint32 grfscr = additionalGrfscr | fscrReturnExpression | fscrEval | fscrEvalCode | fscrGlobalCode;
 
@@ -607,19 +610,20 @@ namespace Js
 
             pfuncScript = library->GetGlobalObject()->EvalHelper(scriptContext, argString->GetSz(), argString->GetLength(), moduleID,
                 grfscr, Constants::EvalCode, doRegisterDocument, isIndirect, strictMode);
-            Assert(!pfuncScript->GetFunctionInfo()->IsGenerator());
 
-#ifdef ENABLE_DEBUG_CONFIG_OPTIONS
-            Js::Utf8SourceInfo* utf8SourceInfo = pfuncScript->GetFunctionBody()->GetUtf8SourceInfo();
-            if (scriptContext->IsScriptContextInDebugMode() && !utf8SourceInfo->GetIsLibraryCode() && !utf8SourceInfo->IsInDebugMode())
+            if (debugEvalScriptContext != nullptr && CrossSite::NeedMarshalVar(pfuncScript, debugEvalScriptContext))
             {
-                // Identifying if any non library function escaped for not being in debug mode.
-                Throw::FatalInternalError();
+                // This is console scope scenario. DebugEval script context is on the top of the stack. But we are going
+                // to execute the user script from target script context. In order to fix the script context stack we
+                // need to marshall the function object.
+                pfuncScript = ScriptFunction::FromVar(CrossSite::MarshalVar(debugEvalScriptContext, pfuncScript));
             }
-#endif
-            scriptContext->AddToEvalMap(key, isIndirect, pfuncScript);
-        }
 
+            if (useEvalMap && !found)
+            {
+                scriptContext->AddToEvalMap(key, isIndirect, pfuncScript);
+            }
+        }
 #ifdef ENABLE_DEBUG_CONFIG_OPTIONS
         else
         {
@@ -636,13 +640,13 @@ namespace Js
         //
         //TODO: We may (probably?) want to use the debugger source rundown functionality here instead
         //
-        if(!isLibraryCode && (scriptContext->IsTTDRecordModeEnabled() || scriptContext->ShouldPerformReplayAction()))
+        if(!isLibraryCode && pfuncScript != nullptr && (scriptContext->IsTTDRecordModeEnabled() || scriptContext->ShouldPerformReplayAction()))
         {
             //Make sure we have the body and text information available
             FunctionBody* globalBody = TTD::JsSupport::ForceAndGetFunctionBody(pfuncScript->GetParseableFunctionInfo());
             if(!scriptContext->TTDContextInfo->IsBodyAlreadyLoadedAtTopLevel(globalBody))
             {
-                uint64 bodyIdCtr = 0;
+                uint32 bodyIdCtr = 0;
 
                 if(scriptContext->IsTTDRecordModeEnabled())
                 {
@@ -665,6 +669,16 @@ namespace Js
                 //walk global body to (1) add functions to pin set (2) build parent map
                 scriptContext->TTDContextInfo->ProcessFunctionBodyOnLoad(globalBody, nullptr);
                 scriptContext->TTDContextInfo->RegisterEvalScript(globalBody, bodyIdCtr);
+
+                if(scriptContext->ShouldPerformRecordOrReplayAction())
+                {
+                    globalBody->GetUtf8SourceInfo()->SetSourceInfoForDebugReplay_TTD(bodyIdCtr);
+                }
+
+                if(scriptContext->ShouldPerformReplayDebuggerAction())
+                {
+                    scriptContext->GetThreadContext()->TTDExecutionInfo->ProcessScriptLoad(scriptContext, bodyIdCtr, globalBody, globalBody->GetUtf8SourceInfo(), nullptr);
+                }
             }
         }
 #endif
@@ -679,18 +693,23 @@ namespace Js
             // The eval expression refers to "this"
             if (args.Info.Flags & CallFlags_ExtraArg)
             {
-                JavascriptFunction* pfuncCaller;
-                JavascriptStackWalker::GetCaller(&pfuncCaller, scriptContext);
+                JavascriptFunction* pfuncCaller = nullptr;
                 // If we are non-hidden call to eval then look for the "this" object in the frame display if the caller is a lambda else get "this" from the caller's frame.
 
+                bool successful = false;
+                if (JavascriptStackWalker::GetCaller(&pfuncCaller, scriptContext))
+                {
                 FunctionInfo* functionInfo = pfuncCaller->GetFunctionInfo();
                 if (functionInfo != nullptr && (functionInfo->IsLambda() || functionInfo->IsClassConstructor()))
                 {
                     Var defaultInstance = (moduleID == kmodGlobal) ? JavascriptOperators::OP_LdRoot(scriptContext)->ToThis() : (Var)JavascriptOperators::GetModuleRoot(moduleID, scriptContext);
                     varThis = JavascriptOperators::OP_GetThisScoped(environment, defaultInstance, scriptContext);
                     UpdateThisForEval(varThis, moduleID, scriptContext, strictMode);
+                        successful = true;
                 }
-                else
+                }
+
+                if (!successful)
                 {
                     JavascriptStackWalker::GetThis(&varThis, moduleID, scriptContext);
                     UpdateThisForEval(varThis, moduleID, scriptContext, strictMode);
@@ -713,7 +732,7 @@ namespace Js
             }
         }
 
-        return library->GetGlobalObject()->ExecuteEvalParsedFunction(pfuncScript, environment, varThis);
+        return library->GetGlobalObject()->ExecuteEvalParsedFunction(pfuncScript, environment, varThis, scriptContext);
     }
 
     void GlobalObject::UpdateThisForEval(Var &varThis, ModuleID moduleID, ScriptContext *scriptContext, BOOL strictMode)
@@ -729,7 +748,7 @@ namespace Js
     }
 
 
-    Var GlobalObject::ExecuteEvalParsedFunction(ScriptFunction *pfuncScript, FrameDisplay* environment, Var &varThis)
+    Var GlobalObject::ExecuteEvalParsedFunction(ScriptFunction *pfuncScript, FrameDisplay* environment, Var &varThis, ScriptContext *scriptContext)
     {
         Assert(pfuncScript != nullptr);
 
@@ -741,8 +760,8 @@ namespace Js
             // Executing the eval causes the scope chain to escape.
             pfuncScript->InvalidateCachedScopeChain();
         }
-        Var varResult = CALL_FUNCTION(pfuncScript, CallInfo(CallFlags_Eval, 1), varThis);
-        pfuncScript->SetEnvironment(nullptr);
+        Var varResult = CALL_FUNCTION(scriptContext->GetThreadContext(), pfuncScript, CallInfo(CallFlags_Eval, 1), varThis);
+        pfuncScript->SetEnvironment((FrameDisplay*)&NullFrameDisplay);
         return varResult;
     }
 
@@ -787,7 +806,7 @@ namespace Js
             ArenaAllocator tempAlloc(_u("ValidateSyntaxArena"), scriptContext->GetThreadContext()->GetPageAllocator(), Throw::OutOfMemory);
 
             size_t cchSource = sourceLength;
-            size_t cbUtf8Buffer = (cchSource + 1) * 3;
+            size_t cbUtf8Buffer = UInt32Math::AddMul<1, 3>(sourceLength);
             LPUTF8 utf8Source = AnewArray(&tempAlloc, utf8char_t, cbUtf8Buffer);
             Assert(cchSource < MAXLONG);
             size_t cbSource = utf8::EncodeIntoAndNullTerminate(utf8Source, source, static_cast< charcount_t >(cchSource));
@@ -859,7 +878,7 @@ namespace Js
         BEGIN_TRANSLATE_EXCEPTION_TO_HRESULT
         {
             uint cchSource = sourceLength;
-            size_t cbUtf8Buffer = (cchSource + 1) * 3;
+            size_t cbUtf8Buffer = UInt32Math::AddMul<1, 3>(cchSource);
 
             ArenaAllocator tempArena(_u("EvalHelperArena"), scriptContext->GetThreadContext()->GetPageAllocator(), Js::Throw::OutOfMemory);
             LPUTF8 utf8Source = AnewArray(&tempArena, utf8char_t, cbUtf8Buffer);
@@ -874,12 +893,12 @@ namespace Js
             // So we need to pin it here (TODO: Change GenerateByteCode to take in the sourceInfo itself)
             ENTER_PINNED_SCOPE(Utf8SourceInfo, sourceInfo);
             sourceInfo = Utf8SourceInfo::New(scriptContext, utf8Source, cchSource,
-              cbSource, pSrcInfo, ((grfscr & fscrIsLibraryCode) != 0), nullptr);
+              cbSource, pSrcInfo, ((grfscr & fscrIsLibraryCode) != 0));
 
             Parser parser(scriptContext, strictMode);
             bool forceNoNative = false;
 
-            ParseNodePtr parseTree;
+            ParseNodeProg * parseTree = nullptr;
 
             SourceContextInfo * sourceContextInfo = pSrcInfo->sourceContextInfo;
             ULONG deferParseThreshold = Parser::GetDeferralThreshold(sourceContextInfo->IsSourceProfileLoaded());
@@ -908,7 +927,7 @@ namespace Js
                 // TODO: Handle strict mode.
                 if (isIndirect &&
                     !strictMode &&
-                    !parseTree->sxFnc.GetStrictMode())
+                    !parseTree->GetStrictMode())
                 {
                     grfscr &= ~fscrEval;
                 }
@@ -925,22 +944,7 @@ namespace Js
 #ifdef PROFILE_EXEC
         scriptContext->ProfileEnd(Js::EvalCompilePhase);
 #endif
-        if (hr == E_OUTOFMEMORY)
-        {
-            JavascriptError::ThrowOutOfMemoryError(scriptContext);
-        }
-        else if(hr == VBSERR_OutOfStack)
-        {
-            JavascriptError::ThrowStackOverflowError(scriptContext);
-        }
-        else if(hr == E_ABORT)
-        {
-            throw Js::ScriptAbortException();
-        }
-        else if(FAILED(hr))
-        {
-            throw Js::InternalErrorException();
-        }
+        THROW_KNOWN_HRESULT_EXCEPTIONS(hr, scriptContext);
 
         if (!SUCCEEDED(hrParser))
         {
@@ -959,17 +963,16 @@ namespace Js
             {
                 JavascriptError::ThrowStackOverflowError(scriptContext);
             }
+            else if (hrCodeGen == JSERR_AsmJsCompileError)
+            {
+                // if asm.js compilation succeeded, retry with asm.js disabled
+                grfscr |= fscrNoAsmJs;
+                return DefaultEvalHelper(scriptContext, source, sourceLength, moduleID, grfscr, pszTitle, registerDocument, isIndirect, strictMode);
+            }
             JavascriptError::MapAndThrowError(scriptContext, hrCodeGen);
         }
         else
         {
-            if (se.ei.scode == JSERR_AsmJsCompileError)
-            {
-                // if asm.js compilation succeeded, retry with asm.js disabled
-                grfscr |= fscrNoAsmJs;
-                se.Clear();
-                return DefaultEvalHelper(scriptContext, source, sourceLength, moduleID, grfscr, pszTitle, registerDocument, isIndirect, strictMode);
-            }
 
             Assert(funcBody != nullptr);
             funcBody->SetDisplayName(pszTitle);
@@ -981,7 +984,7 @@ namespace Js
             if ((grfscr & fscrIsLibraryCode) == 0)
             {
                 // For parented eval get the caller's utf8SourceInfo
-                JavascriptFunction* pfuncCaller;
+                JavascriptFunction* pfuncCaller = nullptr;
                 if (JavascriptStackWalker::GetCaller(&pfuncCaller, scriptContext) && pfuncCaller && pfuncCaller->IsScriptFunction())
                 {
                     FunctionBody* parentFuncBody = pfuncCaller->GetFunctionBody();
@@ -1035,7 +1038,7 @@ namespace Js
         BEGIN_TRANSLATE_EXCEPTION_TO_HRESULT
         {
             size_t cchSource = sourceLength;
-            size_t cbUtf8Buffer = (cchSource + 1) * 3;
+            size_t cbUtf8Buffer = UInt32Math::AddMul<1, 3>(sourceLength);
 
             ArenaAllocator tempArena(_u("EvalHelperArena"), scriptContext->GetThreadContext()->GetPageAllocator(), Js::Throw::OutOfMemory);
             LPUTF8 utf8Source = AnewArray(&tempArena, utf8char_t, cbUtf8Buffer);
@@ -1054,7 +1057,7 @@ namespace Js
             Parser parser(scriptContext, strictMode);
             bool forceNoNative = false;
 
-            ParseNodePtr parseTree;
+            ParseNodePtr parseTree = nullptr;
 
             SourceContextInfo * sourceContextInfo = pSrcInfo->sourceContextInfo;
 
@@ -1087,22 +1090,7 @@ namespace Js
 #ifdef PROFILE_EXEC
         scriptContext->ProfileEnd(Js::EvalCompilePhase);
 #endif
-        if (hr == E_OUTOFMEMORY)
-        {
-            JavascriptError::ThrowOutOfMemoryError(scriptContext);
-        }
-        else if(hr == VBSERR_OutOfStack)
-        {
-            JavascriptError::ThrowStackOverflowError(scriptContext);
-        }
-        else if(hr == E_ABORT)
-        {
-            throw Js::ScriptAbortException();
-        }
-        else if(FAILED(hr))
-        {
-            throw Js::InternalErrorException();
-        }
+        THROW_KNOWN_HRESULT_EXCEPTIONS(hr);
 
         if (!SUCCEEDED(hrParser))
         {
@@ -1254,7 +1242,8 @@ namespace Js
 
         AssertMsg(args.Info.Count > 0, "Should always have implicit 'this'");
 
-        JavascriptString *str;
+        double result = 0;
+        ENTER_PINNED_SCOPE(JavascriptString, str);
 
         if(args.Info.Count < 2)
         {
@@ -1292,7 +1281,8 @@ namespace Js
         const char16 *pch = scriptContext->GetCharClassifier()->SkipWhiteSpace(str->GetSz());
 
         // perform the string -> float conversion
-        double result = NumberUtilities::StrToDbl(pch, &pch, scriptContext);
+        result = NumberUtilities::StrToDbl(pch, &pch, scriptContext);
+        LEAVE_PINNED_SCOPE();   // str
 
         return JavascriptNumber::ToVarNoCheck(result, scriptContext);
     }
@@ -1428,9 +1418,11 @@ namespace Js
             return scriptContext->GetLibrary()->GetUndefinedDisplayString();
         }
 
-        JavascriptString *src = JavascriptConversion::ToString(args[1], scriptContext);
+        CompoundString * bs = nullptr;
+        ENTER_PINNED_SCOPE(JavascriptString, src);
+        src = JavascriptConversion::ToString(args[1], scriptContext);
+        bs = CompoundString::NewWithCharCapacity(src->GetLength(), scriptContext->GetLibrary());
 
-        CompoundString *const bs = CompoundString::NewWithCharCapacity(src->GetLength(), scriptContext->GetLibrary());
         char16 chw;
         char16 * pchSrc;
         char16 * pchLim;
@@ -1463,6 +1455,7 @@ namespace Js
                 bs->AppendChars(chw);
             }
         }
+        LEAVE_PINNED_SCOPE();   // src
 
         return bs;
     }
@@ -1490,10 +1483,10 @@ namespace Js
         char16 * pchLim;
         char16 * pchMin;
 
-        JavascriptString *src = JavascriptConversion::ToString(args[1], scriptContext);
-
-        CompoundString *const bs = CompoundString::NewWithCharCapacity(src->GetLength(), scriptContext->GetLibrary());
-
+        CompoundString * bs = nullptr;
+        ENTER_PINNED_SCOPE(JavascriptString, src);
+        src = JavascriptConversion::ToString(args[1], scriptContext);
+        bs = CompoundString::NewWithCharCapacity(src->GetLength(), scriptContext->GetLibrary());
         pchSrc = const_cast<char16 *>(src->GetString());
         pchLim = pchSrc + src->GetLength();
         while (pchSrc < pchLim)
@@ -1546,6 +1539,8 @@ LHexError:
 
             bs->AppendChars(chw);
         }
+
+        LEAVE_PINNED_SCOPE();   // src
 
         return bs;
     }
@@ -1624,6 +1619,22 @@ LHexError:
         return scriptContext->GetLibrary()->GetUndefined();
     }
 
+#ifdef ENABLE_DEBUG_CONFIG_OPTIONS
+    Var GlobalObject::EntryChWriteTraceEvent(RecyclableObject *function, CallInfo callInfo, ...)
+    {
+        PROBE_STACK(function->GetScriptContext(), Js::Constants::MinStackDefault);
+        ARGUMENTS(args, callInfo);
+
+        if (args.Info.Count < 2)
+        {
+            return function->GetScriptContext()->GetLibrary()->GetUndefined();
+        }
+
+        JS_ETW(EventWriteJSCRIPT_INTERNAL_GENERIC_EVENT(Js::JavascriptConversion::ToString(args[1], function->GetScriptContext())->GetSz()));
+        return function->GetScriptContext()->GetLibrary()->GetUndefined();
+    }
+#endif
+
 #if ENABLE_TTD
     //Log a string in the telemetry system (and print to the console)
     Var GlobalObject::EntryTelemetryLog(RecyclableObject* function, CallInfo callInfo, ...)
@@ -1631,7 +1642,7 @@ LHexError:
         PROBE_STACK(function->GetScriptContext(), Js::Constants::MinStackDefault);
         ARGUMENTS(args, callInfo);
 
-        AssertMsg(args.Info.Count >= 2 && Js::JavascriptString::Is(args[1]), "Bad arguments!!!");
+        TTDAssert(args.Info.Count >= 2 && Js::JavascriptString::Is(args[1]), "Bad arguments!!!");
 
         Js::JavascriptString* jsString = Js::JavascriptString::FromVar(args[1]);
         bool doPrint = (args.Info.Count == 3) && Js::JavascriptBoolean::Is(args[2]) && (Js::JavascriptBoolean::FromVar(args[2])->GetValue());
@@ -1651,11 +1662,58 @@ LHexError:
             //
             //TODO: the host should give us a print callback which we can use here
             //
-            wprintf(_u("%ls\n"), jsString->GetSz());
+            Output::Print(_u("%ls\n"), jsString->GetSz());
             fflush(stdout);
         }
 
         return function->GetScriptContext()->GetLibrary()->GetUndefined();
+    }
+
+    //Check if diagnostic trace writing is enabled
+    Var GlobalObject::EntryEnabledDiagnosticsTrace(RecyclableObject* function, CallInfo callInfo, ...)
+    {
+        PROBE_STACK(function->GetScriptContext(), Js::Constants::MinStackDefault);
+        ARGUMENTS(args, callInfo);
+
+        if(function->GetScriptContext()->ShouldPerformRecordOrReplayAction() && !function->GetScriptContext()->GetThreadContext()->TTDLog->SuppressDiagnosticTracesDuringInnerLoop())
+        {
+            return function->GetScriptContext()->GetLibrary()->GetTrue();
+        }
+        else
+        {
+            return function->GetScriptContext()->GetLibrary()->GetFalse();
+        }
+    }
+
+    //Write a copy of the current TTD log to a specified location
+    Var GlobalObject::EntryEmitTTDLog(RecyclableObject* function, CallInfo callInfo, ...)
+    {
+        PROBE_STACK(function->GetScriptContext(), Js::Constants::MinStackDefault);
+        ARGUMENTS(args, callInfo);
+
+        Js::JavascriptLibrary* jslib = function->GetScriptContext()->GetLibrary();
+
+        if(args.Info.Count != 2 || !Js::JavascriptString::Is(args[1]))
+        {
+            return jslib->GetFalse();
+        }
+
+        if(function->GetScriptContext()->ShouldPerformReplayAction())
+        {
+            function->GetScriptContext()->GetThreadContext()->TTDLog->ReplayEmitLogEvent();
+
+            return jslib->GetTrue();
+        }
+
+        if(function->GetScriptContext()->ShouldPerformRecordAction())
+        {
+            Js::JavascriptString* jsString = Js::JavascriptString::FromVar(args[1]);
+            function->GetScriptContext()->GetThreadContext()->TTDLog->RecordEmitLogEvent(jsString);
+
+            return jslib->GetTrue();
+        }
+
+        return jslib->GetFalse();
     }
 #endif
 
@@ -1723,11 +1781,11 @@ LHexError:
         return FALSE;
     }
 
-    BOOL GlobalObject::HasProperty(PropertyId propertyId)
+    PropertyQueryFlags GlobalObject::HasPropertyQuery(PropertyId propertyId, _Inout_opt_ PropertyValueInfo* info)
     {
-        return DynamicObject::HasProperty(propertyId) ||
+        return JavascriptConversion::BooleanToPropertyQueryFlags(JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::HasPropertyQuery(propertyId, info)) ||
             (this->directHostObject && JavascriptOperators::HasProperty(this->directHostObject, propertyId)) ||
-            (this->hostObject && JavascriptOperators::HasProperty(this->hostObject, propertyId));
+            (this->hostObject && JavascriptOperators::HasProperty(this->hostObject, propertyId)));
     }
 
     BOOL GlobalObject::HasRootProperty(PropertyId propertyId)
@@ -1739,30 +1797,30 @@ LHexError:
 
     BOOL GlobalObject::HasOwnProperty(PropertyId propertyId)
     {
-        return DynamicObject::HasProperty(propertyId) ||
+        return JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::HasPropertyQuery(propertyId, nullptr /*info*/)) ||
             (this->directHostObject && this->directHostObject->HasProperty(propertyId));
     }
 
     BOOL GlobalObject::HasOwnPropertyNoHostObject(PropertyId propertyId)
     {
-        return DynamicObject::HasProperty(propertyId);
+        return JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::HasPropertyQuery(propertyId, nullptr /*info*/));
     }
 
-    BOOL GlobalObject::GetProperty(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
+    PropertyQueryFlags GlobalObject::GetPropertyQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
     {
-        if (DynamicObject::GetProperty(originalInstance, propertyId, value, info, requestContext))
+        if (JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::GetPropertyQuery(originalInstance, propertyId, value, info, requestContext)))
         {
-            return TRUE;
+            return PropertyQueryFlags::Property_Found;
         }
-        return (this->directHostObject && JavascriptOperators::GetProperty(this->directHostObject, propertyId, value, requestContext, info)) ||
-            (this->hostObject && JavascriptOperators::GetProperty(this->hostObject, propertyId, value, requestContext, info));
+        return JavascriptConversion::BooleanToPropertyQueryFlags((this->directHostObject && JavascriptOperators::GetProperty(this->directHostObject, propertyId, value, requestContext, info)) ||
+            (this->hostObject && JavascriptOperators::GetProperty(this->hostObject, propertyId, value, requestContext, info)));
     }
 
-    BOOL GlobalObject::GetProperty(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
+    PropertyQueryFlags GlobalObject::GetPropertyQuery(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
     {
         PropertyRecord const* propertyRecord;
-        this->GetScriptContext()->GetOrAddPropertyRecord(propertyNameString->GetString(), propertyNameString->GetLength(), &propertyRecord);
-        return GlobalObject::GetProperty(originalInstance, propertyRecord->GetPropertyId(), value, info, requestContext);
+        this->GetScriptContext()->GetOrAddPropertyRecord(propertyNameString, &propertyRecord);
+        return GlobalObject::GetPropertyQuery(originalInstance, propertyRecord->GetPropertyId(), value, info, requestContext);
     }
 
     BOOL GlobalObject::GetRootProperty(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
@@ -1792,15 +1850,15 @@ LHexError:
         return FALSE;
     }
 
-    BOOL GlobalObject::GetPropertyReference(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info,
+    PropertyQueryFlags GlobalObject::GetPropertyReferenceQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info,
         ScriptContext* requestContext)
     {
-        if (DynamicObject::GetPropertyReference(originalInstance, propertyId, value, info, requestContext))
+        if (JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::GetPropertyReferenceQuery(originalInstance, propertyId, value, info, requestContext)))
         {
-            return true;
+            return PropertyQueryFlags::Property_Found;
         }
-        return (this->directHostObject && JavascriptOperators::GetPropertyReference(this->directHostObject, propertyId, value, requestContext, info)) ||
-            (this->hostObject && JavascriptOperators::GetPropertyReference(this->hostObject, propertyId, value, requestContext, info));
+        return JavascriptConversion::BooleanToPropertyQueryFlags((this->directHostObject && JavascriptOperators::GetPropertyReference(this->directHostObject, propertyId, value, requestContext, info)) ||
+            (this->hostObject && JavascriptOperators::GetPropertyReference(this->hostObject, propertyId, value, requestContext, info)));
     }
 
     BOOL GlobalObject::GetRootPropertyReference(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info,
@@ -1821,6 +1879,14 @@ LHexError:
         // In ES5 they are enumerable.
 
         PropertyAttributes attributes = PropertyWritable | PropertyEnumerable | PropertyDeclaredGlobal;
+        flags = static_cast<PropertyOperationFlags>(flags | PropertyOperation_ThrowIfNotExtensible);
+        return DynamicObject::SetPropertyWithAttributes(propertyId, value, attributes, info, flags);
+    }
+
+    BOOL GlobalObject::InitPropertyInEval(PropertyId propertyId, Var value, PropertyOperationFlags flags, PropertyValueInfo* info)
+    {
+        // This is var/function declared inside the 'eval'
+        PropertyAttributes attributes = PropertyDynamicTypeDefaults | PropertyDeclaredGlobal;
         flags = static_cast<PropertyOperationFlags>(flags | PropertyOperation_ThrowIfNotExtensible);
         return DynamicObject::SetPropertyWithAttributes(propertyId, value, attributes, info, flags);
     }
@@ -1857,7 +1923,7 @@ LHexError:
 
     BOOL GlobalObject::SetExistingProperty(PropertyId propertyId, Var value, PropertyValueInfo* info, BOOL *setAttempted)
     {
-        BOOL hasOwnProperty = DynamicObject::HasProperty(propertyId);
+        BOOL hasOwnProperty = JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::HasPropertyQuery(propertyId, nullptr /*info*/));
         BOOL hasProperty = JavascriptOperators::HasProperty(this->GetPrototype(), propertyId);
         *setAttempted = TRUE;
 
@@ -1973,7 +2039,7 @@ LHexError:
     BOOL GlobalObject::SetProperty(JavascriptString* propertyNameString, Var value, PropertyOperationFlags flags, PropertyValueInfo* info)
     {
         PropertyRecord const * propertyRecord;
-        this->GetScriptContext()->GetOrAddPropertyRecord(propertyNameString->GetString(), propertyNameString->GetLength(), &propertyRecord);
+        this->GetScriptContext()->GetOrAddPropertyRecord(propertyNameString, &propertyRecord);
         return GlobalObject::SetProperty(propertyRecord->GetPropertyId(), value, flags, info);
     }
 
@@ -2058,7 +2124,7 @@ LHexError:
     DescriptorFlags GlobalObject::GetSetter(JavascriptString* propertyNameString, Var* setterValue, PropertyValueInfo* info, ScriptContext* requestContext)
     {
         PropertyRecord const* propertyRecord;
-        this->GetScriptContext()->GetOrAddPropertyRecord(propertyNameString->GetString(), propertyNameString->GetLength(), &propertyRecord);
+        this->GetScriptContext()->GetOrAddPropertyRecord(propertyNameString, &propertyRecord);
         return GlobalObject::GetSetter(propertyRecord->GetPropertyId(), setterValue, info, requestContext);
     }
 
@@ -2102,7 +2168,7 @@ LHexError:
 
     BOOL GlobalObject::DeleteProperty(PropertyId propertyId, PropertyOperationFlags flags)
     {
-        if (__super::HasProperty(propertyId))
+        if (JavascriptConversion::PropertyQueryFlagsToBoolean(__super::HasPropertyQuery(propertyId, nullptr /*info*/)))
         {
             return __super::DeleteProperty(propertyId, flags);
         }
@@ -2150,27 +2216,28 @@ LHexError:
         return TRUE;
     }
 
-    BOOL GlobalObject::HasItem(uint32 index)
+    PropertyQueryFlags GlobalObject::HasItemQuery(uint32 index)
     {
-        return DynamicObject::HasItem(index)
+        return JavascriptConversion::BooleanToPropertyQueryFlags(JavascriptConversion::PropertyQueryFlagsToBoolean((DynamicObject::HasItemQuery(index)))
             || (this->directHostObject && JavascriptOperators::HasItem(this->directHostObject, index))
-            || (this->hostObject && JavascriptOperators::HasItem(this->hostObject, index));
+            || (this->hostObject && JavascriptOperators::HasItem(this->hostObject, index)));
     }
 
     BOOL GlobalObject::HasOwnItem(uint32 index)
     {
-        return DynamicObject::HasItem(index)
+        return JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::HasItemQuery(index))
             || (this->directHostObject && this->directHostObject->HasItem(index));
     }
 
-    BOOL GlobalObject::GetItemReference(Var originalInstance, uint32 index, Var* value, ScriptContext* requestContext)
+    PropertyQueryFlags GlobalObject::GetItemReferenceQuery(Var originalInstance, uint32 index, Var* value, ScriptContext* requestContext)
     {
-        if (DynamicObject::GetItemReference(originalInstance, index, value, requestContext))
+        if (JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::GetItemReferenceQuery(originalInstance, index, value, requestContext)))
         {
-            return TRUE;
+            return PropertyQueryFlags::Property_Found;
         }
-        return (this->directHostObject && this->directHostObject->GetItemReference(originalInstance, index, value, requestContext)) ||
-            (this->hostObject && this->hostObject->GetItemReference(originalInstance, index, value, requestContext));
+        return JavascriptConversion::BooleanToPropertyQueryFlags(
+            (this->directHostObject && JavascriptConversion::PropertyQueryFlagsToBoolean(this->directHostObject->GetItemReferenceQuery(originalInstance, index, value, requestContext))) ||
+            (this->hostObject && JavascriptConversion::PropertyQueryFlagsToBoolean(this->hostObject->GetItemReferenceQuery(originalInstance, index, value, requestContext))));
     }
 
     BOOL GlobalObject::SetItem(uint32 index, Var value, PropertyOperationFlags flags)
@@ -2179,15 +2246,15 @@ LHexError:
         return result;
     }
 
-    BOOL GlobalObject::GetItem(Var originalInstance, uint32 index, Var* value, ScriptContext* requestContext)
+    PropertyQueryFlags GlobalObject::GetItemQuery(Var originalInstance, uint32 index, Var* value, ScriptContext* requestContext)
     {
-        if (DynamicObject::GetItem(originalInstance, index, value, requestContext))
+        if (JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::GetItemQuery(originalInstance, index, value, requestContext)))
         {
-            return TRUE;
+            return PropertyQueryFlags::Property_Found;
         }
 
-        return (this->directHostObject && this->directHostObject->GetItem(originalInstance, index, value, requestContext)) ||
-            (this->hostObject && this->hostObject->GetItem(originalInstance, index, value, requestContext));
+        return JavascriptConversion::BooleanToPropertyQueryFlags((this->directHostObject && this->directHostObject->GetItem(originalInstance, index, value, requestContext)) ||
+            (this->hostObject && this->hostObject->GetItem(originalInstance, index, value, requestContext)));
     }
 
     BOOL GlobalObject::DeleteItem(uint32 index, PropertyOperationFlags flags)

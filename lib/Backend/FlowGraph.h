@@ -139,6 +139,10 @@ public:
         tailBlock(nullptr),
         loopList(nullptr),
         catchLabelStack(nullptr),
+        finallyLabelStack(nullptr),
+        leaveNullLabelStack(nullptr),
+        regToFinallyEndMap(nullptr),
+        leaveNullLabelToFinallyLabelMap(nullptr),
         hasBackwardPassInfo(false),
         hasLoop(false),
         implicitCallFlags(Js::ImplicitCall_HasNoInfo)
@@ -149,7 +153,7 @@ public:
     void Destroy(void);
 
     void         RunPeeps();
-    BasicBlock * AddBlock(IR::Instr * firstInstr, IR::Instr * lastInstr, BasicBlock * nextBlock);
+    BasicBlock * AddBlock(IR::Instr * firstInstr, IR::Instr * lastInstr, BasicBlock * nextBlock, BasicBlock *prevBlock = nullptr);
     FlowEdge *   AddEdge(BasicBlock * predBlock, BasicBlock * succBlock);
     BasicBlock * InsertCompensationCodeForBlockMove(FlowEdge * edge, // Edge where compensation code needs to be inserted
                                                     bool insertCompensationBlockToLoopList = false,
@@ -166,7 +170,11 @@ public:
     static void  SafeRemoveInstr(IR::Instr *instr);
     void         SortLoopLists();
     FlowEdge *   FindEdge(BasicBlock *predBlock, BasicBlock *succBlock);
-
+    IR::LabelInstr * DeleteLeaveChainBlocks(IR::BranchInstr *leaveInstr, IR::Instr * &instrPrev);
+    bool         CheckIfEarlyExitAndAddEdgeToFinally(IR::BranchInstr *leaveInstr, Region *currentRegion, Region *branchTargetRegion, IR::Instr *&instrPrev, IR::LabelInstr *&exitLabel);
+    bool         Dominates(Region *finallyRegion, Region *exitLabelRegion);
+    bool         DoesExitLabelDominate(IR::BranchInstr *leaveInstr);
+    void         InsertEdgeFromFinallyToEarlyExit(BasicBlock * finallyEndBlock, IR::LabelInstr * exitLabel);
 #if DBG_DUMP
     void         Dump();
     void         Dump(bool verbose, const char16 *form);
@@ -177,6 +185,12 @@ public:
     BasicBlock *              tailBlock;
     Loop *                    loopList;
     SList<IR::LabelInstr*> *  catchLabelStack;
+    SList<IR::LabelInstr*> *  finallyLabelStack;
+    SList<IR::LabelInstr*> *  leaveNullLabelStack;
+    typedef JsUtil::BaseDictionary<Region *, BasicBlock *, JitArenaAllocator> RegionToFinallyEndMapType;
+    RegionToFinallyEndMapType * regToFinallyEndMap;
+    typedef JsUtil::BaseDictionary<IR::LabelInstr *, IR::LabelInstr *, JitArenaAllocator> LeaveNullLabelToFinallyLabelMapType;
+    LeaveNullLabelToFinallyLabelMapType * leaveNullLabelToFinallyLabelMap;
     bool                      hasBackwardPassInfo;
     bool                      hasLoop;
     Js::ImplicitCallFlags     implicitCallFlags;
@@ -186,7 +200,10 @@ private:
     void        BuildLoop(BasicBlock *headBlock, BasicBlock *tailBlock, Loop *parentLoop = nullptr);
     void        WalkLoopBlocks(BasicBlock *block, Loop *loop, JitArenaAllocator *tempAlloc);
     void        AddBlockToLoop(BasicBlock *block, Loop *loop);
-    void        UpdateRegionForBlock(BasicBlock *block, Region **blockToRegion);
+    bool        IsEHTransitionInstr(IR::Instr *instr);
+    BasicBlock * GetPredecessorForRegionPropagation(BasicBlock *block);
+    void        UpdateRegionForBlock(BasicBlock *block);
+    void        UpdateRegionForBlockFromEHPred(BasicBlock *block, bool reassign = false);
     Region *    PropagateRegionFromPred(BasicBlock *block, BasicBlock *predBlock, Region *predRegion, IR::Instr * &tryInstr);
     IR::Instr * PeepCm(IR::Instr *instr);
     IR::Instr * PeepTypedCm(IR::Instr *instr);
@@ -302,11 +319,11 @@ public:
 
     BasicBlock * GetNext()
     {
-        BasicBlock *block = this;
+        BasicBlock *block = this->next;
 
-        do {
+        while (block && block->isDeleted) {
             block = block->next;
-        } while (block && block->isDeleted);
+        }
 
         return block;
     }
@@ -330,8 +347,14 @@ public:
 
     bool IsLandingPad();
 
-#if DBG_DUMP
+    // GlobOpt Stuff
+public:
+    void         MergePredBlocksValueMaps(GlobOpt* globOptState);
+private:
+    void         CleanUpValueMaps();
 
+#if DBG_DUMP
+public:
     void DumpHeader(bool insertCR = true);
     void Dump();
 
@@ -347,6 +370,7 @@ public:
     uint8                hasCall:1;
     uint8                isVisited:1;
     uint8                isAirLockCompensationBlock:1;
+    uint8                beginsBailOnNoProfile:1;
 
 #ifdef DBG
     uint8                isBreakBlock:1;
@@ -359,11 +383,12 @@ public:
     BVSparse<JitArenaAllocator> *              upwardExposedUses;
     BVSparse<JitArenaAllocator> *              upwardExposedFields;
     BVSparse<JitArenaAllocator> *              typesNeedingKnownObjectLayout;
-    BVSparse<JitArenaAllocator> *              fieldHoistCandidates;
     BVSparse<JitArenaAllocator> *              slotDeadStoreCandidates;
     TempNumberTracker *                     tempNumberTracker;
     TempObjectTracker *                     tempObjectTracker;
 #if DBG
+    BVSparse<JitArenaAllocator> *           trackingByteCodeUpwardExposedUsed = nullptr;
+    BVSparse<JitArenaAllocator> *           excludeByteCodeUpwardExposedTracking = nullptr;
     TempObjectVerifyTracker *               tempObjectVerifyTracker;
 #endif
     HashTable<AddPropertyCacheBucket> *     stackSymToFinalType;
@@ -421,6 +446,7 @@ private:
         couldRemoveNegZeroBailoutForDef(nullptr),
         byteCodeUpwardExposedUsed(nullptr),
         isAirLockCompensationBlock(false),
+        beginsBailOnNoProfile(false),
 #if DBG
         byteCodeRestoreSyms(nullptr),
         isBreakBlock(false),
@@ -428,7 +454,6 @@ private:
         isBreakCompensationBlockAtSource(false),
         isBreakCompensationBlockAtSink(false),
 #endif
-        fieldHoistCandidates(nullptr),
         dataUseCount(0),
         intOverflowDoesNotMatterRange(nullptr),
         func(func),
@@ -526,7 +551,6 @@ class Loop
 {
     friend FlowGraph;
 private:
-    typedef JsUtil::BaseDictionary<SymID, StackSym *, JitArenaAllocator, PowerOf2SizePolicy> FieldHoistSymMap;
     typedef JsUtil::BaseDictionary<PropertySym *, Value *, JitArenaAllocator> InitialValueFieldMap;
 
     Js::ImplicitCallFlags implicitCallFlags;
@@ -545,32 +569,21 @@ public:
     BVSparse<JitArenaAllocator> *lossyInt32SymsOnEntry; // see GlobOptData::liveLossyInt32Syms
     BVSparse<JitArenaAllocator> *float64SymsOnEntry;
     BVSparse<JitArenaAllocator> *liveFieldsOnEntry;
-    // SIMD_JS
-    // live syms upon entering loop header (from pred merge + forced syms + used before defs in loop)
-    BVSparse<JitArenaAllocator> *simd128F4SymsOnEntry;
-    BVSparse<JitArenaAllocator> *simd128I4SymsOnEntry;
 
     BVSparse<JitArenaAllocator> *symsUsedBeforeDefined;                // stack syms that are live in the landing pad, and used before they are defined in the loop
     BVSparse<JitArenaAllocator> *likelyIntSymsUsedBeforeDefined;       // stack syms that are live in the landing pad with a likely-int value, and used before they are defined in the loop
     BVSparse<JitArenaAllocator> *likelyNumberSymsUsedBeforeDefined;    // stack syms that are live in the landing pad with a likely-number value, and used before they are defined in the loop
-    // SIMD_JS
-    BVSparse<JitArenaAllocator> *likelySimd128F4SymsUsedBeforeDefined;    // stack syms that are live in the landing pad with a likely-Simd128F4 value, and used before they are defined in the loop
-    BVSparse<JitArenaAllocator> *likelySimd128I4SymsUsedBeforeDefined;    // stack syms that are live in the landing pad with a likely-Simd128I4 value, and used before they are defined in the loop
 
     BVSparse<JitArenaAllocator> *forceFloat64SymsOnEntry;
-    // SIMD_JS
-    // syms need to be forced to certain type due to hoisting
-    BVSparse<JitArenaAllocator> *forceSimd128F4SymsOnEntry;
-    BVSparse<JitArenaAllocator> *forceSimd128I4SymsOnEntry;
 
     BVSparse<JitArenaAllocator> *symsDefInLoop;
+    // This is different from symsDefInLoop which only captures syms that survived IR 
+    // cleanup in PreOptPeep in the pre-pass of a loop. For aggressively transferring
+    // values in prepass, we need to know if a source sym was ever assigned to in a loop.
+    BVSparse<JitArenaAllocator> *symsAssignedToInLoop;
+
     BailOutInfo *       bailOutInfo;
     IR::BailOutInstr *  toPrimitiveSideEffectCheck;
-    BVSparse<JitArenaAllocator> * fieldHoistCandidates;
-    BVSparse<JitArenaAllocator> * liveInFieldHoistCandidates;
-    BVSparse<JitArenaAllocator> * fieldHoistCandidateTypes;
-    SListBase<IR::Instr *> prepassFieldHoistInstrCandidates;
-    FieldHoistSymMap fieldHoistSymMap;
     IR::Instr *         endDisableImplicitCall;
     BVSparse<JitArenaAllocator> * hoistedFields;
     BVSparse<JitArenaAllocator> * hoistedFieldCopySyms;
@@ -703,14 +716,9 @@ public:
         symsUsedBeforeDefined(nullptr),
         likelyIntSymsUsedBeforeDefined(nullptr),
         likelyNumberSymsUsedBeforeDefined(nullptr),
-        likelySimd128F4SymsUsedBeforeDefined(nullptr),
-        likelySimd128I4SymsUsedBeforeDefined(nullptr),
         forceFloat64SymsOnEntry(nullptr),
-        forceSimd128F4SymsOnEntry(nullptr),
-        forceSimd128I4SymsOnEntry(nullptr),
         symsDefInLoop(nullptr),
-        fieldHoistCandidateTypes(nullptr),
-        fieldHoistSymMap(alloc),
+        symsAssignedToInLoop(nullptr),
         needImplicitCallBailoutChecksForJsArrayCheckHoist(false),
         inductionVariables(nullptr),
         dominatingLoopCountableBlock(nullptr),
@@ -735,13 +743,13 @@ public:
     void                SetImplicitCallFlags(Js::ImplicitCallFlags flags);
     Js::LoopFlags GetLoopFlags() const { return loopFlags; }
     void SetLoopFlags(Js::LoopFlags val) { loopFlags = val; }
-    bool                CanHoistInvariants();
+    bool                CanHoistInvariants() const;
     bool                CanDoFieldCopyProp();
-    bool                CanDoFieldHoist();
     void                SetHasCall();
     IR::LabelInstr *    GetLoopTopInstr() const;
     void                SetLoopTopInstr(IR::LabelInstr * loopTop);
     Func *              GetFunc() const { return GetLoopTopInstr()->m_func; }
+    bool                IsSymAssignedToInSelfOrParents(StackSym * const sym) const;
 #if DBG_DUMP
     bool                GetHasCall() const { return hasCall; }
     uint                GetLoopNumber() const;

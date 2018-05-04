@@ -24,9 +24,14 @@ namespace Js {
         InlineCacheFlags flags;
         CacheInfoFlag cacheInfoFlag;
         InlineCache* inlineCache;
-        PolymorphicInlineCache* polymorphicInlineCache;
+        PolymorphicInlineCache * polymorphicInlineCache;
         FunctionBody * functionBody;
+
+        RecyclableObject* prop; // Symbol or PropertyString associated with this property
+        PropertyRecordUsageCache* propertyRecordUsageCache; // Usage cache for the Symbol or PropertyString `prop` (interior pointer).
+
         uint inlineCacheIndex;
+        bool isFunctionPIC;
         bool allowResizingPolymorphicInlineCache;
 
         void Set(RecyclableObject* instance, PropertyIndex propertyIndex, PropertyAttributes attributes, InlineCacheFlags flags)
@@ -44,9 +49,9 @@ namespace Js {
     public:
         PropertyValueInfo()
             : m_instance(NULL), m_propertyIndex(Constants::NoSlot), m_attributes(PropertyNone), flags(InlineCacheNoFlags),
-            cacheInfoFlag(CacheInfoFlag::defaultInfoFlags), inlineCache(NULL), polymorphicInlineCache(NULL), functionBody(NULL),
-            inlineCacheIndex(Constants::NoInlineCacheIndex),
-            allowResizingPolymorphicInlineCache(true)
+            cacheInfoFlag(CacheInfoFlag::defaultInfoFlags), inlineCache(nullptr), polymorphicInlineCache(nullptr),
+            prop(nullptr), propertyRecordUsageCache(nullptr), functionBody(nullptr),
+            inlineCacheIndex(Constants::NoInlineCacheIndex), allowResizingPolymorphicInlineCache(true)
         {
         }
 
@@ -72,24 +77,49 @@ namespace Js {
         static void SetCacheInfo(PropertyValueInfo* info, InlineCache *const inlineCache);
         static void SetCacheInfo(PropertyValueInfo* info, FunctionBody *const functionBody, InlineCache *const inlineCache, const InlineCacheIndex inlineCacheIndex, const bool allowResizingPolymorphicInlineCache);
         static void SetCacheInfo(PropertyValueInfo* info, FunctionBody *const functionBody, PolymorphicInlineCache *const polymorphicInlineCache, const InlineCacheIndex inlineCacheIndex, const bool allowResizingPolymorphicInlineCache);
+        template <typename TProperty> static void SetCacheInfo(
+            _Out_ PropertyValueInfo* info,
+            _In_opt_ TProperty * prop,
+            _In_ PolymorphicInlineCache *const polymorphicInlineCache,
+            bool allowResizing)
+        {
+            SetCacheInfo(info, prop, prop->GetPropertyRecordUsageCache(), polymorphicInlineCache, allowResizing);
+        }
+        static void SetCacheInfo(
+            _Out_ PropertyValueInfo* info,
+            _In_opt_ RecyclableObject * prop,
+            _In_opt_ PropertyRecordUsageCache *const propertyRecordUsageCache,
+            _In_ PolymorphicInlineCache *const polymorphicInlineCache,
+            bool allowResizing);
+        static void SetCacheInfo(_Out_ PropertyValueInfo* info, _In_ PolymorphicInlineCache *const polymorphicInlineCache, bool allowResizing);
         static void ClearCacheInfo(PropertyValueInfo* info);
 
-        inline InlineCache * GetInlineCache() const
+        InlineCache * GetInlineCache() const
         {
             return this->inlineCache;
         }
 
-        inline PolymorphicInlineCache * GetPolymorphicInlineCache() const
+        PolymorphicInlineCache * GetPolymorphicInlineCache() const
         {
             return this->polymorphicInlineCache;
         }
 
-        inline FunctionBody * GetFunctionBody() const
+        FunctionBody * GetFunctionBody() const
         {
             return this->functionBody;
         }
 
-        inline uint GetInlineCacheIndex() const
+        PropertyRecordUsageCache * GetPropertyRecordUsageCache() const
+        {
+            return this->propertyRecordUsageCache;
+        }
+
+        RecyclableObject * GetProperty() const
+        {
+            return this->prop;
+        }
+
+        uint GetInlineCacheIndex() const
         {
             return this->inlineCacheIndex;
         }
@@ -191,6 +221,13 @@ namespace Js {
         PropertyOperation_ThrowOnDeleteIfNotConfig      = 0x400,
     };
 
+    enum class PropertyQueryFlags : int
+    {
+        Property_NotFound                               = 0,
+        Property_Found                                  = 1,
+        Property_NotFound_NoProto                       = 2
+    };
+
     class RecyclableObject : public FinalizableObject
     {
         friend class JavascriptOperators;
@@ -206,7 +243,7 @@ namespace Js {
         void RecordAllocation(ScriptContext * scriptContext);
 #endif
     protected:
-        Type * type;
+        Field(Type *) type;
         DEFINE_VTABLE_CTOR_NOBASE(RecyclableObject);
 
         virtual RecyclableObject* GetPrototypeSpecial();
@@ -214,6 +251,7 @@ namespace Js {
     public:
         static bool Is(Var aValue);
         static RecyclableObject* FromVar(Var varValue);
+        static RecyclableObject* UnsafeFromVar(Var varValue);
         RecyclableObject(Type * type);
 #if DBG_EXTRAFIELD
         // This dtor should only be call when OOM occurs and RecyclableObject ctor has completed
@@ -232,6 +270,8 @@ namespace Js {
         // (i.e. no accessors or non-writable properties)?
         bool HasOnlyWritableDataProperties();
 
+        bool HasAnySpecialProperties();
+
         void ClearWritableDataOnlyDetectionBit();
         bool IsWritableDataOnlyDetectionBitSet();
 
@@ -242,26 +282,35 @@ namespace Js {
         // which will emit an error.
         static Var DefaultEntryPoint(RecyclableObject* function, CallInfo callInfo, ...);
 
+        BOOL HasItem(uint32 index);
+        BOOL HasProperty(PropertyId propertyId);
+        BOOL GetProperty(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext);
+        BOOL GetProperty(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext);
+        BOOL GetPropertyReference(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext);
+        BOOL GetItem(Var originalInstance, uint32 index, Var* value, ScriptContext * requestContext);
+        BOOL GetItemReference(Var originalInstance, uint32 index, Var* value, ScriptContext * requestContext);
+
         virtual PropertyId GetPropertyId(PropertyIndex index) { return Constants::NoProperty; }
         virtual PropertyId GetPropertyId(BigPropertyIndex index) { return Constants::NoProperty; }
         virtual PropertyIndex GetPropertyIndex(PropertyId propertyId) { return Constants::NoSlot; }
         virtual int GetPropertyCount() { return 0; }
-        virtual BOOL HasProperty(PropertyId propertyId);
+        virtual PropertyQueryFlags HasPropertyQuery(PropertyId propertyId, _Inout_opt_ PropertyValueInfo* info);
         virtual BOOL HasOwnProperty( PropertyId propertyId);
         virtual BOOL HasOwnPropertyNoHostObject( PropertyId propertyId);
         virtual BOOL HasOwnPropertyCheckNoRedecl( PropertyId propertyId) { Assert(FALSE); return FALSE; }
         virtual BOOL UseDynamicObjectForNoHostObjectAccess() { return FALSE; }
         virtual DescriptorFlags GetSetter(PropertyId propertyId, Var* setterValue, PropertyValueInfo* info, ScriptContext* requestContext) { return None; }
         virtual DescriptorFlags GetSetter(JavascriptString* propertyNameString, Var* setterValue, PropertyValueInfo* info, ScriptContext* requestContext) { return None; }
-        virtual BOOL GetProperty(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext);
-        virtual BOOL GetProperty(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext);
+        virtual PropertyQueryFlags GetPropertyQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext);
+        virtual PropertyQueryFlags GetPropertyQuery(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext);
         virtual BOOL GetInternalProperty(Var instance, PropertyId internalPropertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext);
         virtual BOOL GetAccessors(PropertyId propertyId, Var* getter, Var* setter, ScriptContext * requestContext);
-        virtual BOOL GetPropertyReference(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext);
+        virtual PropertyQueryFlags GetPropertyReferenceQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext);
         virtual BOOL SetProperty(PropertyId propertyId, Var value, PropertyOperationFlags flags, PropertyValueInfo* info);
         virtual BOOL SetProperty(JavascriptString* propertyNameString, Var value, PropertyOperationFlags flags, PropertyValueInfo* info);
         virtual BOOL SetInternalProperty(PropertyId internalPropertyId, Var value, PropertyOperationFlags flags, PropertyValueInfo* info);
         virtual BOOL InitProperty(PropertyId propertyId, Var value, PropertyOperationFlags flags = PropertyOperation_None, PropertyValueInfo* info = NULL);
+        virtual BOOL InitPropertyInEval(PropertyId propertyId, Var value, PropertyOperationFlags flags = PropertyOperation_None, PropertyValueInfo* info = NULL);
         virtual BOOL EnsureProperty(PropertyId propertyId);
         virtual BOOL EnsureNoRedeclProperty(PropertyId propertyId);
         virtual BOOL SetPropertyWithAttributes(PropertyId propertyId, Var value, PropertyAttributes attributes, PropertyValueInfo* info, PropertyOperationFlags flags = PropertyOperation_None, SideEffects possibleSideEffects = SideEffects_Any);
@@ -269,15 +318,17 @@ namespace Js {
         virtual BOOL InitFuncScoped(PropertyId propertyId, Var value);
         virtual BOOL DeleteProperty(PropertyId propertyId, PropertyOperationFlags flags);
         virtual BOOL DeleteProperty(JavascriptString *propertyNameString, PropertyOperationFlags flags);
+#if ENABLE_FIXED_FIELDS
         virtual BOOL IsFixedProperty(PropertyId propertyId);
-        virtual BOOL HasItem(uint32 index);
+#endif
+        virtual PropertyQueryFlags HasItemQuery(uint32 index);
         virtual BOOL HasOwnItem(uint32 index);
-        virtual BOOL GetItem(Var originalInstance, uint32 index, Var* value, ScriptContext * requestContext);
-        virtual BOOL GetItemReference(Var originalInstance, uint32 index, Var* value, ScriptContext * requestContext);
+        virtual PropertyQueryFlags GetItemQuery(Var originalInstance, uint32 index, Var* value, ScriptContext * requestContext);
+        virtual PropertyQueryFlags GetItemReferenceQuery(Var originalInstance, uint32 index, Var* value, ScriptContext * requestContext);
         virtual DescriptorFlags GetItemSetter(uint32 index, Var* setterValue, ScriptContext* requestContext) { return None; }
         virtual BOOL SetItem(uint32 index, Var value, PropertyOperationFlags flags);
         virtual BOOL DeleteItem(uint32 index, PropertyOperationFlags flags);
-        virtual BOOL GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, ForInCache * forInCache = nullptr);
+        virtual BOOL GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, EnumeratorCache * enumeratorCache = nullptr);
         virtual BOOL ToPrimitive(JavascriptHint hint, Var* value, ScriptContext * requestContext);
         virtual BOOL SetAccessors(PropertyId propertyId, Var getter, Var setter, PropertyOperationFlags flags = PropertyOperation_None);
         virtual BOOL Equals(__in Var other, __out BOOL* value, ScriptContext* requestContext);
@@ -288,8 +339,7 @@ namespace Js {
         virtual BOOL IsExtensible() { return false; }
         virtual BOOL IsProtoImmutable() const { return false; }
         virtual BOOL PreventExtensions() { return false; };     // Sets [[Extensible]] flag of instance to false
-        virtual void ThrowIfCannotDefineProperty(PropertyId propId, PropertyDescriptor descriptor);
-        virtual void ThrowIfCannotGetOwnPropertyDescriptor(PropertyId propId) {}
+        virtual void ThrowIfCannotDefineProperty(PropertyId propId, const PropertyDescriptor& descriptor);
         virtual BOOL GetDefaultPropertyDescriptor(PropertyDescriptor& descriptor);
         virtual BOOL Seal() { return false; }                   // Seals the instance, no additional property can be added or deleted
         virtual BOOL Freeze() { return false; }                 // Freezes the instance, no additional property can be added or deleted or written
@@ -300,7 +350,7 @@ namespace Js {
         virtual BOOL SetEnumerable(PropertyId propertyId, BOOL value) { return false; }
         virtual BOOL SetAttributes(PropertyId propertyId, PropertyAttributes attributes) { return false; }
 
-        virtual BOOL GetSpecialPropertyName(uint32 index, Var *propertyName, ScriptContext * requestContext) { return false; }
+        virtual BOOL GetSpecialPropertyName(uint32 index, JavascriptString ** propertyName, ScriptContext * requestContext) { return false; }
         virtual uint GetSpecialPropertyCount() const { return 0; }
         virtual PropertyId const * GetSpecialPropertyIds() const { return nullptr; }
         virtual RecyclableObject* GetThisObjectOrUnWrap(); // Due to the withScope object there are times we need to unwrap
@@ -308,7 +358,6 @@ namespace Js {
         virtual BOOL HasInstance(Var instance, ScriptContext* scriptContext, IsInstInlineCache* inlineCache = NULL);
 
         BOOL SkipsPrototype() const;
-        BOOL CanHaveInterceptors() const;
         BOOL IsExternal() const;
         // Used only in JsVarToExtension where it may be during dispose and the type is not available
         virtual BOOL IsExternalVirtual() const { return FALSE; }
@@ -336,8 +385,6 @@ namespace Js {
         virtual RecyclableObject* ToObject(ScriptContext * requestContext);
         virtual Var GetTypeOfString(ScriptContext* requestContext);
 
-        // don't need cross-site: only supported in HostDispatch.
-        virtual Var InvokePut(Arguments args);
         virtual BOOL GetRemoteTypeId(TypeId* typeId);
 
         // Only implemented by the HostDispatch object for cross-thread support
@@ -376,7 +423,6 @@ namespace Js {
         // Used to Assert that the object may safely be cast to a DynamicObject
         virtual bool DbgIsDynamicObject() const { return false; }
         virtual BOOL DbgSkipsPrototype() const { return FALSE; }
-        virtual BOOL DbgCanHaveInterceptors() const { return false; }
 #endif
 #if defined(PROFILE_RECYCLER_ALLOC) && defined(RECYCLER_DUMP_OBJECT_GRAPH)
     public:

@@ -8,11 +8,11 @@
 
 namespace Js
 {
-    BOOL ArgumentsObject::GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, ForInCache * forInCache)
+    BOOL ArgumentsObject::GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, EnumeratorCache * enumeratorCache)
     {
         return GetEnumeratorWithPrefix(
             RecyclerNew(GetScriptContext()->GetRecycler(), ArgumentsObjectPrefixEnumerator, this, flags, requestContext),
-            enumerator, flags, requestContext, forInCache);
+            enumerator, flags, requestContext, enumeratorCache);
     }
 
     BOOL ArgumentsObject::GetDiagValueString(StringBuilder<ArenaAllocator>* stringBuilder, ScriptContext* requestContext)
@@ -26,78 +26,7 @@ namespace Js
         stringBuilder->AppendCppLiteral(_u("Object, (Arguments)"));
         return TRUE;
     }
-
-    Var ArgumentsObject::GetCaller(ScriptContext * scriptContext)
-    {
-        JavascriptStackWalker walker(scriptContext);
-
-        if (!this->AdvanceWalkerToArgsFrame(&walker))
-        {
-            return scriptContext->GetLibrary()->GetNull();
-        }
-
-        return ArgumentsObject::GetCaller(scriptContext, &walker, false);
-    }
-
-    Var ArgumentsObject::GetCaller(ScriptContext * scriptContext, JavascriptStackWalker *walker, bool skipGlobal)
-    {
-        // The arguments.caller property is equivalent to callee.caller.arguments - that is, it's the
-        // caller's arguments object (if any). Just fetch the caller and compute its arguments.
-        JavascriptFunction* funcCaller = nullptr;
-
-        while (walker->GetCaller(&funcCaller))
-        {
-            if (walker->IsCallerGlobalFunction())
-            {
-                // Caller is global/eval. If we're in IE9 mode, and the caller is eval,
-                // keep looking. Otherwise, caller is null.
-                if (skipGlobal || walker->IsEvalCaller())
-                {
-                    continue;
-                }
-                funcCaller = nullptr;
-            }
-            break;
-        }
-
-        if (funcCaller == nullptr || JavascriptOperators::GetTypeId(funcCaller) == TypeIds_Null)
-        {
-            return scriptContext->GetLibrary()->GetNull();
-        }
-
-        AssertMsg(JavascriptOperators::GetTypeId(funcCaller) == TypeIds_Function, "non function caller");
-
-        CallInfo const *callInfo = walker->GetCallInfo();
-        uint32 paramCount = callInfo->Count;
-        CallFlags flags = callInfo->Flags;
-
-        if (paramCount == 0 || (flags & CallFlags_Eval))
-        {
-            // The caller is the "global function" or eval, so we return "null".
-            return scriptContext->GetLibrary()->GetNull();
-        }
-
-        if (!walker->GetCurrentFunction()->IsScriptFunction())
-        {
-            // builtin function do not have an argument object - return null.
-            return scriptContext->GetLibrary()->GetNull();
-        }
-
-        // Create new arguments object, everytime this is requested for, with the actuals value.
-        Var args = nullptr;
-
-        args = JavascriptOperators::LoadHeapArguments(
-            funcCaller,
-            paramCount - 1,
-            walker->GetJavascriptArgs(),
-            scriptContext->GetLibrary()->GetNull(),
-            scriptContext->GetLibrary()->GetNull(),
-            scriptContext,
-            /* formalsAreLetDecls */ false);
-
-        return args;
-    }
-
+    
     bool ArgumentsObject::Is(Var aValue)
     {
         return JavascriptOperators::GetTypeId(aValue) == TypeIds_Arguments;
@@ -111,6 +40,7 @@ namespace Js
     HeapArgumentsObject::HeapArgumentsObject(Recycler *recycler, ActivationObject* obj, uint32 formalCount, DynamicType * type)
         : ArgumentsObject(type), frameObject(obj), formalCount(formalCount), numOfArguments(0), callerDeleted(false), deletedArgs(nullptr)
     {
+        Assert(!frameObject || ActivationObject::Is(frameObject));
     }
 
     void HeapArgumentsObject::SetNumberOfArguments(uint32 len)
@@ -289,7 +219,7 @@ namespace Js
     {
         TTD::NSSnapObjects::SnapHeapArgumentsInfo* argsInfo = alloc.SlabAllocateStruct<TTD::NSSnapObjects::SnapHeapArgumentsInfo>();
 
-        AssertMsg(this->callerDeleted == 0, "This never seems to be set but I want to assert just to be safe.");
+        TTDAssert(this->callerDeleted == 0, "This never seems to be set but I want to assert just to be safe.");
         argsInfo->NumOfArguments = this->numOfArguments;
         argsInfo->FormalCount = this->formalCount;
 
@@ -297,15 +227,10 @@ namespace Js
         TTD_PTR_ID* depOnArray = nullptr;
 
         argsInfo->IsFrameNullPtr = false;
-        argsInfo->IsFrameJsNull = false;
         argsInfo->FrameObject = TTD_INVALID_PTR_ID;
         if(this->frameObject == nullptr)
         {
             argsInfo->IsFrameNullPtr = true;
-        }
-        else if(Js::JavascriptOperators::GetTypeId(this->frameObject) == TypeIds_Null)
-        {
-            argsInfo->IsFrameJsNull = true;
         }
         else
         {
@@ -396,7 +321,7 @@ namespace Js
 
     }
 
-    BOOL HeapArgumentsObject::HasProperty(PropertyId id)
+    PropertyQueryFlags HeapArgumentsObject::HasPropertyQuery(PropertyId id, _Inout_opt_ PropertyValueInfo* info)
     {
         ScriptContext *scriptContext = GetScriptContext();
 
@@ -404,13 +329,13 @@ namespace Js
         uint32 index;
         if (scriptContext->IsNumericPropertyId(id, &index) && index < this->HeapArgumentsObject::GetNumberOfArguments())
         {
-            return HeapArgumentsObject::HasItem(index);
+            return HeapArgumentsObject::HasItemQuery(index);
         }
 
-        return DynamicObject::HasProperty(id);
+        return DynamicObject::HasPropertyQuery(id, info);
     }
 
-    BOOL HeapArgumentsObject::GetProperty(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
+    PropertyQueryFlags HeapArgumentsObject::GetPropertyQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
     {
         ScriptContext *scriptContext = GetScriptContext();
 
@@ -420,39 +345,39 @@ namespace Js
         {
             if (this->GetItemAt(index, value, requestContext))
             {
-                return true;
+                return PropertyQueryFlags::Property_Found;
             }
         }
 
-        if (DynamicObject::GetProperty(originalInstance, propertyId, value, info, requestContext))
+        if (JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::GetPropertyQuery(originalInstance, propertyId, value, info, requestContext)))
         {
             // Property has been pre-set and not deleted. Use it.
-            return true;
+            return PropertyQueryFlags::Property_Found;
         }
 
         *value = requestContext->GetMissingPropertyResult();
-        return false;
+        return PropertyQueryFlags::Property_NotFound;
     }
 
-    BOOL HeapArgumentsObject::GetProperty(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
+    PropertyQueryFlags HeapArgumentsObject::GetPropertyQuery(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
     {
 
         AssertMsg(!PropertyRecord::IsPropertyNameNumeric(propertyNameString->GetString(), propertyNameString->GetLength()),
             "Numeric property names should have been converted to uint or PropertyRecord*");
 
-        if (DynamicObject::GetProperty(originalInstance, propertyNameString, value, info, requestContext))
+        if (JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::GetPropertyQuery(originalInstance, propertyNameString, value, info, requestContext)))
         {
             // Property has been pre-set and not deleted. Use it.
-            return true;
+            return PropertyQueryFlags::Property_Found;
         }
 
         *value = requestContext->GetMissingPropertyResult();
-        return false;
+        return PropertyQueryFlags::Property_NotFound;
     }
 
-    BOOL HeapArgumentsObject::GetPropertyReference(Var originalInstance, PropertyId id, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
+    PropertyQueryFlags HeapArgumentsObject::GetPropertyReferenceQuery(Var originalInstance, PropertyId id, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
     {
-        return HeapArgumentsObject::GetProperty(originalInstance, id, value, info, requestContext);
+        return HeapArgumentsObject::GetPropertyQuery(originalInstance, id, value, info, requestContext);
     }
 
     BOOL HeapArgumentsObject::SetProperty(PropertyId propertyId, Var value, PropertyOperationFlags flags, PropertyValueInfo* info)
@@ -486,27 +411,27 @@ namespace Js
         return DynamicObject::SetProperty(propertyNameString, value, flags, info);
     }
 
-    BOOL HeapArgumentsObject::HasItem(uint32 index)
+    PropertyQueryFlags HeapArgumentsObject::HasItemQuery(uint32 index)
     {
         if (this->HasItemAt(index))
         {
-            return true;
+            return PropertyQueryFlags::Property_Found;
         }
-        return DynamicObject::HasItem(index);
+        return DynamicObject::HasItemQuery(index);
     }
 
-    BOOL HeapArgumentsObject::GetItem(Var originalInstance, uint32 index, Var* value, ScriptContext* requestContext)
+    PropertyQueryFlags HeapArgumentsObject::GetItemQuery(Var originalInstance, uint32 index, Var* value, ScriptContext* requestContext)
     {
         if (this->GetItemAt(index, value, requestContext))
         {
-            return true;
+            return PropertyQueryFlags::Property_Found;
         }
-        return DynamicObject::GetItem(originalInstance, index, value, requestContext);
+        return DynamicObject::GetItemQuery(originalInstance, index, value, requestContext);
     }
 
-    BOOL HeapArgumentsObject::GetItemReference(Var originalInstance, uint32 index, Var* value, ScriptContext* requestContext)
+    PropertyQueryFlags HeapArgumentsObject::GetItemReferenceQuery(Var originalInstance, uint32 index, Var* value, ScriptContext* requestContext)
     {
-        return HeapArgumentsObject::GetItem(originalInstance, index, value, requestContext);
+        return HeapArgumentsObject::GetItemQuery(originalInstance, index, value, requestContext);
     }
 
     BOOL HeapArgumentsObject::SetItem(uint32 index, Var value, PropertyOperationFlags flags)
@@ -668,9 +593,9 @@ namespace Js
         return this->DynamicObject::SetPropertyWithAttributes(propertyId, value, attributes, info, flags, possibleSideEffects);
     }
 
-    BOOL ES5HeapArgumentsObject::GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, ForInCache * forInCache)
+    BOOL ES5HeapArgumentsObject::GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, EnumeratorCache * enumeratorCache)
     {
-        ES5ArgumentsObjectEnumerator * es5HeapArgumentsObjectEnumerator = ES5ArgumentsObjectEnumerator::New(this, flags, requestContext, forInCache);
+        ES5ArgumentsObjectEnumerator * es5HeapArgumentsObjectEnumerator = ES5ArgumentsObjectEnumerator::New(this, flags, requestContext, enumeratorCache);
         if (es5HeapArgumentsObjectEnumerator == nullptr)
         {
             return false;
@@ -697,7 +622,7 @@ namespace Js
     BOOL ES5HeapArgumentsObject::GetItemAt(uint32 index, Var* value, ScriptContext* requestContext)
     {
         return this->IsFormalDisconnectedFromNamedArgument(index) ?
-            this->DynamicObject::GetItem(this, index, value, requestContext) :
+            JavascriptConversion::PropertyQueryFlagsToBoolean(this->DynamicObject::GetItemQuery(this, index, value, requestContext)) :
             __super::GetItemAt(index, value, requestContext);
     }
 
@@ -792,7 +717,7 @@ namespace Js
         Var indexNumber = JavascriptNumber::New(index, scriptContext);
         JavascriptString* indexPropertyName = JavascriptConversion::ToString(indexNumber, scriptContext);
         PropertyRecord const * propertyRecord;
-        scriptContext->GetOrAddPropertyRecord(indexPropertyName->GetString(), indexPropertyName->GetLength(), &propertyRecord);
+        scriptContext->GetOrAddPropertyRecord(indexPropertyName, &propertyRecord);
         return this->IsEnumerable(propertyRecord->GetPropertyId());
     }
 

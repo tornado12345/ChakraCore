@@ -15,16 +15,15 @@ class IdleDecommitPageAllocator : public PageAllocator
 {
 public:
     IdleDecommitPageAllocator(AllocationPolicyManager * policyManager, PageAllocatorType type,
-#ifndef JD_PRIVATE
         Js::ConfigFlagsTable& flagTable,
-#endif
         uint maxFreePageCount = 0,
         uint maxIdleFreePageCount = DefaultMaxFreePageCount,
         bool zeroPages = false,
 #if ENABLE_BACKGROUND_PAGE_FREEING
         BackgroundPageQueue * backgroundPageQueue = nullptr,
 #endif
-        uint maxAllocPageCount = PageAllocator::DefaultMaxAllocPageCount);
+        uint maxAllocPageCount = PageAllocator::DefaultMaxAllocPageCount,
+        bool enableWriteBarrier = false);
 
     void EnterIdleDecommit();
     IdleDecommitSignal LeaveIdleDecommit(bool allowTimer);
@@ -61,7 +60,9 @@ private:
 #endif
 
     friend class PageAllocatorBase<VirtualAllocWrapper>;
+#if ENABLE_NATIVE_CODEGEN
     friend class PageAllocatorBase<PreReservedVirtualAllocWrapper>;
+#endif
 
 #if IDLE_DECOMMIT_ENABLED && DBG
 public:

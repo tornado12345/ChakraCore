@@ -76,15 +76,20 @@ namespace Js
       0xFF, 0xFF, 0xFF, 0x7F,
       0xFF, 0xFF, 0xFF, 0x7F };
 
-    __declspec(align(16)) const BYTE NumberConstants::SgnBitCst[] =
+    __declspec(align(16)) const BYTE NumberConstants::SgnFloatBitCst[] =
     { 0x00, 0x00, 0x00, 0x80,
       0x00, 0x00, 0x00, 0x80,
       0x00, 0x00, 0x00, 0x80,
       0x00, 0x00, 0x00, 0x80 };
 
+    __declspec(align(16)) const BYTE NumberConstants::SgnDoubleBitCst[] =
+    { 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80,
+      0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80 };
+
     __declspec(align(16)) double const NumberConstants::UIntConvertConst[2] = { 0, 4294967296.000000 };
     __declspec(align(16)) float const NumberConstants::MaskNegFloat[] = { -0.0f, -0.0f, -0.0f, -0.0f };
     __declspec(align(16)) double const NumberConstants::MaskNegDouble[] = { -0.0, -0.0 };
+
 
     bool NumberUtilities::IsDigit(int ch)
     {
@@ -119,8 +124,8 @@ namespace Js
         {
             mov eax, lu1
             mul lu2
-                mov ebx, pluHi
-                mov DWORD PTR[ebx], edx
+            mov ebx, pluHi
+            mov DWORD PTR[ebx], edx
         }
 #else //!I386_ASM
         DWORDLONG llu = UInt32x32To64(lu1, lu2);
@@ -142,7 +147,7 @@ namespace Js
 
     bool NumberUtilities::IsFinite(double value)
     {
-#if defined(_M_X64_OR_ARM64)
+#if defined(TARGET_64)
         return 0 != (~(ToSpecial(value)) & 0x7FF0000000000000ull);
 #else
         return 0 != (~Js::NumberUtilities::LuHiDbl(value) & 0x7FF00000);
@@ -386,7 +391,7 @@ namespace Js
 
     BOOL NumberUtilities::FDblIsInt32(double dbl, int32 *plw)
     {
-        AssertMem(plw);
+        Assert(plw);
         double dblT;
 
         *plw = (int32)dbl;

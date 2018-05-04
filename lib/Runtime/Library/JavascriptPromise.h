@@ -8,7 +8,7 @@ namespace Js
 {
     struct JavascriptPromiseResolveOrRejectFunctionAlreadyResolvedWrapper
     {
-        bool alreadyResolved;
+        Field(bool) alreadyResolved;
     };
 
     class JavascriptPromiseResolveOrRejectFunction : public RuntimeFunction
@@ -23,6 +23,7 @@ namespace Js
 
         inline static bool Is(Var var);
         inline static JavascriptPromiseResolveOrRejectFunction* FromVar(Var var);
+        inline static JavascriptPromiseResolveOrRejectFunction* UnsafeFromVar(Var var);
 
         JavascriptPromise* GetPromise();
         bool IsRejectFunction();
@@ -30,9 +31,9 @@ namespace Js
         void SetAlreadyResolved(bool is);
 
     private:
-        JavascriptPromise* promise;
-        bool isReject;
-        JavascriptPromiseResolveOrRejectFunctionAlreadyResolvedWrapper* alreadyResolvedWrapper;
+        Field(JavascriptPromise*) promise;
+        Field(bool) isReject;
+        Field(JavascriptPromiseResolveOrRejectFunctionAlreadyResolvedWrapper*) alreadyResolvedWrapper;
 
 #if ENABLE_TTD
     public:
@@ -54,13 +55,14 @@ namespace Js
 
         inline static bool Is(Var var);
         inline static JavascriptPromiseAsyncSpawnExecutorFunction* FromVar(Var var);
+        inline static JavascriptPromiseAsyncSpawnExecutorFunction* UnsafeFromVar(Var var);
 
         JavascriptGenerator* GetGenerator();
         Var GetTarget();
 
     private:
-        JavascriptGenerator* generator;
-        Var target; // this
+        Field(JavascriptGenerator*) generator;
+        Field(Var) target; // this
 
 #if ENABLE_TTD
     public:
@@ -78,23 +80,24 @@ namespace Js
         DEFINE_MARSHAL_OBJECT_TO_SCRIPT_CONTEXT(JavascriptPromiseAsyncSpawnStepArgumentExecutorFunction);
 
     public:
-        JavascriptPromiseAsyncSpawnStepArgumentExecutorFunction(DynamicType* type, FunctionInfo* functionInfo, JavascriptGenerator* generator, Var argument, JavascriptFunction* resolve = NULL, JavascriptFunction* reject = NULL, bool isReject = false);
+        JavascriptPromiseAsyncSpawnStepArgumentExecutorFunction(DynamicType* type, FunctionInfo* functionInfo, JavascriptGenerator* generator, Var argument, Var resolve = nullptr, Var reject = nullptr, bool isReject = false);
 
         inline static bool Is(Var var);
         inline static JavascriptPromiseAsyncSpawnStepArgumentExecutorFunction* FromVar(Var var);
+        inline static JavascriptPromiseAsyncSpawnStepArgumentExecutorFunction* UnsafeFromVar(Var var);
 
         JavascriptGenerator* GetGenerator();
-        JavascriptFunction* GetReject();
-        JavascriptFunction* GetResolve();
+        Var GetReject();
+        Var GetResolve();
         bool GetIsReject();
         Var GetArgument();
 
     private:
-        JavascriptGenerator* generator;
-        JavascriptFunction* reject;
-        JavascriptFunction* resolve;
-        bool isReject;
-        Var argument;
+        Field(JavascriptGenerator*) generator;
+        Field(Var) reject;
+        Field(Var) resolve;
+        Field(bool) isReject;
+        Field(Var) argument;
 
 #if ENABLE_TTD
     public:
@@ -116,11 +119,12 @@ namespace Js
 
         inline static bool Is(Var var);
         inline static JavascriptPromiseCapabilitiesExecutorFunction* FromVar(Var var);
+        inline static JavascriptPromiseCapabilitiesExecutorFunction* UnsafeFromVar(Var var);
 
         JavascriptPromiseCapability* GetCapability();
 
     private:
-        JavascriptPromiseCapability* capability;
+        Field(JavascriptPromiseCapability*) capability;
 
 #if ENABLE_TTD
     public:
@@ -146,7 +150,7 @@ namespace Js
         {
             if (JavascriptFunction::Is(var))
             {
-                JavascriptFunction* obj = JavascriptFunction::FromVar(var);
+                JavascriptFunction* obj = JavascriptFunction::UnsafeFromVar(var);
 
                 return VirtualTableInfo<JavascriptPromiseResolveThenableTaskFunction>::HasVirtualTable(obj)
                     || VirtualTableInfo<CrossSiteObject<JavascriptPromiseResolveThenableTaskFunction>>::HasVirtualTable(obj);
@@ -157,7 +161,7 @@ namespace Js
 
         inline static JavascriptPromiseResolveThenableTaskFunction* FromVar(Var var)
         {
-            Assert(JavascriptPromiseResolveThenableTaskFunction::Is(var));
+            AssertOrFailFast(JavascriptPromiseResolveThenableTaskFunction::Is(var));
 
             return static_cast<JavascriptPromiseResolveThenableTaskFunction*>(var);
         }
@@ -168,9 +172,9 @@ namespace Js
 
 
     private:
-        JavascriptPromise* promise;
-        RecyclableObject* thenable;
-        RecyclableObject* thenFunction;
+        Field(JavascriptPromise*) promise;
+        Field(RecyclableObject*) thenable;
+        Field(RecyclableObject*) thenFunction;
 
 #if ENABLE_TTD
     public:
@@ -196,7 +200,7 @@ namespace Js
         {
             if (JavascriptFunction::Is(var))
             {
-                JavascriptFunction* obj = JavascriptFunction::FromVar(var);
+                JavascriptFunction* obj = JavascriptFunction::UnsafeFromVar(var);
 
                 return VirtualTableInfo<JavascriptPromiseReactionTaskFunction>::HasVirtualTable(obj)
                     || VirtualTableInfo<CrossSiteObject<JavascriptPromiseReactionTaskFunction>>::HasVirtualTable(obj);
@@ -207,7 +211,7 @@ namespace Js
 
         inline static JavascriptPromiseReactionTaskFunction* FromVar(Var var)
         {
-            Assert(JavascriptPromiseReactionTaskFunction::Is(var));
+            AssertOrFailFast(JavascriptPromiseReactionTaskFunction::Is(var));
 
             return static_cast<JavascriptPromiseReactionTaskFunction*>(var);
         }
@@ -216,8 +220,8 @@ namespace Js
         Var GetArgument();
 
     private:
-        JavascriptPromiseReaction* reaction;
-        Var argument;
+        Field(JavascriptPromiseReaction*) reaction;
+        Field(Var) argument;
 
 #if ENABLE_TTD
     public:
@@ -228,9 +232,88 @@ namespace Js
 #endif
     };
 
+    class JavascriptPromiseThenFinallyFunction : public RuntimeFunction
+    {
+    protected:
+        DEFINE_VTABLE_CTOR(JavascriptPromiseThenFinallyFunction, RuntimeFunction);
+        DEFINE_MARSHAL_OBJECT_TO_SCRIPT_CONTEXT(JavascriptPromiseThenFinallyFunction);
+
+    public:
+        JavascriptPromiseThenFinallyFunction(DynamicType* type, FunctionInfo* functionInfo, RecyclableObject* OnFinally, RecyclableObject* Constructor, bool shouldThrow)
+            : RuntimeFunction(type, functionInfo), OnFinally(OnFinally), Constructor(Constructor), shouldThrow(shouldThrow)
+        { }
+
+        inline static bool Is(Var var)
+        {
+            if (JavascriptFunction::Is(var))
+            {
+                JavascriptFunction* obj = JavascriptFunction::UnsafeFromVar(var);
+
+                return VirtualTableInfo<JavascriptPromiseThenFinallyFunction>::HasVirtualTable(obj)
+                    || VirtualTableInfo<CrossSiteObject<JavascriptPromiseThenFinallyFunction>>::HasVirtualTable(obj);
+            }
+
+            return false;
+        }
+
+        inline static JavascriptPromiseThenFinallyFunction* FromVar(Var var)
+        {
+            AssertOrFailFast(JavascriptPromiseThenFinallyFunction::Is(var));
+
+            return static_cast<JavascriptPromiseThenFinallyFunction*>(var);
+        }
+
+        inline bool GetShouldThrow() { return this->shouldThrow; }
+        inline RecyclableObject* GetOnFinally() { return this->OnFinally; }
+        inline RecyclableObject* GetConstructor() { return this->Constructor; }
+
+    private:
+        Field(RecyclableObject*) OnFinally;
+        Field(RecyclableObject*) Constructor;
+        Field(bool) shouldThrow;
+    };
+
+    class JavascriptPromiseThunkFinallyFunction : public RuntimeFunction
+    {
+    protected:
+        DEFINE_VTABLE_CTOR(JavascriptPromiseThunkFinallyFunction, RuntimeFunction);
+        DEFINE_MARSHAL_OBJECT_TO_SCRIPT_CONTEXT(JavascriptPromiseThunkFinallyFunction);
+
+    public:
+        JavascriptPromiseThunkFinallyFunction(DynamicType* type, FunctionInfo* functionInfo, Var value, bool shouldThrow)
+            : RuntimeFunction(type, functionInfo), value(value), shouldThrow(shouldThrow)
+        { }
+
+        inline static bool Is(Var var)
+        {
+            if (JavascriptFunction::Is(var))
+            {
+                JavascriptFunction* obj = JavascriptFunction::UnsafeFromVar(var);
+
+                return VirtualTableInfo<JavascriptPromiseThunkFinallyFunction>::HasVirtualTable(obj)
+                    || VirtualTableInfo<CrossSiteObject<JavascriptPromiseThunkFinallyFunction>>::HasVirtualTable(obj);
+            }
+            return false;
+        }
+
+        inline static JavascriptPromiseThunkFinallyFunction* FromVar(Var var)
+        {
+            AssertOrFailFast(JavascriptPromiseThunkFinallyFunction::Is(var));
+
+            return static_cast<JavascriptPromiseThunkFinallyFunction*>(var);
+        }
+
+        inline bool GetShouldThrow() { return this->shouldThrow; }
+        inline Var GetValue() { return this->value; }
+
+    private:
+        Field(Var) value;
+        Field(bool) shouldThrow;
+    };
+
     struct JavascriptPromiseAllResolveElementFunctionRemainingElementsWrapper
     {
-        uint32 remainingElements;
+        Field(uint32) remainingElements;
     };
 
     class JavascriptPromiseAllResolveElementFunction : public RuntimeFunction
@@ -245,6 +328,7 @@ namespace Js
 
         inline static bool Is(Var var);
         inline static JavascriptPromiseAllResolveElementFunction* FromVar(Var var);
+        inline static JavascriptPromiseAllResolveElementFunction* UnsafeFromVar(Var var);
 
         JavascriptPromiseCapability* GetCapabilities();
         uint32 GetIndex();
@@ -256,11 +340,11 @@ namespace Js
         uint32 DecrementRemainingElements();
 
     private:
-        JavascriptPromiseCapability* capabilities;
-        uint32 index;
-        JavascriptPromiseAllResolveElementFunctionRemainingElementsWrapper* remainingElementsWrapper;
-        JavascriptArray* values;
-        bool alreadyCalled;
+        Field(JavascriptPromiseCapability*) capabilities;
+        Field(uint32) index;
+        Field(JavascriptPromiseAllResolveElementFunctionRemainingElementsWrapper*) remainingElementsWrapper;
+        Field(JavascriptArray*) values;
+        Field(bool) alreadyCalled;
 
 #if ENABLE_TTD
     public:
@@ -305,9 +389,9 @@ namespace Js
         }
 
     private:
-        Var promise;
-        Var resolve;
-        Var reject;
+        Field(Var) promise;
+        Field(Var) resolve;
+        Field(Var) reject;
 
 #if ENABLE_TTD
     public:
@@ -350,8 +434,8 @@ namespace Js
         }
 
     private:
-        JavascriptPromiseCapability* capabilities;
-        RecyclableObject* handler;
+        Field(JavascriptPromiseCapability*) capabilities;
+        Field(RecyclableObject*) handler;
 
 #if ENABLE_TTD
     public:
@@ -383,10 +467,13 @@ namespace Js
             static FunctionInfo Reject;
             static FunctionInfo Resolve;
             static FunctionInfo Then;
+            static FunctionInfo Finally;
 
             static FunctionInfo Identity;
             static FunctionInfo Thrower;
 
+            static FunctionInfo FinallyValueFunction;
+            static FunctionInfo ThenFinallyFunction;
             static FunctionInfo ResolveOrRejectFunction;
             static FunctionInfo CapabilitiesExecutorFunction;
             static FunctionInfo AllResolveElementFunction;
@@ -404,7 +491,10 @@ namespace Js
         static Var EntryReject(RecyclableObject* function, CallInfo callInfo, ...);
         static Var EntryResolve(RecyclableObject* function, CallInfo callInfo, ...);
         static Var EntryThen(RecyclableObject* function, CallInfo callInfo, ...);
+        static Var EntryFinally(RecyclableObject* function, CallInfo callInfo, ...);
 
+        static Var EntryThunkFinallyFunction(RecyclableObject* function, CallInfo callInfo, ...);
+        static Var EntryThenFinallyFunction(RecyclableObject* function, CallInfo callInfo, ...);
         static Var EntryCapabilitiesExecutorFunction(RecyclableObject* function, CallInfo callInfo, ...);
         static Var EntryResolveOrRejectFunction(RecyclableObject* function, CallInfo callInfo, ...);
         static Var EntryReactionTaskFunction(RecyclableObject* function, CallInfo callInfo, ...);
@@ -421,6 +511,7 @@ namespace Js
 
         static bool Is(Var aValue);
         static JavascriptPromise* FromVar(Js::Var aValue);
+        static JavascriptPromise* UnsafeFromVar(Js::Var aValue);
 
         static Var CreateRejectedPromise(Var resolution, ScriptContext* scriptContext, Var promiseConstructor = nullptr);
         static Var CreateResolvedPromise(Var resolution, ScriptContext* scriptContext, Var promiseConstructor = nullptr);
@@ -442,6 +533,8 @@ namespace Js
         static Var TryCallResolveOrRejectHandler(Var handler, Var value, ScriptContext* scriptContext);
         static Var TryRejectWithExceptionObject(JavascriptExceptionObject* exceptionObject, Var handler, ScriptContext* scriptContext);
 
+        static JavascriptPromise* CreateEnginePromise(ScriptContext *scriptContext);
+
         Var Resolve(Var resolution, ScriptContext* scriptContext);
         Var Reject(Var resolution, ScriptContext* scriptContext);
 
@@ -453,6 +546,8 @@ namespace Js
             PromiseStatusCode_HasRejection
         };
 
+        bool GetIsHandled() { return isHandled; }
+        void SetIsHandled() { isHandled = true; }
         PromiseStatus GetStatus() const { return status; }
         Var GetResult() const { return result; }
 
@@ -460,13 +555,14 @@ namespace Js
         Var ResolveHelper(Var resolution, bool isRejecting, ScriptContext* scriptContext);
 
     protected:
-        PromiseStatus status;
-        Var result;
-        JavascriptPromiseReactionList* resolveReactions;
-        JavascriptPromiseReactionList* rejectReactions;
+        Field(PromiseStatus) status;
+        Field(bool) isHandled;
+        Field(Var) result;
+        Field(JavascriptPromiseReactionList*) resolveReactions;
+        Field(JavascriptPromiseReactionList*) rejectReactions;
 
     private :
-        static void AsyncSpawnStep(JavascriptPromiseAsyncSpawnStepArgumentExecutorFunction* nextFunction, JavascriptGenerator* gen, JavascriptFunction* resolve, JavascriptFunction* reject);
+        static void AsyncSpawnStep(JavascriptPromiseAsyncSpawnStepArgumentExecutorFunction* nextFunction, JavascriptGenerator* gen, Var resolve, Var reject);
 
 #if ENABLE_TTD
     public:

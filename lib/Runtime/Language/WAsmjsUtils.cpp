@@ -10,60 +10,117 @@
 namespace WAsmJs
 {
 
-template<> Types RegisterSpace::GetRegisterSpaceType<int32>(){return WAsmJs::INT32;}
-template<> Types RegisterSpace::GetRegisterSpaceType<int64>(){return WAsmJs::INT64;}
-template<> Types RegisterSpace::GetRegisterSpaceType<float>(){return WAsmJs::FLOAT32;}
-template<> Types RegisterSpace::GetRegisterSpaceType<double>(){return WAsmJs::FLOAT64;}
-template<> Types RegisterSpace::GetRegisterSpaceType<AsmJsSIMDValue>(){return WAsmJs::SIMD;}
-
 #ifdef ENABLE_DEBUG_CONFIG_OPTIONS
-    void TraceAsmJsArgsIn(Js::Var function, int n, ...)
+    namespace Tracing
     {
-        Assert(Js::AsmJsScriptFunction::Is(function));
-        Js::AsmJsScriptFunction* asmFunction = (Js::AsmJsScriptFunction*)function;
-        va_list argptr;
-        va_start(argptr, n);
-
-        Output::Print(_u("Executing function %s("), asmFunction->GetFunctionBody()->GetDisplayName());
-        for (int i = 0; i < n ; i++)
+        // This can be broken if exception are thrown from wasm frames
+        int callDepth = 0;
+        int GetPrintCol()
         {
-            IRType type = (IRType)va_arg(argptr, int32);
-            switch (type)
+            return callDepth;
+        }
+
+        void PrintArgSeparator()
+        {
+            Output::Print(_u(", "));
+        }
+
+        void PrintBeginCall()
+        {
+            ++callDepth;
+            Output::Print(_u(") {\n"));
+        }
+
+        void PrintNewLine()
+        {
+            Output::Print(_u("\n"));
+        }
+
+        void PrintEndCall(int hasReturn)
+        {
+            callDepth = callDepth > 0 ? callDepth - 1 : 0;
+            Output::Print(_u("%*s}"), GetPrintCol(), _u(""));
+            if (hasReturn)
             {
-            case TyInt32:
-            case TyUint32:
-                Output::Print(_u("%d, "), va_arg(argptr, int32));
-                break;
-            case TyInt64:
-            case TyUint64:
-                Output::Print(_u("%lld, "), va_arg(argptr, int64));
-                break;
-            case TyFloat32:
-            {
-                int v = va_arg(argptr, int);
-                Output::Print(_u("%.2f, "), *(float*)v);
-                break;
-            }
-            case TyFloat64:
-                Output::Print(_u("%.2f, "), va_arg(argptr, double));
-                break;
-            default:
-                break;
+                Output::Print(_u(" = "));
             }
         }
-        Output::Print(_u("){\n"));
+
+        int PrintI32(int val)
+        {
+            Output::Print(_u("%d"), val);
+            return val;
+        }
+
+        int64 PrintI64(int64 val)
+        {
+            Output::Print(_u("%lld"), val);
+            return val;
+        }
+
+        float PrintF32(float val)
+        {
+            Output::Print(_u("%.4f"), val);
+            return val;
+        }
+
+        double PrintF64(double val)
+        {
+            Output::Print(_u("%.4f"), val);
+            return val;
+        }
     }
 #endif
+    void JitFunctionIfReady(Js::ScriptFunction* func, uint interpretedCount /*= 0*/)
+    {
+#if ENABLE_NATIVE_CODEGEN
+        Js::FunctionBody* body = func->GetFunctionBody();
+        if (WAsmJs::ShouldJitFunction(body, interpretedCount))
+        {
+            if (PHASE_TRACE(Js::AsmjsEntryPointInfoPhase, body))
+            {
+                Output::Print(_u("Scheduling %s For Full JIT at callcount:%d\n"), body->GetDisplayName(), interpretedCount);
+            }
+            GenerateFunction(body->GetScriptContext()->GetNativeCodeGenerator(), body, func);
+            body->SetIsAsmJsFullJitScheduled(true);
+        }
+#endif
+    }
 
-    uint32 ConvertOffset(uint32 ptr, uint32 fromSize, uint32 toSize)
+    bool ShouldJitFunction(Js::FunctionBody* body, uint interpretedCount)
+    {
+#if ENABLE_NATIVE_CODEGEN
+        if (PHASE_OFF(Js::BackEndPhase, body) ||
+            PHASE_OFF(Js::FullJitPhase, body) ||
+            body->GetScriptContext()->GetConfig()->IsNoNative() ||
+            body->GetIsAsmJsFullJitScheduled())
+        {
+            return false;
+        }
+#if ENABLE_OOP_NATIVE_CODEGEN
+        if (JITManager::GetJITManager()->IsOOPJITEnabled() && !JITManager::GetJITManager()->IsConnected())
+        {
+            return false;
+        }
+#endif
+        const bool forceNative = CONFIG_ISENABLED(Js::ForceNativeFlag);
+        const uint minAsmJsInterpretRunCount = (uint)CONFIG_FLAG(MinAsmJsInterpreterRunCount);
+        const uint maxAsmJsInterpretRunCount = (uint)CONFIG_FLAG(MaxAsmJsInterpreterRunCount);
+        return forceNative || interpretedCount >= minAsmJsInterpretRunCount || interpretedCount >= maxAsmJsInterpretRunCount;
+#else
+        return false;
+#endif
+    }
+
+    uint32 ConvertOffset(uint32 offset, uint32 fromSize, uint32 toSize)
     {
         if (fromSize == toSize)
         {
-            return ptr;
+            return offset;
         }
-        uint64 tmp = ptr * fromSize;
+        uint64 tmp = (uint64)offset * (uint64)fromSize;
         tmp = Math::Align<uint64>(tmp, toSize);
-        tmp /= toSize;
+        tmp /= (uint64)toSize;
         if (tmp > (uint64)UINT32_MAX)
         {
             Math::DefaultOverflowPolicy();
@@ -120,6 +177,12 @@ template<> Types RegisterSpace::GetRegisterSpaceType<AsmJsSIMDValue>(){return WA
         }
         return WAsmJs::LIMIT;
     }
+
+    template<> Types FromPrimitiveType<int32>() { return WAsmJs::INT32; }
+    template<> Types FromPrimitiveType<int64>() { return WAsmJs::INT64; }
+    template<> Types FromPrimitiveType<float>() { return WAsmJs::FLOAT32; }
+    template<> Types FromPrimitiveType<double>() { return WAsmJs::FLOAT64; }
+    template<> Types FromPrimitiveType<AsmJsSIMDValue>() { return WAsmJs::SIMD; }
 
 #if DBG_DUMP
     void RegisterSpace::GetTypeDebugName(Types type, char16* buf, uint bufsize, bool shortName)
@@ -226,11 +289,14 @@ template<> Types RegisterSpace::GetRegisterSpaceType<AsmJsSIMDValue>(){return WA
             }
         }
 
+        // The offset currently carries the total size of the funcInfo after handling the last type
+        funcInfo->SetTotalSizeinBytes(offset);
+
         // These bytes offset already calculated the alignment, used them to determine how many Js::Var we need to do the allocation
         uint32 stackByteSize = offset;
         uint32 bytesUsedForConst = constSourcesInfo.bytesUsed;
-        uint32 jsVarUsedForConstsTable = ConvertToJsVarOffset<byte>(bytesUsedForConst);
-        uint32 totalVarsNeeded = ConvertToJsVarOffset<byte>(stackByteSize);
+        uint32 jsVarUsedForConstsTable = ConvertOffset<byte, Js::Var>(bytesUsedForConst);
+        uint32 totalVarsNeeded = ConvertOffset<byte, Js::Var>(stackByteSize);
 
         uint32 jsVarNeededForVars = totalVarsNeeded - jsVarUsedForConstsTable;
         if (totalVarsNeeded < jsVarUsedForConstsTable)
@@ -259,7 +325,7 @@ template<> Types RegisterSpace::GetRegisterSpaceType<AsmJsSIMDValue>(){return WA
         // this value is the number of Var slots needed to allocate all the const
         uint32 bytesUsedForConst = GetConstSourceInfos().bytesUsed;
         // Add the registers not included in the const table
-        uint32 nbConst = ConvertToJsVarOffset<byte>(bytesUsedForConst) + Js::FunctionBody::FirstRegSlot;
+        uint32 nbConst = ConvertOffset<byte, Js::Var>(bytesUsedForConst) + Js::FunctionBody::FirstRegSlot;
         body->CheckAndSetConstantCount(nbConst);
     }
 

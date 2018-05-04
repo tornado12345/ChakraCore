@@ -104,6 +104,8 @@ var tests = [
 
       assert.doesNotThrow(function () { eval("function foo({x1:[y1 = 1] = [2]} = {x1:[3]}) {}"); },   "Object destructuring pattern has default and nesting array pattern which has initializer is valid syntax");
       assert.doesNotThrow(function () { eval("function foo([{y1:y1 = 1} = {y1:2}] = [{y1:3}]) {}"); },   "Array destructuring pattern has default and nesting object pattern which has initializer is valid syntax");
+
+      assert.doesNotThrow(function () { eval("function foo([a] = class c extends eval(''){}) {}"); }, "Top level function getting deferred causes deferal of param scope functions too");
     }
   },
   {
@@ -222,6 +224,10 @@ var tests = [
             assert.areEqual(k, 62,  "Identifiers from patterns are captured and initialized correctly");
         }
         f3({x:10}, [20], 30);
+
+        function f4(a) { return a() }
+        var f5 = ({ x }) => f4(() => x);
+        assert.areEqual(f5({ x: 42 }), 42, "The destructured param is captured by the inner lambda");
      }
    },
   {
@@ -253,6 +259,10 @@ var tests = [
             })();
         }
         f3({x:5}, [6]);
+
+        function f4(a) { return a() }
+        var f5 = ({ x }) => f4(() => eval("x"));
+        assert.areEqual(f5({ x: 42 }), 42, "The destructured param is captured by the inner lambda with eval");
      }
    },
   {

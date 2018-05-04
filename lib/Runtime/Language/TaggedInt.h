@@ -44,6 +44,7 @@ namespace Js {
         static bool Is(Var aValue);
         static bool Is(intptr_t aValue);
         static bool IsPair(Var aLeft, Var aRight);
+        static bool OnlyContainsTaggedInt(Js::Arguments& args);
         static double ToDouble(Var aValue);
         static int32 ToInt32(Var aValue);
         static int32 ToInt32(intptr_t aValue);
@@ -51,12 +52,15 @@ namespace Js {
         static int64 ToInt64(Var aValue);
         static uint16 ToUInt16(Var aValue);
         static Var ToVarUnchecked(int nValue);
-        static void TaggedInt::ToBuffer(Var aValue, __out_ecount_z(bufSize) char16 * buffer, uint bufSize);
-        static void TaggedInt::ToBuffer(int value, __out_ecount_z(bufSize) char16 * buffer, uint bufSize);
-        static void TaggedInt::ToBuffer(uint value, __out_ecount_z(bufSize) char16 * buffer, uint bufSize);
+        static int ToBuffer(Var aValue, __out_ecount_z(bufSize) char16 * buffer, uint bufSize);
+        static int ToBuffer(int value, __out_ecount_z(bufSize) char16 * buffer, uint bufSize);
+        static int ToBuffer(uint value, __out_ecount_z(bufSize) char16 * buffer, uint bufSize);
         static JavascriptString* ToString(Var aValue,ScriptContext* scriptContext);
         static JavascriptString* ToString(int value,ScriptContext* scriptContext);
         static JavascriptString* ToString(uint value,ScriptContext* scriptContext);
+
+        static int SignedToString(__int64 value, char16 *buffer, int bufferSize);
+        static int UnsignedToString(unsigned __int64 value, char16 *buffer, int bufferSize);
 
         static Var MinVal() { return ToVarUnchecked(k_nMinValue); }
         static Var MaxVal() { return ToVarUnchecked(k_nMaxValue); }

@@ -11,8 +11,11 @@ namespace Js
     protected:
         ES5ArrayType(DynamicType * type);
     };
-    AUTO_REGISTER_RECYCLER_OBJECT_DUMPER(ES5ArrayType, &RecyclableObject::DumpObjectFunction);
+}
+AUTO_REGISTER_RECYCLER_OBJECT_DUMPER(Js::ES5ArrayType, &Js::RecyclableObject::DumpObjectFunction);
 
+namespace Js
+{
     //
     // ES5Array supports attribute/getter/setter for index property names.
     //
@@ -38,6 +41,7 @@ namespace Js
     public:
         static bool Is(Var instance);
         static ES5Array* FromVar(Var instance);
+        static ES5Array* UnsafeFromVar(Var instance);
         static uint32 ToLengthValue(Var value, ScriptContext* scriptContext);
         bool IsLengthWritable() const;
 
@@ -51,23 +55,23 @@ namespace Js
         //
         // To skip JavascriptArray overrides
         //
-        virtual BOOL HasProperty(PropertyId propertyId) override;
+        virtual PropertyQueryFlags HasPropertyQuery(PropertyId propertyId, _Inout_opt_ PropertyValueInfo* info) override;
         virtual BOOL IsWritable(PropertyId propertyId) override;
         virtual BOOL SetEnumerable(PropertyId propertyId, BOOL value) override;
         virtual BOOL SetWritable(PropertyId propertyId, BOOL value) override;
         virtual BOOL SetConfigurable(PropertyId propertyId, BOOL value) override;
         virtual BOOL SetAttributes(PropertyId propertyId, PropertyAttributes attributes) override;
 
-        virtual BOOL GetProperty(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
-        virtual BOOL GetProperty(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
-        virtual BOOL GetPropertyReference(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
+        virtual PropertyQueryFlags GetPropertyQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
+        virtual PropertyQueryFlags GetPropertyQuery(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
+        virtual PropertyQueryFlags GetPropertyReferenceQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
         virtual BOOL SetProperty(PropertyId propertyId, Var value, PropertyOperationFlags flags, PropertyValueInfo* info) override;
         virtual BOOL SetProperty(JavascriptString* propertyNameString, Var value, PropertyOperationFlags flags, PropertyValueInfo* info) override;
         virtual BOOL SetPropertyWithAttributes(PropertyId propertyId, Var value, PropertyAttributes attributes, PropertyValueInfo* info, PropertyOperationFlags flags = PropertyOperation_None, SideEffects possibleSideEffects = SideEffects_Any) override;
 
-        virtual BOOL HasItem(uint32 index) override;
-        virtual BOOL GetItem(Var originalInstance, uint32 index, Var* value, ScriptContext * requestContext) override;
-        virtual BOOL GetItemReference(Var originalInstance, uint32 index, Var* value, ScriptContext * requestContext) override;
+        virtual PropertyQueryFlags HasItemQuery(uint32 index) override;
+        virtual PropertyQueryFlags GetItemQuery(Var originalInstance, uint32 index, Var* value, ScriptContext * requestContext) override;
+        virtual PropertyQueryFlags GetItemReferenceQuery(Var originalInstance, uint32 index, Var* value, ScriptContext * requestContext) override;
         virtual BOOL SetItem(uint32 index, Var value, PropertyOperationFlags flags) override;
         virtual BOOL DeleteItem(uint32 index, PropertyOperationFlags flags) override;
         virtual DescriptorFlags GetSetter(PropertyId propertyId, Var *setterValue, PropertyValueInfo* info, ScriptContext* requestContext) override;
@@ -80,7 +84,7 @@ namespace Js
         virtual BOOL Seal() override;
         virtual BOOL Freeze() override;
 
-        virtual BOOL GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, ForInCache * forInCache = nullptr) override;
+        virtual BOOL GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, EnumeratorCache * enumeratorCache = nullptr) override;
 
         // objectArray support
         virtual BOOL SetItemWithAttributes(uint32 index, Var value, PropertyAttributes attributes) override;
@@ -100,5 +104,5 @@ namespace Js
         virtual void ExtractSnapObjectDataInto(TTD::NSSnapObjects::SnapObject* objData, TTD::SlabAllocator& alloc) override;
 #endif
     };
-    AUTO_REGISTER_RECYCLER_OBJECT_DUMPER(ES5Array, &RecyclableObject::DumpObjectFunction);
 }
+AUTO_REGISTER_RECYCLER_OBJECT_DUMPER(Js::ES5Array, &Js::RecyclableObject::DumpObjectFunction);

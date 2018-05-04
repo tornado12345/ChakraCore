@@ -28,8 +28,14 @@
 @echo off
 setlocal
 
+if "%TF_BUILD_BINARIESDIRECTORY%" == "" (
+  echo TF_BUILD_BINARIESDIRECTORY is required for this script to work correctly.
+  exit /b 1
+)
+
 set _RootDir=%~dp0..
 set _StagingDir=%TF_BUILD_BINARIESDIRECTORY%
+REM %TF_BUILD_DROPLOCATION% is not required -- used only for an informational message
 set _DropRootDir=%TF_BUILD_DROPLOCATION%
 set _HadFailures=0
 
@@ -63,6 +69,7 @@ set _HadFailures=0
   :: Include _RunAll in the check because if it is specified it
   :: should trump this early out.
   if "%_RunAll%%_BuildArch%" == "arm" goto :noTests
+  if "%_RunAll%%_BuildArch%" == "arm64" goto :noTests
   if "%_RunAll%%_BuildType%" == "release" goto :noTests
 
   pushd %_RootDir%\test
@@ -79,10 +86,10 @@ set _HadFailures=0
     call :runNativeTests x86 test
     call :runNativeTests x64 debug
     call :runNativeTests x64 test
-    
+
     call :summarizeLogs summary.log
   ) else (
-    call :runTests %_BuildArch% %_BuildType%
+    call :runTests %_BuildArch% %_BuildType% %_ExtraArgs%
     call :runNativeTests %_BuildArch% %_BuildType%
     call :summarizeLogs summary.%_BuildArch%%_BuildType%.log
   )
@@ -90,11 +97,19 @@ set _HadFailures=0
   call :copyLogsToDrop
 
   echo.
-  if "%_HadFailures%" == "1" (
-    echo -- runcitests.cmd ^>^> Tests failed! 1>&2
+  echo -- runcitests.cmd ^>^> Failure code: %_HadFailures%
+  if "%_HadFailures%" NEQ "0" (
+    if "%_HadFailures%" == "3" (
+      echo -- runcitests.cmd ^>^> Unit tests failed! 1>&2
+    ) else if "%_HadFailures%" == "4" (
+      echo -- runcitests.cmd ^>^> Native tests failed! 1>&2
+    ) else (
+      echo -- runcitests.cmd ^>^> Unknown failure! 1>&2
+    )
   ) else (
     echo -- runcitests.cmd ^>^> Tests passed!
   )
+
   echo -- runcitests.cmd ^>^> Logs at %_DropRootDir%\testlogs
 
   popd
@@ -114,9 +129,12 @@ set _HadFailures=0
 :: ============================================================================
 :runTests
 
-  call :do %_TestDir%\runtests.cmd -%1%2 -quiet -cleanupall -binDir %_StagingDir%\bin
+  call :do %_TestDir%\runtests.cmd -%1%2 %3 -quiet -cleanupall -binDir %_StagingDir%\bin
 
-  if ERRORLEVEL 1 set _HadFailures=1
+  if "%_error%" NEQ "0" (
+    echo -- runcitests.cmd ^>^> runtests.cmd failed
+    set _HadFailures=3
+  )
 
   goto :eof
 
@@ -125,12 +143,20 @@ set _HadFailures=0
 :: ============================================================================
 :runNativeTests
 
-  call :do %_TestDir%\runnativetests.cmd -%1%2 > %_TestDir%\logs\%1_%2\nativetests.log 2>&1
+  echo -- runcitests.cmd ^>^> Running native tests... this can take some time
+  if not exist %_LogDir%\ mkdir %_LogDir%
+  set _LogFile=%_TestDir%\logs\%1_%2\nativetests.log
+  call :do %_TestDir%\runnativetests.cmd -%1%2 -d yes > %_LogFile% 2>&1
+  echo -- runcitests.cmd ^>^> Running native tests... DONE!
 
-  if ERRORLEVEL 1 set _HadFailures=1
+  if "%_error%" NEQ "0" (
+    echo -- runcitests.cmd ^>^> runnativetests.cmd failed; printing %_LogFile%
+    powershell "if (Test-Path %_LogFile%) { Get-Content %_LogFile% }"
+    set _HadFailures=4
+  )
 
   goto :eof
-  
+
 :: ============================================================================
 :: Copy all result logs to the drop share
 :: ============================================================================
@@ -152,7 +178,7 @@ set _HadFailures=0
 
   pushd %_TestDir%\logs
   findstr /sp failed rl.results.log > %1
-  findstr /sip failed nativetests.log > %1
+  findstr /sip failed nativetests.log >> %1
   rem Echo to stderr so that VSO includes the output in the build summary
   type %1 1>&2
   popd
@@ -229,7 +255,7 @@ set _HadFailures=0
 
   if /i "%1" == "-all"              set _RunAll=1&                                              goto :ArgOk
 
-  if not "%1" == "" echo Unknown argument: %1 & set fShowGetHelp=1
+  if not "%1" == ""                 set _ExtraArgs=%_ExtraArgs% %1&                             goto :ArgOk
 
   goto :eof
 
@@ -260,6 +286,7 @@ set _HadFailures=0
 
   echo -- runcitests.cmd ^>^> %*
   cmd /s /c "%*"
+  set _error=%ERRORLEVEL%
 
   goto :eof
 
@@ -271,5 +298,6 @@ set _HadFailures=0
 
   echo -- runcitests.cmd ^>^> %* ^> nul 2^>^&1
   cmd /s /c "%* > nul 2>&1"
+  set _error=%ERRORLEVEL%
 
   goto :eof

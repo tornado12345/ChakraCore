@@ -3,7 +3,7 @@
 // Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.
 //-------------------------------------------------------------------------------------------------------
 #include "RuntimeLibraryPch.h"
-
+#include "Codex/Utf8Helper.h"
 
 
 namespace Js
@@ -11,6 +11,209 @@ namespace Js
     DEFINE_RECYCLER_TRACKER_PERF_COUNTER(ConcatString);
 
     // Note: see also: ConcatString.inl
+    LiteralStringWithPropertyStringPtr::LiteralStringWithPropertyStringPtr(StaticType* stringType) :
+        LiteralString(stringType),
+        propertyString(nullptr),
+        propertyRecord(nullptr)
+    {
+    }
+
+    LiteralStringWithPropertyStringPtr::LiteralStringWithPropertyStringPtr(const char16 * wString,
+      const CharCount stringLength, JavascriptLibrary *const library) :
+        LiteralString(library->GetStringTypeStatic(), wString, stringLength),
+        propertyString(nullptr),
+        propertyRecord(nullptr)
+    {
+    }
+
+    JavascriptString * LiteralStringWithPropertyStringPtr::
+    NewFromWideString(const char16 * wideString, const CharCount charCount, JavascriptLibrary *const library)
+    {
+        Assert(library != nullptr && wideString != nullptr);
+
+        switch (charCount)
+        {
+            case 0:
+            {
+                JavascriptString * emptyString = library->GetEmptyString();
+                AssertMsg(VirtualTableInfo<Js::LiteralStringWithPropertyStringPtr>::HasVirtualTable(emptyString),
+                    "Library::GetEmptyString is no longer LiteralStringWithPropertyStringPtr ?");
+                return emptyString;
+            }
+            case 1:
+            {
+                return library->GetCharStringCache().GetStringForChar((char16(*wideString)));
+            }
+            default:
+                break;
+        }
+
+        Recycler * recycler = library->GetRecycler();
+        ScriptContext * scriptContext = library->GetScriptContext();
+        char16* destString = RecyclerNewArrayLeaf(recycler, WCHAR, charCount + 1);
+
+        if (destString == nullptr)
+        {
+            Js::JavascriptError::ThrowOutOfMemoryError(scriptContext);
+        }
+
+        js_wmemcpy_s(destString, charCount, wideString, charCount);
+        destString[charCount] = char16(0);
+
+        return (JavascriptString*) RecyclerNew(library->GetRecycler(), LiteralStringWithPropertyStringPtr, destString, charCount, library);
+    }
+
+    JavascriptString * LiteralStringWithPropertyStringPtr::CreateEmptyString(JavascriptLibrary *const library)
+    {
+        return (JavascriptString*) RecyclerNew(library->GetRecycler(), LiteralStringWithPropertyStringPtr, _u(""), 0, library);
+    }
+
+    JavascriptString * LiteralStringWithPropertyStringPtr::
+      NewFromCString(const char * cString, const CharCount charCount, JavascriptLibrary *const library)
+    {
+        Assert(library != nullptr && cString != nullptr);
+
+        switch (charCount)
+        {
+            case 0:
+            {
+                JavascriptString * emptyString = library->GetEmptyString();
+                AssertMsg(VirtualTableInfo<Js::LiteralStringWithPropertyStringPtr>::HasVirtualTable(emptyString),
+                    "Library::GetEmptyString is no longer LiteralStringWithPropertyStringPtr ?");
+                return (LiteralStringWithPropertyStringPtr*) emptyString;
+            }
+            case 1:
+            {
+                // If the high bit of the byte is set, it cannot be a complete utf8 codepoint, so fall back to the unicode replacement char
+                if ((*cString & 0x80) != 0x80)
+                {
+                    return library->GetCharStringCache().GetStringForChar((char16(*cString)));
+                }
+                else
+                {
+                    return library->GetCharStringCache().GetStringForChar(0xFFFD);
+                }
+            }
+            default:
+                break;
+        }
+
+        ScriptContext * scriptContext = library->GetScriptContext();
+        if (charCount > MaxCharCount)
+        {
+            Js::JavascriptError::ThrowOutOfMemoryError(scriptContext);
+        }
+
+        Recycler * recycler = library->GetRecycler();
+        char16* destString = RecyclerNewArrayLeaf(recycler, WCHAR, charCount + 1);
+        if (destString == nullptr)
+        {
+            Js::JavascriptError::ThrowOutOfMemoryError(scriptContext);
+        }
+
+        charcount_t cchDestString = 0;
+        HRESULT result = utf8::NarrowStringToWideNoAlloc(cString, charCount, destString, charCount + 1, &cchDestString);
+
+        if (result == S_OK)
+        {
+            return (JavascriptString*) RecyclerNew(library->GetRecycler(), LiteralStringWithPropertyStringPtr, destString, cchDestString, library);
+        }
+
+        Js::JavascriptError::ThrowOutOfMemoryError(scriptContext);
+    }
+
+    PropertyString * LiteralStringWithPropertyStringPtr::GetPropertyString() const
+    {
+        return this->propertyString;
+    }
+
+    PropertyString * LiteralStringWithPropertyStringPtr::GetOrAddPropertyString()
+    {
+        if (this->propertyString != nullptr)
+        {
+            return this->propertyString;
+        }
+
+        Js::PropertyRecord const * propertyRecord = nullptr;
+        GetPropertyRecordImpl(&propertyRecord);
+
+        this->propertyString = this->GetScriptContext()->GetPropertyString(propertyRecord->GetPropertyId());
+        return this->propertyString;
+    }
+
+    void LiteralStringWithPropertyStringPtr::SetPropertyString(PropertyString * propStr)
+    {
+        this->propertyString = propStr;
+        if (propStr != nullptr)
+        {
+            Js::PropertyRecord const * localPropertyRecord;
+            propStr->GetPropertyRecord(&localPropertyRecord);
+            this->propertyRecord = localPropertyRecord;
+        }
+    }
+
+    /* static */
+    bool LiteralStringWithPropertyStringPtr::Is(RecyclableObject * obj)
+    {
+        return VirtualTableInfo<Js::LiteralStringWithPropertyStringPtr>::HasVirtualTable(obj);
+    }
+
+    /* static */
+    bool LiteralStringWithPropertyStringPtr::Is(Var var)
+    {
+        return RecyclableObject::Is(var) && LiteralStringWithPropertyStringPtr::Is(RecyclableObject::UnsafeFromVar(var));
+    }
+
+    void LiteralStringWithPropertyStringPtr::GetPropertyRecord(_Out_ PropertyRecord const** propRecord, bool dontLookupFromDictionary)
+    {
+        return GetPropertyRecordImpl(propRecord, dontLookupFromDictionary);
+    }
+
+    void LiteralStringWithPropertyStringPtr::GetPropertyRecordImpl(_Out_ PropertyRecord const** propRecord, bool dontLookupFromDictionary)
+    {
+        if (this->propertyRecord)
+        {
+            *propRecord = this->propertyRecord;
+            return;
+        }
+
+        __super::GetPropertyRecord(propRecord, dontLookupFromDictionary);
+
+        if (*propRecord)
+        {
+            CachePropertyRecordImpl(*propRecord);
+        }
+    }
+
+    void LiteralStringWithPropertyStringPtr::CachePropertyRecord(_In_ PropertyRecord const* propertyRecord)
+    {
+        return CachePropertyRecordImpl(propertyRecord);
+    }
+
+    void LiteralStringWithPropertyStringPtr::CachePropertyRecordImpl(_In_ PropertyRecord const* propertyRecord)
+    {
+        this->propertyRecord = propertyRecord;
+        Assert(this->GetLength() == propertyRecord->GetLength());
+
+        // PropertyRecord has its own copy of the string content, so we can drop the reference to our old copy.
+        // This is okay because the PropertyRecord pointer will keep the data alive.
+        this->SetBuffer(propertyRecord->GetBuffer());
+    }
+
+    RecyclableObject* LiteralStringWithPropertyStringPtr::CloneToScriptContext(ScriptContext* requestContext)
+    {
+        if (this->propertyRecord == nullptr)
+        {
+            // Without a property record, we can safely multi-reference the underlying buffer. Assertions in
+            // the constructor of LiteralString will verify this.
+            return __super::CloneToScriptContext(requestContext);
+        }
+
+        // We have a property record, so go ahead and make this be a property string in the request context.
+        // The strings in both contexts will refer to the same property record, since property records are
+        // shared among all script contexts on a thead.
+        return requestContext->GetPropertyString(this->propertyRecord);
+    }
 
     /////////////////////// ConcatStringBase //////////////////////////
 
@@ -129,7 +332,7 @@ namespace Js
 
     ConcatStringBuilder::ConcatStringBuilder(ScriptContext* scriptContext, int initialSlotCount) :
         ConcatStringBase(scriptContext->GetLibrary()->GetStringTypeStatic()),
-        m_count(0), m_prevChunk(NULL)
+        m_count(0), m_prevChunk(nullptr)
     {
         Assert(scriptContext);
 
@@ -164,10 +367,11 @@ namespace Js
         ConcatStringBuilder* current = this;
         while (current != NULL)
         {
-            memset(current->m_slots, 0, current->m_count * sizeof(JavascriptString*));
+            ClearArray(current->m_slots, current->m_count);
             current = current->m_prevChunk;
         }
 
+        LiteralStringWithPropertyStringPtr::ConvertString(this);
         return sz;
     }
 
@@ -194,8 +398,9 @@ namespace Js
             if (newSlotCount <= c_maxChunkSlotCount)
             {
                 // While we fit into MAX chunk size, realloc/grow current chunk.
-                JavascriptString** newSlots = RecyclerNewArray(this->GetScriptContext()->GetRecycler(), JavascriptString*, newSlotCount);
-                memcpy_s(newSlots, newSlotCount * sizeof(JavascriptString*), m_slots, m_slotCount * sizeof(JavascriptString*));
+                Field(JavascriptString*)* newSlots = RecyclerNewArray(
+                    this->GetScriptContext()->GetRecycler(), Field(JavascriptString*), newSlotCount);
+                CopyArray(newSlots, newSlotCount, m_slots, m_slotCount);
                 m_slots = newSlots;
                 m_slotCount = newSlotCount;
             }
@@ -226,12 +431,12 @@ namespace Js
         if (requestedSlotCount > 0)
         {
             m_slotCount = min(requestedSlotCount, this->c_maxChunkSlotCount);
-            m_slots = RecyclerNewArray(this->GetScriptContext()->GetRecycler(), JavascriptString*, m_slotCount);
+            m_slots = RecyclerNewArray(this->GetScriptContext()->GetRecycler(), Field(JavascriptString*), m_slotCount);
         }
         else
         {
             m_slotCount = 0;
-            m_slots = 0;
+            m_slots = nullptr;
         }
     }
 
@@ -303,7 +508,7 @@ namespace Js
         ConcatStringBase(stringTypeStatic), slotCount(slotCount)
     {
 #if DBG
-        memset(m_slots, 0, slotCount * sizeof(JavascriptString* ));
+        ClearArray(m_slots, slotCount);
 #endif
         m_slots[0] = CompoundString::GetImmutableOrScriptUnreferencedString(a1);
         m_slots[1] = CompoundString::GetImmutableOrScriptUnreferencedString(a2);
@@ -334,6 +539,13 @@ namespace Js
     ConcatStringMulti *
     ConcatStringMulti::FromVar(Var var)
     {
+        AssertOrFailFast(ConcatStringMulti::Is(var));
+        return static_cast<ConcatStringMulti *>(var);
+    }
+
+    ConcatStringMulti *
+    ConcatStringMulti::UnsafeFromVar(Var var)
+    {
         Assert(ConcatStringMulti::Is(var));
         return static_cast<ConcatStringMulti *>(var);
     }
@@ -345,8 +557,9 @@ namespace Js
         const char16 * sz = GetSzImpl<ConcatStringMulti>();
 
         // Allow slots to be garbage collected if no more refs.
-        memset(m_slots, 0, slotCount * sizeof(JavascriptString*));
+        ClearArray(m_slots, slotCount);
 
+        LiteralStringWithPropertyStringPtr::ConvertString(this);
         return sz;
     }
 

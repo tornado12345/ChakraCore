@@ -5,22 +5,18 @@
 
 #include "Common.h"
 #include "ChakraPlatform.h"
-#include <sys/sysinfo.h>
+#include <sys/resource.h>
 
 namespace PlatformAgnostic
 {
-    SystemInfo::PlatformData SystemInfo::data;
-
-    SystemInfo::PlatformData::PlatformData()
+    bool SystemInfo::GetMaxVirtualMemory(size_t *totalAS)
     {
-        struct sysinfo systemInfo;
-        if (sysinfo(&systemInfo) == -1)
+        struct rlimit limit;
+        if (getrlimit(RLIMIT_AS, &limit) != 0)
         {
-            totalRam = 0;
+            return false;
         }
-        else
-        {
-            totalRam = systemInfo.totalram;
-        }
+        *totalAS = limit.rlim_cur;
+        return true;
     }
 }

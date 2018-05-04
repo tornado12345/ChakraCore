@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Condition="'$(ChakraBuildPathImported)'!='true'" Project="$(SolutionDir)Chakra.Build.Paths.props" />
   <Import Project="$(BuildConfigPropsPath)Chakra.Build.ProjectConfiguration.props" />
@@ -38,9 +38,11 @@
       </AdditionalIncludeDirectories>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>RuntimeDebugPch.h</PrecompiledHeaderFile>
+      <!-- # Check out https://osgwiki.com/wiki/Dev_14_Migration for more details about -Zc:implicitNoexcept- -->
+      <AdditionalOptions>-Zc:implicitNoexcept- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
-  <ItemGroup>
+  <ItemGroup Condition="'$(BuildScriptDebug)'!='false'">
     <ClCompile Include="$(MSBuildThisFileDirectory)DebugContext.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)BreakpointProbe.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)DebugDocument.cpp" />
@@ -52,7 +54,6 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)DiagStackFrame.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)MutationBreakpoint.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)ProbeContainer.cpp" />
-    <ClCompile Include="$(MSBuildThisFileDirectory)SourceContextInfo.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)RuntimeDebugPch.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
@@ -60,7 +61,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)TTEventLog.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)TTEvents.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)TTInflateMap.cpp" />
-    <ClCompile Include="$(MSBuildThisFileDirectory)TTRuntmeInfoTracker.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)TTRuntimeInfoTracker.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)TTSerialize.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)TTSnapObjects.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)TTSnapshot.cpp" />
@@ -68,6 +69,7 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)TTSnapTypes.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)TTSnapValues.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)TTSupport.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)TTExecutionInfo.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="DebugContext.h" />
@@ -82,10 +84,10 @@
     <ClInclude Include="MutationBreakpoint.h" />
     <ClInclude Include="ProbeContainer.h" />
     <ClInclude Include="RuntimeDebugPch.h" />
-    <ClInclude Include="SourceContextInfo.h" />
     <ClInclude Include="TTActionEvents.h" />
     <ClInclude Include="TTEventLog.h" />
     <ClInclude Include="TTEvents.h" />
+    <ClInclude Include="TTExecutionInfo.h" />
     <ClInclude Include="TTInflateMap.h" />
     <ClInclude Include="TTRuntimeInfoTracker.h" />
     <ClInclude Include="TTSerialize.h" />

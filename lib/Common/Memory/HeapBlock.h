@@ -33,22 +33,50 @@ if (flags.Trace.IsEnabled(Js::PageHeapPhase)) \
 
 class Recycler;
 class HeapBucket;
+class HeapInfo;
 template <typename TBlockType> class HeapBucketT;
 class  RecyclerSweep;
 class MarkContext;
 
-#ifdef DUMP_FRAGMENTATION_STATS
-struct HeapBucketStats
+#if ENABLE_MEM_STATS
+struct MemStats
 {
+    size_t objectByteCount;
+    size_t totalByteCount;
+
+    MemStats();
+
+    void Reset();
+    size_t FreeBytes() const;
+    double UsedRatio() const;
+    void Aggregate(const MemStats& other);
+};
+
+struct HeapBucketStats: MemStats
+{
+#ifdef DUMP_FRAGMENTATION_STATS
     uint totalBlockCount;
-    uint emptyBlockCount;
-    uint finalizeBlockCount;
     uint objectCount;
     uint finalizeCount;
-    uint objectByteCount;
-    uint totalByteCount;
-};
+
+    HeapBucketStats();
+    void Reset();
+    void Dump() const;
 #endif
+
+    void PreAggregate();
+    void BeginAggregate();
+    void Aggregate(const HeapBucketStats& other);
+};
+
+#ifdef DUMP_FRAGMENTATION_STATS
+#define DUMP_FRAGMENTATION_STATS_ONLY(x) x
+#define DUMP_FRAGMENTATION_STATS_IS(x) x
+#else
+#define DUMP_FRAGMENTATION_STATS_ONLY(x)
+#define DUMP_FRAGMENTATION_STATS_IS(x) false
+#endif
+#endif  // ENABLE_MEM_STATS
 
 #if defined(PROFILE_RECYCLER_ALLOC) || defined(RECYCLER_MEMORY_VERIFY) || defined(MEMSPECT_TRACKING) || defined(RECYCLER_PERF_COUNTERS) || defined(ETW_MEMORY_TRACKING)
 #define RECYCLER_TRACK_NATIVE_ALLOCATED_OBJECTS
@@ -73,7 +101,7 @@ enum ObjectInfoBits : unsigned short
     FinalizeBit                 = 0x80,    // Indicates that the object has a finalizer
     PendingDisposeBit           = 0x40,    // Indicates that the object is pending dispose
     LeafBit                     = 0x20,    // Indicates that the object is a leaf-object (objects without this bit need to be scanned)
-    TrackBit                    = 0x10,    // Indicates that the object is a TrackableObject
+    TrackBit                    = 0x10,    // Indicates that the object is a TrackableObject, but has also been overloaded to mean traced for RecyclerVisitedHostHeap objects
     ImplicitRootBit             = 0x08,
     NewTrackBit                 = 0x04,    // Tracked object is newly allocated and hasn't been process by concurrent GC
     MemoryProfilerOldObjectBit  = 0x02,
@@ -91,13 +119,17 @@ enum ObjectInfoBits : unsigned short
     WithBarrierBit              = 0x0100,
 #endif
 
+#ifdef RECYCLER_VISITED_HOST
+    RecyclerVisitedHostBit      = 0x0200,
+#endif
+
     // Mask for above bits
-    InternalObjectInfoBitMask   = 0x01FF,
+    InternalObjectInfoBitMask   = 0x03FF,
 
     // Bits that only affect allocation behavior, not mark/sweep/etc
 
-    ClientTrackedBit            = 0x0200,       // This allocation is client tracked
-    TraceBit                    = 0x0400,
+    ClientTrackedBit            = 0x0400,       // This allocation is client tracked
+    TraceBit                    = 0x0800,
 
     // Additional definitions based on above
 
@@ -113,7 +145,7 @@ enum ObjectInfoBits : unsigned short
 
     // Allocation bits
     FinalizableLeafBits         = NewFinalizeBit | FinalizeBit | LeafBit,
-    FinalizableObjectBits       = NewFinalizeBit | FinalizeBit ,
+    FinalizableObjectBits       = NewFinalizeBit | FinalizeBit,
 #ifdef RECYCLER_WRITE_BARRIER
     FinalizableWithBarrierObjectBits = NewFinalizeBit | FinalizableWithBarrierBit,
 #endif
@@ -122,6 +154,11 @@ enum ObjectInfoBits : unsigned short
     ClientTrackableLeafBits     = NewTrackBit | ClientTrackedBit | TrackBit | FinalizeBit | LeafBit,
     ClientTrackableObjectBits   = NewTrackBit | ClientTrackedBit | TrackBit | FinalizeBit,
 
+#ifdef RECYCLER_WRITE_BARRIER
+    ClientTrackableObjectWithBarrierBits = ClientTrackableObjectBits | WithBarrierBit,
+    ClientFinalizableObjectWithBarrierBits = ClientFinalizableObjectBits | WithBarrierBit,
+#endif
+
     WeakReferenceEntryBits      = LeafBit,
 
     ImplicitRootLeafBits        = LeafBit | ImplicitRootBit,
@@ -129,11 +166,34 @@ enum ObjectInfoBits : unsigned short
     // Pending dispose objects should have LeafBit set and no others
     PendingDisposeObjectBits    = PendingDisposeBit | LeafBit,
 
-#ifdef RECYCLER_WRITE_BARRIER
-    GetBlockTypeBitMask = FinalizeBit | LeafBit | WithBarrierBit,
-#else
-    GetBlockTypeBitMask = FinalizeBit | LeafBit,
+#ifdef RECYCLER_VISITED_HOST
+    // Bits for use with recycler visited host heap block.
+    // Recycler visited host heap block will both mark and finalize based on IRecyclerVisitedHost v-table, as specified
+    // by TrackBit and FinalizeBit. These objects are expected to be allocated by chakra, but implemented by
+    // the host, including construction of the IRecyclerVisitedHost v-table.
+    //
+    // RecyclerVisitedHostBit is implicit in the heap block type and thus isn't part of the StoredObjectInfoBitMask.
+    // LeafBit is also set for any object that is not precisely traced.
+    RecyclerVisitedHostTracedBits = RecyclerVisitedHostBit | TrackBit | NewTrackBit,
+    RecyclerVisitedHostFinalizableBits = RecyclerVisitedHostBit | LeafBit | FinalizeBit | NewFinalizeBit,
+    RecyclerVisitedHostTracedFinalizableBits = RecyclerVisitedHostTracedBits | FinalizeBit,
+
+    // These set of bits describe the four possible types of blocktype bits for recycler visited host heap blocks.
+    // These are the four combinations of the above bits, AND'd with GetBlockTypeBitMask.
+    // In the end, these are treated the same in terms of which heap block/bucket type they end up using and
+    // but are defined here for ease of use.
+    RecyclerVisitedHostFinalizableBlockTypeBits = RecyclerVisitedHostBit | LeafBit | FinalizeBit,
+    RecyclerVisitedHostTracedFinalizableBlockTypeBits = RecyclerVisitedHostBit | FinalizeBit,
 #endif
+
+    GetBlockTypeBitMask = FinalizeBit | LeafBit 
+#ifdef RECYCLER_WRITE_BARRIER
+    | WithBarrierBit
+#endif
+#ifdef RECYCLER_VISITED_HOST
+    | RecyclerVisitedHostBit
+#endif
+    ,
 
     CollectionBitMask           = LeafBit | FinalizeBit | TrackBit | NewTrackBit,  // Bits relevant to collection
 
@@ -182,32 +242,41 @@ enum FindHeapObjectFlags
 template <class TBlockAttributes> class SmallNormalHeapBlockT;
 template <class TBlockAttributes> class SmallLeafHeapBlockT;
 template <class TBlockAttributes> class SmallFinalizableHeapBlockT;
+
 #ifdef RECYCLER_WRITE_BARRIER
 template <class TBlockAttributes> class SmallNormalWithBarrierHeapBlockT;
 template <class TBlockAttributes> class SmallFinalizableWithBarrierHeapBlockT;
+
+#define INSTANTIATE_SWB_BLOCKTYPES(TemplateType) \
+    template class TemplateType<Memory::SmallNormalWithBarrierHeapBlock>; \
+    template class TemplateType<Memory::SmallFinalizableWithBarrierHeapBlock>; \
+    template class TemplateType<Memory::MediumNormalWithBarrierHeapBlock>; \
+    template class TemplateType<Memory::MediumFinalizableWithBarrierHeapBlock>; \
+
+
+#else
+#define INSTANTIATE_SWB_BLOCKTYPES(TemplateType)
+#endif
+
+#ifdef RECYCLER_VISITED_HOST
+template <class TBlockAttributes> class SmallRecyclerVisitedHostHeapBlockT;
+#define INSTANTIATE_RECYCLER_VISITED_BLOCKTYPES(TemplateType) \
+    template class TemplateType<Memory::SmallRecyclerVisitedHostHeapBlock>; \
+    template class TemplateType<Memory::MediumRecyclerVisitedHostHeapBlock>; \
+
+#else
+#define INSTANTIATE_RECYCLER_VISITED_BLOCKTYPES(TemplateType)
+#endif
 
 #define EXPLICIT_INSTANTIATE_WITH_SMALL_HEAP_BLOCK_TYPE(TemplateType) \
     template class TemplateType<Memory::SmallNormalHeapBlock>;        \
     template class TemplateType<Memory::SmallLeafHeapBlock>; \
     template class TemplateType<Memory::SmallFinalizableHeapBlock>; \
-    template class TemplateType<Memory::SmallNormalWithBarrierHeapBlock>; \
-    template class TemplateType<Memory::SmallFinalizableWithBarrierHeapBlock>; \
     template class TemplateType<Memory::MediumNormalHeapBlock>; \
     template class TemplateType<Memory::MediumLeafHeapBlock>; \
     template class TemplateType<Memory::MediumFinalizableHeapBlock>; \
-    template class TemplateType<Memory::MediumNormalWithBarrierHeapBlock>; \
-    template class TemplateType<Memory::MediumFinalizableWithBarrierHeapBlock>; \
-
-#else
-#define EXPLICIT_INSTANTIATE_WITH_SMALL_HEAP_BLOCK_TYPE(TemplateType) \
-    template class TemplateType<Memory::SmallNormalHeapBlock>; \
-    template class TemplateType<Memory::SmallLeafHeapBlock>; \
-    template class TemplateType<Memory::SmallFinalizableHeapBlock>; \
-    template class TemplateType<Memory::MediumNormalHeapBlock>;     \
-    template class TemplateType<Memory::MediumLeafHeapBlock>; \
-    template class TemplateType<Memory::MediumFinalizableHeapBlock>; \
-
-#endif
+    INSTANTIATE_SWB_BLOCKTYPES(TemplateType) \
+    INSTANTIATE_RECYCLER_VISITED_BLOCKTYPES(TemplateType) \
 
 class RecyclerHeapObjectInfo;
 class HeapBlock
@@ -216,31 +285,58 @@ public:
     enum HeapBlockType : byte
     {
         FreeBlockType = 0,                  // Only used in HeapBlockMap.  Actual HeapBlock structures should never have this.
-        SmallNormalBlockType = 1,
-        SmallLeafBlockType = 2,
-        SmallFinalizableBlockType = 3,
+        SmallNormalBlockType,
+        SmallLeafBlockType,
+        SmallFinalizableBlockType,
 #ifdef RECYCLER_WRITE_BARRIER
-        SmallNormalBlockWithBarrierType = 4,
-        SmallFinalizableBlockWithBarrierType = 5,
+        SmallNormalBlockWithBarrierType,
+        SmallFinalizableBlockWithBarrierType,
 #endif
-        MediumNormalBlockType = 6,
-        MediumLeafBlockType = 7,
-        MediumFinalizableBlockType = 8,
+#ifdef RECYCLER_VISITED_HOST
+        SmallRecyclerVisitedHostBlockType,
+#endif
+        MediumNormalBlockType,
+        MediumLeafBlockType,
+        MediumFinalizableBlockType,
 #ifdef RECYCLER_WRITE_BARRIER
-        MediumNormalBlockWithBarrierType = 9,
-        MediumFinalizableBlockWithBarrierType = 10,
+        MediumNormalBlockWithBarrierType,
+        MediumFinalizableBlockWithBarrierType,
 #endif
-        LargeBlockType = 11,
+#ifdef RECYCLER_VISITED_HOST
+        MediumRecyclerVisitedHostBlockType,
+#endif
+        LargeBlockType,
 
-        SmallAllocBlockTypeCount = 6,  // Actual number of types for blocks containing small allocations
-        MediumAllocBlockTypeCount = 5, // Actual number of types for blocks containing medium allocations
-        SmallBlockTypeCount = 11,      // Distinct block types independent of allocation size using SmallHeapBlockT
+#ifdef RECYCLER_VISITED_HOST
+        SmallAllocBlockTypeCount = 7, // Actual number of types for blocks containing small allocations
+#else
+        SmallAllocBlockTypeCount = 6,
+#endif
 
-        BlockTypeCount = 12,
+#ifdef RECYCLER_VISITED_HOST
+        MediumAllocBlockTypeCount = 6, // Actual number of types for blocks containing medium allocations
+#else
+        MediumAllocBlockTypeCount = 5,
+#endif
+
+        SmallBlockTypeCount = SmallAllocBlockTypeCount + MediumAllocBlockTypeCount,      // Distinct block types independent of allocation size using SmallHeapBlockT
+        LargeBlockTypeCount = 1, // There is only one LargeBlockType
+
+        BlockTypeCount = SmallBlockTypeCount + LargeBlockTypeCount,
     };
     bool IsNormalBlock() const { return this->GetHeapBlockType() == SmallNormalBlockType || this->GetHeapBlockType() == MediumNormalBlockType; }
     bool IsLeafBlock() const { return this->GetHeapBlockType() == SmallLeafBlockType || this->GetHeapBlockType() == MediumLeafBlockType; }
-    bool IsFinalizableBlock() const { return this->GetHeapBlockType() == SmallFinalizableBlockType || this->GetHeapBlockType() == MediumFinalizableBlockType; }
+    bool IsFinalizableBlock() const 
+    {
+        return this->GetHeapBlockType() == SmallFinalizableBlockType || this->GetHeapBlockType() == MediumFinalizableBlockType
+#ifdef RECYCLER_VISITED_HOST
+            || IsRecyclerVisitedHostBlock()
+#endif
+            ;
+    }
+#ifdef RECYCLER_VISITED_HOST
+    bool IsRecyclerVisitedHostBlock() const { return this->GetHeapBlockType() == SmallRecyclerVisitedHostBlockType || this->GetHeapBlockType() == MediumRecyclerVisitedHostBlockType; }
+#endif
 
 #ifdef RECYCLER_WRITE_BARRIER
     bool IsAnyNormalBlock() const { return IsNormalBlock() || IsNormalWriteBarrierBlock(); }
@@ -264,6 +360,12 @@ public:
 
     template <typename TBlockAttributes>
     SmallFinalizableHeapBlockT<TBlockAttributes> * AsFinalizableBlock();
+
+#ifdef RECYCLER_VISITED_HOST
+    template <typename TBlockAttributes>
+    SmallRecyclerVisitedHostHeapBlockT<TBlockAttributes> * AsRecyclerVisitedHostBlock();
+#endif
+
 #ifdef RECYCLER_WRITE_BARRIER
     template <typename TBlockAttributes>
     SmallNormalWithBarrierHeapBlockT<TBlockAttributes> * AsNormalWriteBarrierBlock();
@@ -279,10 +381,23 @@ protected:
     bool needOOMRescan;                             // Set if we OOMed while marking a particular object
 #if ENABLE_CONCURRENT_GC
     bool isPendingConcurrentSweep;
+#if ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP
+    // This flag is to identify whether this block was made available for allocations during the concurrent sweep and 
+    // still needs to be swept.
+    bool isPendingConcurrentSweepPrep;
+#if DBG || defined(RECYCLER_SLOW_CHECK_ENABLED)
+    // This flag ensures a block doesn't get swept more than once during a given sweep.
+    bool hasFinishedSweepObjects;
+
+    // When allocate from a block during concurrent sweep some checks need to be delayed until
+    // the free and mark bits are rebuilt. This flag helps skip those validations until then.
+    bool wasAllocatedFromDuringSweep;
+#endif
+#endif
 #endif
 
 public:
-    template <typename Fn>
+    template <bool doSpecialMark, typename Fn>
     bool UpdateAttributesOfMarkedObjects(MarkContext * markContext, void * objectAddress, size_t objectSize, unsigned char attributes, Fn fn);
     void SetNeedOOMRescan(Recycler * recycler);
 public:
@@ -290,6 +405,7 @@ public:
         heapBlockType(heapBlockType),
         needOOMRescan(false)
     {
+        static_assert(HeapBlockType::LargeBlockType == HeapBlockType::SmallBlockTypeCount, "LargeBlockType must come right after small+medium alloc block types");
         Assert(GetHeapBlockType() <= HeapBlock::HeapBlockType::BlockTypeCount);
     }
 
@@ -298,7 +414,14 @@ public:
         return (heapBlockType);
     }
 
-    IdleDecommitPageAllocator* GetPageAllocator(Recycler* recycler);
+#if (DBG || defined(RECYCLER_SLOW_CHECK_ENABLED)) && ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP
+    bool WasAllocatedFromDuringSweep()
+    {
+        return this->wasAllocatedFromDuringSweep;
+    }
+#endif
+
+    IdleDecommitPageAllocator* GetPageAllocator(HeapInfo * heapInfo);
 
     bool GetAndClearNeedOOMRescan()
     {
@@ -310,20 +433,32 @@ public:
 
         return false;
     }
+#if DBG
+#if GLOBAL_ENABLE_WRITE_BARRIER
+    virtual void WBSetBit(char* addr) = 0;
+    virtual void WBSetBitRange(char* addr, uint count) = 0;
+    virtual void WBClearBit(char* addr) = 0;
+    virtual void WBVerifyBitIsSet(char* addr) = 0;
+    virtual void WBClearObject(char* addr) = 0;
+#endif
+    static void PrintVerifyMarkFailure(Recycler* recycler, char* objectAddress, char* target);
+#endif
+
 
 #if DBG
+    virtual HeapInfo * GetHeapInfo() const = 0;
     virtual BOOL IsFreeObject(void* objectAddress) = 0;
 #endif
     virtual BOOL IsValidObject(void* objectAddress) = 0;
 
     virtual byte* GetRealAddressFromInterior(void* interiorAddress) = 0;
-    virtual size_t GetObjectSize(void* object) = 0;
+    virtual size_t GetObjectSize(void* object) const = 0;
     virtual bool FindHeapObject(void* objectAddress, Recycler * recycler, FindHeapObjectFlags flags, RecyclerHeapObjectInfo& heapObject) = 0;
     virtual bool TestObjectMarkedBit(void* objectAddress) = 0;
     virtual void SetObjectMarkedBit(void* objectAddress) = 0;
 
 #ifdef RECYCLER_VERIFY_MARK
-    virtual void VerifyMark(void * objectAddress) = 0;
+    virtual bool VerifyMark(void * objectAddress, void * target) = 0;
 #endif
 #ifdef PROFILE_RECYCLER_ALLOC
     virtual void * GetTrackerData(void * address) = 0;
@@ -336,6 +471,15 @@ public:
     virtual void UpdatePerfCountersOnFree() = 0;
 #endif
 };
+
+#if ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP && SUPPORT_WIN32_SLIST
+template <typename TBlockType>
+struct HeapBlockSListItem {
+    // SLIST_ENTRY needs to be the first element in the structure to avoid calculating offset with the SList API calls.
+    SLIST_ENTRY itemEntry;
+    TBlockType * itemHeapBlock;
+};
+#endif
 
 enum SweepMode
 {
@@ -364,11 +508,22 @@ template <class TBlockAttributes>
 class ValidPointers
 {
 public:
-    ValidPointers(ushort const * validPointers);
+    ValidPointers(ushort const * validPointers, uint bucketIndex);
     ushort GetInteriorAddressIndex(uint index) const;
     ushort GetAddressIndex(uint index) const;
 private:
+#if USE_VPM_TABLE
     ushort const * validPointers;
+#endif
+
+#if !USE_VPM_TABLE || DBG
+    uint indexPerObject;
+    uint maxObjectIndex;
+
+    static uint CalculateBucketInfo(uint bucketIndex, uint * stride);
+    static ushort CalculateAddressIndex(uint index, uint indexPerObject, uint maxObjectIndex);
+    static ushort CalculateInteriorAddressIndex(uint index, uint indexPerObject, uint maxObjectIndex);
+#endif
 };
 
 template <class TBlockAttributes>
@@ -414,6 +569,18 @@ public:
     ushort freeCount;
     ushort lastFreeCount;
     ushort markCount;
+#if ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP
+#if DBG || defined(RECYCLER_SLOW_CHECK_ENABLED)
+    // We need to keep track of the number of objects allocated during concurrent sweep, to be
+    // able to make the correct determination about whether a block is EMPTY or FULL when the actual
+    // sweep of this block happens.
+    ushort objectsAllocatedDuringConcurrentSweepCount;
+    ushort objectsMarkedDuringSweep;
+    ushort lastObjectsAllocatedDuringConcurrentSweepCount;
+    bool blockNotReusedInPartialHeapBlockList;
+    bool blockNotReusedInPendingList;
+#endif
+#endif
 
 #if ENABLE_PARTIAL_GC
     ushort oldFreeCount;
@@ -428,6 +595,11 @@ public:
 #endif
     SmallHeapBlockBitVector* markBits;
     SmallHeapBlockBitVector  freeBits;
+#if DBG
+    // TODO: (leish)(swb) move this to the block header if memory pressure on chk build is a problem
+    // this causes 1/64 more memory usage on x64 or 1/32 more on x86
+    BVStatic<TBlockAttributes::PageCount * AutoSystemInfo::PageSize / sizeof(void*)> wbVerifyBits;
+#endif
 
 #if DBG || defined(RECYCLER_STATS)
     SmallHeapBlockBitVector debugFreeBits;
@@ -447,6 +619,45 @@ public:
     void ProtectUnusablePages() {}
     void RestoreUnusablePages() {}
 
+#if DBG && GLOBAL_ENABLE_WRITE_BARRIER
+    virtual void WBVerifyBitIsSet(char* addr) override
+    {
+        uint index = (uint)(addr - this->address) / sizeof(void*);
+        if (!wbVerifyBits.Test(index)) // TODO: (leish)(swb) need interlocked? seems not
+        {
+            PrintVerifyMarkFailure(this->GetRecycler(), addr, *(char**)addr);
+        }
+    }
+    virtual void WBSetBit(char* addr) override
+    {
+        uint index = (uint)(addr - this->address) / sizeof(void*);
+        wbVerifyBits.TestAndSetInterlocked(index);
+    }
+    virtual void WBSetBitRange(char* addr, uint count) override
+    {
+        uint index = (uint)(addr - this->address) / sizeof(void*);
+        for (uint i = 0; i < count; i++)
+        {
+            wbVerifyBits.TestAndSetInterlocked(index + i);
+        }
+    }
+    virtual void WBClearBit(char* addr) override
+    {
+        uint index = (uint)(addr - this->address) / sizeof(void*);
+        wbVerifyBits.TestAndClearInterlocked(index);
+    }
+    virtual void WBClearObject(char* addr) override
+    {
+        Assert((uint)(addr - this->address) % this->objectSize == 0);
+        uint index = (uint)(addr - this->address) / sizeof(void*);
+        uint count = (uint)(this->objectSize / sizeof(void*));
+        for (uint i = 0; i < count; i++)
+        {
+            wbVerifyBits.TestAndClearInterlocked(index + i);
+        }
+    }
+#endif
+
     uint GetUnusablePageCount()
     {
         return 0;
@@ -461,7 +672,6 @@ public:
     uint GetObjectWordCount() const { return this->objectSize / sizeof(void *); }
     uint GetPageCount() const;
 
-    template<bool checkPageHeap=true>
     bool HasFreeObject() const
     {
         return freeObjectList != nullptr;
@@ -486,7 +696,7 @@ public:
     void InduceFalsePositive(Recycler * recycler);
 #endif
 
-#ifdef DUMP_FRAGMENTATION_STATS
+#if ENABLE_MEM_STATS
     void AggregateBlockStats(HeapBucketStats& stats, bool isAllocatorBlock = false, FreeObject* freeObjectList = nullptr, bool isBumpAllocated = false);
 #endif
 
@@ -544,15 +754,21 @@ public:
     SmallHeapBlockBitVector * GetDebugFreeBitVector() { return &debugFreeBits; }
 #endif
 #if DBG
+    virtual HeapInfo * GetHeapInfo() const override;
     virtual BOOL IsFreeObject(void* objectAddress) override;
 #endif
     virtual BOOL IsValidObject(void* objectAddress) override;
     byte* GetRealAddressFromInterior(void* interiorAddress) override sealed;
     bool TestObjectMarkedBit(void* objectAddress) override sealed;
     void SetObjectMarkedBit(void* objectAddress) override;
-    virtual size_t GetObjectSize(void* object) override { return objectSize; }
+    virtual size_t GetObjectSize(void* object) const override { return objectSize; }
 
     uint GetMarkCountForSweep();
+#if ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP
+#if DBG || defined(RECYCLER_SLOW_CHECK_ENABLED)
+    void ResetConcurrentSweepAllocationCounts();
+#endif
+#endif
     SweepState Sweep(RecyclerSweep& recyclerSweep, bool queuePendingSweep, bool allocable, ushort finalizeCount = 0, bool hasPendingDispose = false);
     template <SweepMode mode>
     void SweepObjects(Recycler * recycler);
@@ -597,7 +813,7 @@ public:
 #endif
 #ifdef RECYCLER_VERIFY_MARK
     void VerifyMark();
-    virtual void VerifyMark(void * objectAddress) override;
+    virtual bool VerifyMark(void * objectAddress, void * target) override;
 #endif
 #ifdef RECYCLER_PERF_COUNTERS
     virtual void UpdatePerfCountersOnFree() override sealed;
@@ -613,10 +829,10 @@ public:
 protected:
     static size_t GetAllocPlusSize(uint objectCount);
     inline void SetAttributes(void * address, unsigned char attributes);
+    ushort GetAddressIndex(void * objectAddress);
 
     SmallHeapBlockT(HeapBucket * bucket, ushort objectSize, ushort objectCount, HeapBlockType heapBlockType);
 
-    ushort GetAddressIndex(void * objectAddress);
     ushort GetInteriorAddressIndex(void * interiorAddress);
     ushort GetObjectIndexFromBitIndex(ushort bitIndex);
 
@@ -635,7 +851,7 @@ protected:
     void CheckFreeBitVector(bool isCollecting);
 #endif
 
-    SmallHeapBlockBitVector * EnsureFreeBitVector();
+    SmallHeapBlockBitVector * EnsureFreeBitVector(bool isCollecting = true);
     SmallHeapBlockBitVector * BuildFreeBitVector();
     ushort BuildFreeBitVector(SmallHeapBlockBitVector * bv);
 
@@ -649,6 +865,8 @@ protected:
     template <typename TBlockType>
     bool FindHeapObjectImpl(void* objectAddress, Recycler * recycler, FindHeapObjectFlags flags, RecyclerHeapObjectInfo& heapObject);
 protected:
+    IdleDecommitPageAllocator * GetPageAllocator();
+
     void Init(ushort objectSize, ushort objectCount);
     void ConstructorCommon(HeapBucket * bucket, ushort objectSize, ushort objectCount, HeapBlockType heapBlockType);
 

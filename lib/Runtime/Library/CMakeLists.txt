@@ -1,11 +1,31 @@
 if(BuildJIT)
-    add_definitions(-D_ENABLE_ASM_JS=1)
+    add_definitions(-D_ENABLE_DYNAMIC_THUNKS=1)
+endif()
+
+if(CC_TARGETS_AMD64)
+    set(Wasm_dep
+    WasmLibrary.cpp
+    WebAssembly.cpp
+    WebAssemblyEnvironment.cpp
+    WebAssemblyInstance.cpp
+    WebAssemblyMemory.cpp
+    WebAssemblyModule.cpp
+    WebAssemblyTable.cpp
+    WabtInterface.cpp
+    )
+endif()
+
+if(CAN_BUILD_WABT)
+    include_directories(
+    ../../wabt/chakra
+    )
 endif()
 
 set(CRLIB_SOURCE_CODES
     ArgumentsObject.cpp
     ArgumentsObjectEnumerator.cpp
     ArrayBuffer.cpp
+    AtomicsOperations.cpp
     AtomicsObject.cpp
     BoundFunction.cpp
     BufferStringBuilder.cpp
@@ -21,30 +41,32 @@ set(CRLIB_SOURCE_CODES
     ForInObjectEnumerator.cpp
     GlobalObject.cpp
     IntlEngineInterfaceExtensionObject.cpp
-    IteratorObjectEnumerator.cpp
     JSON.cpp
     JSONParser.cpp
     JSONScanner.cpp
     JSONStack.cpp
     JSONString.cpp
+    JSONStringBuilder.cpp
+    JSONStringifier.cpp
     JavascriptArray.cpp
     JavascriptArrayIndexEnumerator.cpp
     JavascriptArrayIndexEnumeratorBase.cpp
-    JavascriptArrayIterator.cpp
     JavascriptArrayIndexSnapshotEnumerator.cpp
+    JavascriptArrayIterator.cpp
     JavascriptBoolean.cpp
     JavascriptBooleanObject.cpp
     JavascriptBuiltInFunctions.cpp
     JavascriptDate.cpp
     JavascriptError.cpp
     # JavascriptErrorDebug.cpp
+    JavascriptExceptionMetadata.cpp
     JavascriptExternalFunction.cpp
     JavascriptFunction.cpp
     JavascriptGenerator.cpp
     JavascriptGeneratorFunction.cpp
     JavascriptIterator.cpp
-    JavascriptListIterator.cpp
     JavascriptLibrary.cpp
+    JavascriptListIterator.cpp
     JavascriptMap.cpp
     JavascriptMapIterator.cpp
     JavascriptNumber.cpp
@@ -59,19 +81,6 @@ set(CRLIB_SOURCE_CODES
     JavascriptRegularExpressionResult.cpp
     JavascriptSet.cpp
     JavascriptSetIterator.cpp
-    JavascriptSimdBool16x8.cpp
-    JavascriptSimdBool32x4.cpp
-    JavascriptSimdBool8x16.cpp
-    JavascriptSimdFloat32x4.cpp
-    JavascriptSimdFloat64x2.cpp
-    JavascriptSimdInt16x8.cpp
-    JavascriptSimdInt32x4.cpp
-    JavascriptSimdInt8x16.cpp
-    JavascriptSimdObject.cpp
-    JavascriptSimdType.cpp
-    JavascriptSimdUint16x8.cpp
-    JavascriptSimdUint32x4.cpp
-    JavascriptSimdUint8x16.cpp
     JavascriptString.cpp
     JavascriptStringEnumerator.cpp
     JavascriptStringIterator.cpp
@@ -82,11 +91,14 @@ set(CRLIB_SOURCE_CODES
     JavascriptVariantDate.cpp
     JavascriptWeakMap.cpp
     JavascriptWeakSet.cpp
+    JsBuiltInEngineInterfaceExtensionObject.cpp
+    LazyJSONString.cpp
     LiteralString.cpp
     MathLibrary.cpp
     ModuleRoot.cpp
     ObjectPrototypeObject.cpp
     ProfileString.cpp
+    PropertyRecordUsageCache.cpp
     PropertyString.cpp
     RegexHelper.cpp
     RootObjectBase.cpp
@@ -94,17 +106,6 @@ set(CRLIB_SOURCE_CODES
     RuntimeLibraryPch.cpp
     ScriptFunction.cpp
     SharedArrayBuffer.cpp
-    SimdBool16x8Lib.cpp
-    SimdBool32x4Lib.cpp
-    SimdBool8x16Lib.cpp
-    SimdFloat32x4Lib.cpp
-    SimdFloat64x2Lib.cpp
-    SimdInt16x8Lib.cpp
-    SimdInt32x4Lib.cpp
-    SimdInt8x16Lib.cpp
-    SimdUint16x8Lib.cpp
-    SimdUint32x4Lib.cpp
-    SimdUint8x16Lib.cpp
     SingleCharString.cpp
     SparseArraySegment.cpp
     StackScriptFunction.cpp
@@ -114,14 +115,18 @@ set(CRLIB_SOURCE_CODES
     TypedArray.cpp
     TypedArrayIndexEnumerator.cpp
     UriHelper.cpp
+    VerifyMarkFalseReference.cpp
+    ${Wasm_dep}
     )
 
 if(CC_TARGETS_AMD64)
     set (CRLIB_SOURCE_CODES ${CRLIB_SOURCE_CODES}
         amd64/JavascriptFunctionA.S
     )
-elseif(CC_TARGETS_X86)
-    # x86 here
+elseif(CC_TARGETS_ARM)
+    set (CRLIB_SOURCE_CODES ${CRLIB_SOURCE_CODES}
+        arm/arm_JavascriptFunctionA.S
+    )
 endif()
 
 add_library (Chakra.Runtime.Library OBJECT ${CRLIB_SOURCE_CODES})

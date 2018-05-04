@@ -6,6 +6,14 @@
 
 #if ENABLE_TTD
 
+void TTDAbort_unrecoverable_error(const char* msg)
+{
+    Output::Print(_u("TTD assert failed: %S\n"), msg);
+
+    int scenario = 101;
+    ReportFatalException(NULL, E_UNEXPECTED, Fatal_TTDAbort, scenario);
+}
+
 namespace TTD
 {
     TTModeStack::TTModeStack()
@@ -26,14 +34,14 @@ namespace TTD
 
     TTDMode TTModeStack::GetAt(uint32 index) const
     {
-        AssertMsg(index < this->m_stackTop, "index is out of range");
+        TTDAssert(index < this->m_stackTop, "index is out of range");
 
         return this->m_stackEntries[index];
     }
 
     void TTModeStack::SetAt(uint32 index, TTDMode m)
     {
-        AssertMsg(index < this->m_stackTop, "index is out of range");
+        TTDAssert(index < this->m_stackTop, "index is out of range");
 
         this->m_stackEntries[index] = m;
     }
@@ -58,14 +66,14 @@ namespace TTD
 
     TTDMode TTModeStack::Peek() const
     {
-        AssertMsg(this->m_stackTop > 0, "Undeflow in stack pop.");
+        TTDAssert(this->m_stackTop > 0, "Underflow in stack pop.");
 
         return this->m_stackEntries[this->m_stackTop - 1];
     }
 
     void TTModeStack::Pop()
     {
-        AssertMsg(this->m_stackTop > 0, "Undeflow in stack pop.");
+        TTDAssert(this->m_stackTop > 0, "Underflow in stack pop.");
 
         this->m_stackTop--;
     }
@@ -210,7 +218,7 @@ namespace TTD
                 i++;
                 curr++;
             }
-            AssertMsg(i + 1 == strCount, "Our indexing is off.");
+            TTDAssert(i + 1 == strCount, "Our indexing is off.");
 
             buff[i] = _u('\0');
             this->Append(buff);
@@ -220,15 +228,15 @@ namespace TTD
 
         int32 TTAutoString::GetLength() const
         {
-            AssertMsg(!this->IsNullString(), "That doesn't make sense.");
+            TTDAssert(!this->IsNullString(), "That doesn't make sense.");
 
             return (int32)wcslen(this->m_contents);
         }
 
         char16 TTAutoString::GetCharAt(int32 pos) const
         {
-            AssertMsg(!this->IsNullString(), "That doesn't make sense.");
-            AssertMsg(0 <= pos && pos < this->GetLength(), "Not in valid range.");
+            TTDAssert(!this->IsNullString(), "That doesn't make sense.");
+            TTDAssert(0 <= pos && pos < this->GetLength(), "Not in valid range.");
 
             return this->m_contents[pos];
         }
@@ -302,31 +310,6 @@ namespace TTD
         return true;
     }
 #endif
-
-    TTUriString::TTUriString()
-        : UriByteLength(0), UriBytes(nullptr)
-    {
-        ;
-    }
-
-    TTUriString::~TTUriString()
-    {
-        if(this->UriBytes != nullptr)
-        {
-            CoTaskMemFree(this->UriBytes);
-            this->UriBytes = nullptr;
-        }
-    }
-
-    void TTUriString::SetUriValue(size_t byteLength, const byte* data)
-    {
-        AssertMsg(this->UriBytes == nullptr, "Should not set this if it is already set!!!");
-
-        this->UriByteLength = byteLength;
-        this->UriBytes = (byte*)CoTaskMemAlloc(byteLength);
-
-        js_memcpy_s(this->UriBytes, this->UriByteLength, data, byteLength);
-    }
 
     //////////////////
 

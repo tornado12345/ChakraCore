@@ -29,7 +29,7 @@ Revision History:
 #include <sys/types.h>
 #if HAVE_SYSCTL
 #include <sys/sysctl.h>
-#elif !HAVE_SYSCONF
+#elif !HAVE_SYSCONF && !defined(__ANDROID__)
 #error Either sysctl or sysconf is required for GetSystemInfo.
 #endif
 
@@ -82,7 +82,7 @@ SET_DEFAULT_DEBUG_CHANNEL(MISC);
 #define SYSCONF_PAGES _SC_AVPHYS_PAGES
 #elif HAVE_SYSCONF && HAVE__SC_PHYS_PAGES
 #define SYSCONF_PAGES _SC_PHYS_PAGES
-#else
+#elif !defined(__ANDROID__)
 #error Dont know how to get page-size on this architecture!
 #endif
 #endif // __APPLE__
@@ -125,6 +125,9 @@ Note:
 Others are set to zero.
 
 --*/
+
+int GetCurrentThreadStackLimits(ULONG_PTR* lowLimit, ULONG_PTR* highLimit);
+
 VOID
 PALAPI
 GetSystemInfo(
@@ -167,6 +170,15 @@ GetSystemInfo(
     TRACE("dwNumberOfProcessors=%d\n", nrcpus);
     lpSystemInfo->dwNumberOfProcessors = nrcpus;
 
+// TODO: (BSD) is it a good idea to take maxOf(GetCurrentThreadStackLimits, USRSTACKXX) ?
+#ifdef __APPLE__ // defined(USRSTACK64) || defined(USRSTACK)
+ULONG_PTR lowl, highl;
+GetCurrentThreadStackLimits(&lowl, &highl);
+#ifndef PAL_MAX
+#define PAL_MAX(a, b) ((a > b) ? (a) : (b))
+#endif
+#endif
+
 #ifdef VM_MAXUSER_ADDRESS
     lpSystemInfo->lpMaximumApplicationAddress = (PVOID) VM_MAXUSER_ADDRESS;
 #elif defined(__LINUX__)
@@ -175,12 +187,12 @@ GetSystemInfo(
     lpSystemInfo->lpMaximumApplicationAddress = (PVOID) USERLIMIT;
 #elif defined(_WIN64)
 #if defined(USRSTACK64)
-    lpSystemInfo->lpMaximumApplicationAddress = (PVOID) USRSTACK64;
+    lpSystemInfo->lpMaximumApplicationAddress = (PVOID) PAL_MAX(highl, USRSTACK64);
 #else // !USRSTACK64
 #error How come USRSTACK64 is not defined for 64bit?
 #endif // USRSTACK64
 #elif defined(USRSTACK)
-    lpSystemInfo->lpMaximumApplicationAddress = (PVOID) USRSTACK;
+    lpSystemInfo->lpMaximumApplicationAddress = (PVOID) PAL_MAX(highl, USRSTACK);
 #else
 #error The maximum application address is not known on this platform.
 #endif
@@ -258,7 +270,7 @@ GlobalMemoryStatusEx(
         lpBuffer->ullTotalPhys = (DWORDLONG)physical_memory;
         fRetVal = TRUE;
     }
-#elif // HAVE_SYSINFO
+#else // HAVE_SYSINFO
     // TODO: implement getting memory details via sysinfo. On Linux, it provides swap file details that
     // we can use to fill in the xxxPageFile members.
 
@@ -268,11 +280,15 @@ GlobalMemoryStatusEx(
     // We do this only when we have the total physical memory available.
     if (lpBuffer->ullTotalPhys > 0)
     {
-#ifndef __APPLE__
+#if defined(__ANDROID__)
+        lpBuffer->ullAvailPhys = sysconf(_SC_AVPHYS_PAGES) * sysconf( _SC_PAGE_SIZE );
+        INT64 used_memory = lpBuffer->ullTotalPhys - lpBuffer->ullAvailPhys;
+        lpBuffer->dwMemoryLoad = (DWORD)((used_memory * 100) / lpBuffer->ullTotalPhys);
+#elif defined(__LINUX__)
         lpBuffer->ullAvailPhys = sysconf(SYSCONF_PAGES) * sysconf(_SC_PAGE_SIZE);
         INT64 used_memory = lpBuffer->ullTotalPhys - lpBuffer->ullAvailPhys;
         lpBuffer->dwMemoryLoad = (DWORD)((used_memory * 100) / lpBuffer->ullTotalPhys);
-#else
+#elif defined(__APPLE__)
         vm_size_t page_size;
         mach_port_t mach_port;
         mach_msg_type_number_t count;
@@ -345,7 +361,7 @@ PAL_GetLogicalProcessorCacheSizeFromOS()
 {
     size_t cacheSize = 0;
 
-#if HAVE_SYSCONF && defined(__LINUX__)
+#if HAVE_SYSCONF && defined(__LINUX__) && !defined(__ANDROID__)
     cacheSize = max(cacheSize, sysconf(_SC_LEVEL1_DCACHE_SIZE));
     cacheSize = max(cacheSize, sysconf(_SC_LEVEL1_ICACHE_SIZE));
     cacheSize = max(cacheSize, sysconf(_SC_LEVEL2_CACHE_SIZE));
@@ -355,4 +371,3 @@ PAL_GetLogicalProcessorCacheSizeFromOS()
 
     return cacheSize;
 }
-

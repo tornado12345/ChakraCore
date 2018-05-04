@@ -9,8 +9,8 @@ namespace Js
     class JavascriptStringIterator : public DynamicObject
     {
     private:
-        JavascriptString*   m_string;
-        charcount_t         m_nextIndex;
+        Field(JavascriptString*)   m_string;
+        Field(charcount_t)         m_nextIndex;
 
     protected:
         DEFINE_VTABLE_CTOR(JavascriptStringIterator, DynamicObject);
@@ -21,6 +21,7 @@ namespace Js
 
         static bool Is(Var aValue);
         static JavascriptStringIterator* FromVar(Var aValue);
+        static JavascriptStringIterator* UnsafeFromVar(Var aValue);
 
         class EntryInfo
         {

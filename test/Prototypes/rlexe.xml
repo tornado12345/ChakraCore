@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <regress-exe>
   <test>
     <default>
@@ -27,7 +27,7 @@
   <test>
     <default>
       <files>ChangePrototype.js</files>
-      <compile-flags>-trace:TypeShareForChangePrototype</compile-flags>
+      <compile-flags>-trace:TypeShareForChangePrototype -JsBuiltIn-</compile-flags>
       <baseline>ChangePrototype.baseline</baseline>
     </default>
   </test>

@@ -11,8 +11,11 @@ CompileAssert(false)
 #include "XDataAllocator.h"
 #include "Core/DelayLoadLibrary.h"
 
-XDataAllocator::XDataAllocator(BYTE* address, uint size, HANDLE processHandle) :
-    processHandle(processHandle)
+#ifndef _WIN32
+#include "PlatformAgnostic/AssemblyCommon.h" // __REGISTER_FRAME / __DEREGISTER_FRAME
+#endif
+
+XDataAllocator::XDataAllocator(BYTE* address, uint size)
 {
     Assert(size == 0);
 }
@@ -61,6 +64,7 @@ void XDataAllocator::Release(const SecondaryAllocation& allocation)
 /* static */
 void XDataAllocator::Register(XDataAllocation * xdataInfo, DWORD functionStart, DWORD functionSize)
 {
+#ifdef _WIN32
     RUNTIME_FUNCTION* pdataArray = xdataInfo->GetPdataArray();
     for (ushort i = 0; i < xdataInfo->pdataCount; i++)
     {
@@ -77,7 +81,7 @@ void XDataAllocator::Register(XDataAllocation * xdataInfo, DWORD functionStart, 
 
     // Since we do not expect many thunk functions to be created, we are using 1 table/function
     // for now. This can be optimized further if needed.
-    DWORD status = NtdllLibrary::Instance->AddGrowableFunctionTable(&xdataInfo->functionTable,
+    NTSTATUS status = NtdllLibrary::Instance->AddGrowableFunctionTable(&xdataInfo->functionTable,
         pdataArray,
         /*MaxEntryCount*/ xdataInfo->pdataCount,
         /*Valid entry count*/ xdataInfo->pdataCount,
@@ -85,12 +89,20 @@ void XDataAllocator::Register(XDataAllocation * xdataInfo, DWORD functionStart, 
         /*RangeEnd*/ functionStart + functionSize);
 
     Js::Throw::CheckAndThrowOutOfMemory(NT_SUCCESS(status));
+
+#else  // !_WIN32
+    Assert(ReadHead(xdataInfo->address));  // should be non-empty .eh_frame
+    __REGISTER_FRAME(xdataInfo->address);
+#endif
 }
 
 /* static */
 void XDataAllocator::Unregister(XDataAllocation * xdataInfo)
 {
-    NtdllLibrary::Instance->DeleteGrowableFunctionTable(xdataInfo->functionTable);
+#ifndef _WIN32
+    Assert(ReadHead(xdataInfo->address));  // should be non-empty .eh_frame
+    __DEREGISTER_FRAME(xdataInfo->address);
+#endif
 }
 
 bool XDataAllocator::CanAllocate()

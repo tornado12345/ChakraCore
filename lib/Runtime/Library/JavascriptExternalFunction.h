@@ -8,7 +8,14 @@ typedef HRESULT(__cdecl *InitializeMethod)(Js::Var instance);
 
 namespace Js
 {
-    typedef Var (__stdcall *StdCallJavascriptMethod)(Var callee, bool isConstructCall, Var *args, USHORT cargs, void *callbackState);
+    struct StdCallJavascriptMethodInfo
+    {
+        Var thisArg;
+        Var newTargetArg;
+        bool isConstructCall;
+    };
+
+    typedef Var (__stdcall *StdCallJavascriptMethod)(Var callee, Var *args, USHORT cargs, StdCallJavascriptMethodInfo *info, void *callbackState);
     typedef int JavascriptTypeId;
 
     class JavascriptExternalFunction : public RuntimeFunction
@@ -26,7 +33,7 @@ namespace Js
         JavascriptExternalFunction(JavascriptExternalFunction* wrappedMethod, DynamicType* type);
         JavascriptExternalFunction(StdCallJavascriptMethod nativeMethod, DynamicType* type);
 
-        virtual BOOL IsExternalFunction() override {return TRUE; }
+        virtual BOOL IsExternalFunction() override { return TRUE; }
         inline void SetSignature(Var signature) { this->signature = signature; }
         Var GetSignature() { return signature; }
         inline void SetCallbackState(void *callbackState) { this->callbackState = callbackState; }
@@ -45,36 +52,46 @@ namespace Js
         ExternalMethod GetNativeMethod() { return nativeMethod; }
         BOOL SetLengthProperty(Var length);
 
-        void SetPrototypeTypeId(JavascriptTypeId prototypeTypeId) { this->prototypeTypeId = prototypeTypeId; }
         void SetExternalFlags(UINT64 flags) { this->flags = flags; }
 
+        unsigned char GetDeferredLength() const { return deferredLength; }
+        void SetDeferredLength(unsigned char deferredLength)
+        {
+            AssertOrFailFastMsg(this->deferredLength == 0, "Deferred length is already pending");
+            this->deferredLength = deferredLength;
+        }
+        void UndeferLength(ScriptContext *scriptContext);
+
     private:
-        Var signature;
-        void *callbackState;
+        Field(UINT64) flags;
+        Field(Var) signature;
+        Field(void *) callbackState;
         union
         {
-            ExternalMethod nativeMethod;
-            JavascriptExternalFunction* wrappedMethod;
-            StdCallJavascriptMethod stdCallNativeMethod;
+            FieldNoBarrier(ExternalMethod) nativeMethod;
+            Field(JavascriptExternalFunction*) wrappedMethod;
+            FieldNoBarrier(StdCallJavascriptMethod) stdCallNativeMethod;
         };
-        InitializeMethod initMethod;
+        Field(InitializeMethod) initMethod;
 
         // Ensure GC doesn't pin
-        unsigned int oneBit:1;
+        Field(unsigned int) oneBit:1;
         // Count of type slots for
-        unsigned int typeSlots:15;
+        Field(unsigned int) typeSlots:15;
         // Determines if we need are a dictionary type
-        unsigned int hasAccessors:1;
-        unsigned int unused:15;
+        Field(unsigned int) hasAccessors:1;
+        Field(unsigned int) unused:7;
 
-        JavascriptTypeId prototypeTypeId;
-        UINT64 flags;
+        // DOM Direct functions need to be able to set the length at construction time without undeferring the function.
+        // We can store the length here so it can be set at the time of undeferral.
+        Field(unsigned int) deferredLength:8;
 
         static Var ExternalFunctionThunk(RecyclableObject* function, CallInfo callInfo, ...);
         static Var WrappedFunctionThunk(RecyclableObject* function, CallInfo callInfo, ...);
         static Var StdCallExternalFunctionThunk(RecyclableObject* function, CallInfo callInfo, ...);
         static Var DefaultExternalFunctionThunk(RecyclableObject* function, CallInfo callInfo, ...);
-        static void __cdecl DeferredInitializer(DynamicObject* instance, DeferredTypeHandlerBase* typeHandler, DeferredInitializeMode mode);
+        static bool __cdecl DeferredLengthInitializer(DynamicObject* instance, DeferredTypeHandlerBase* typeHandler, DeferredInitializeMode mode);
+        static bool __cdecl DeferredConstructorInitializer(DynamicObject* instance, DeferredTypeHandlerBase* typeHandler, DeferredInitializeMode mode);
 
         void PrepareExternalCall(Arguments * args);
 
@@ -86,7 +103,7 @@ namespace Js
         static Var HandleRecordReplayExternalFunction_Thunk(Js::JavascriptFunction* function, CallInfo& callInfo, Arguments& args, ScriptContext* scriptContext);
         static Var HandleRecordReplayExternalFunction_StdThunk(Js::RecyclableObject* function, CallInfo& callInfo, Arguments& args, ScriptContext* scriptContext);
 
-        static Var __stdcall TTDReplayDummyExternalMethod(Js::Var callee, bool isConstructCall, Var *args, USHORT cargs, void *callbackState);
+        static Var __stdcall TTDReplayDummyExternalMethod(Var callee, Var *args, USHORT cargs, StdCallJavascriptMethodInfo *info, void *callbackState);
 #endif
 
         friend class JavascriptLibrary;

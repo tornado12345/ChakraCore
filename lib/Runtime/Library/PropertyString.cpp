@@ -9,71 +9,69 @@ namespace Js
     DEFINE_RECYCLER_TRACKER_PERF_COUNTER(PropertyString);
     DEFINE_RECYCLER_TRACKER_WEAKREF_PERF_COUNTER(PropertyString);
 
-    PropertyString::PropertyString(StaticType* type, const Js::PropertyRecord* propertyRecord)
-        : JavascriptString(type, propertyRecord->GetLength(), propertyRecord->GetBuffer()), m_propertyRecord(propertyRecord)
+    PropertyString::PropertyString(StaticType* type, const Js::PropertyRecord* propertyRecord) :
+        JavascriptString(type, propertyRecord->GetLength(), propertyRecord->GetBuffer()),
+        propertyRecordUsageCache(type, propertyRecord)
     {
     }
-
-    PropertyString* PropertyString::New(StaticType* type, const Js::PropertyRecord* propertyRecord, ArenaAllocator *arena)
-    {
-        PropertyString * propertyString = (PropertyString *)Anew(arena, ArenaAllocPropertyString, type, propertyRecord);
-        propertyString->propCache = AllocatorNewStructZ(InlineCacheAllocator, type->GetScriptContext()->GetInlineCacheAllocator(), PropertyCache);
-        return propertyString;
-    }
-
 
     PropertyString* PropertyString::New(StaticType* type, const Js::PropertyRecord* propertyRecord, Recycler *recycler)
     {
-        PropertyString * propertyString =  RecyclerNewPlusZ(recycler, sizeof(PropertyCache), PropertyString, type, propertyRecord);
-        propertyString->propCache = (PropertyCache*)(propertyString + 1);
-        return propertyString;
+        return RecyclerNewZ(recycler, PropertyString, type, propertyRecord);
     }
 
-    PropertyCache const * PropertyString::GetPropertyCache() const
+    PolymorphicInlineCache * PropertyString::GetLdElemInlineCache() const
     {
-        Assert(!propCache->type  || propCache->type->GetScriptContext() == this->GetScriptContext());
-        return propCache;
+        return this->propertyRecordUsageCache.GetLdElemInlineCache();
     }
 
-    void PropertyString::ClearPropertyCache()
+    PolymorphicInlineCache * PropertyString::GetStElemInlineCache() const
     {
-        this->propCache->type = nullptr;
+        return this->propertyRecordUsageCache.GetStElemInlineCache();
     }
+
+    PropertyRecordUsageCache * PropertyString::GetPropertyRecordUsageCache()
+    {
+        return &this->propertyRecordUsageCache;
+    }
+
+    /* static */
+    bool PropertyString::Is(RecyclableObject * obj)
+    {
+        return VirtualTableInfo<Js::PropertyString>::HasVirtualTable(obj);
+    }
+
+    /* static */
+    bool PropertyString::Is(Var var)
+    {
+        return RecyclableObject::Is(var) && PropertyString::Is(RecyclableObject::UnsafeFromVar(var));
+    }
+
+    PropertyString* PropertyString::UnsafeFromVar(Js::Var aValue)
+    {
+        AssertMsg(Is(aValue), "Ensure var is actually a 'PropertyString'");
+
+        return static_cast<PropertyString *>(aValue);
+    }
+
     void const * PropertyString::GetOriginalStringReference()
     {
         // Property record is the allocation containing the string buffer
-        return this->m_propertyRecord;
+        return this->propertyRecordUsageCache.GetPropertyRecord();
+    }
+
+    bool PropertyString::TrySetPropertyFromCache(
+        _In_ RecyclableObject *const object,
+        _In_ Var propertyValue,
+        _In_ ScriptContext *const requestContext,
+        const PropertyOperationFlags propertyOperationFlags,
+        _Inout_ PropertyValueInfo *const propertyValueInfo)
+    {
+        return this->propertyRecordUsageCache.TrySetPropertyFromCache<false /* ReturnOperationInfo */>(object, propertyValue, requestContext, propertyOperationFlags, propertyValueInfo, this, nullptr);
     }
 
     RecyclableObject * PropertyString::CloneToScriptContext(ScriptContext* requestContext)
     {
-        return requestContext->GetLibrary()->CreatePropertyString(this->m_propertyRecord);
+        return requestContext->GetPropertyString(this->propertyRecordUsageCache.GetPropertyRecord());
     }
-
-    void PropertyString::UpdateCache(Type * type, uint16 dataSlotIndex, bool isInlineSlot, bool isStoreFieldEnabled)
-    {
-        Assert(type);
-        
-        if (type->GetScriptContext() != this->GetScriptContext())
-        {
-            return;
-        }
-
-        if (this->IsArenaAllocPropertyString())
-        {
-            this->GetScriptContext()->SetHasUsedInlineCache(true);
-        }
-
-        type->SetHasBeenCached();
-        this->propCache->type = type;
-        this->propCache->preventdataSlotIndexFalseRef = 1;
-        this->propCache->dataSlotIndex = dataSlotIndex;
-        this->propCache->preventFlagsFalseRef = 1;
-        this->propCache->isInlineSlot = isInlineSlot;
-        this->propCache->isStoreFieldEnabled = isStoreFieldEnabled;
-    }
-
-    ArenaAllocPropertyString::ArenaAllocPropertyString(StaticType* type, const Js::PropertyRecord* propertyRecord)
-        :PropertyString(type, propertyRecord)
-    {}
 }

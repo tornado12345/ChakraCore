@@ -7,20 +7,32 @@
 FuncInfo::FuncInfo(
     const char16 *name,
     ArenaAllocator *alloc,
+    ByteCodeGenerator *byteCodeGenerator,
     Scope *paramScope,
     Scope *bodyScope,
-    ParseNode *pnode,
+    ParseNodeFnc *pnode,
     Js::ParseableFunctionInfo* byteCodeFunction)
-    : alloc(alloc),
+    :
+    inlineCacheCount(0),
+    rootObjectLoadInlineCacheCount(0),
+    rootObjectLoadMethodInlineCacheCount(0),
+    rootObjectStoreInlineCacheCount(0),
+    isInstInlineCacheCount(0),
+    referencedPropertyIdCount(0),
+    currentChildFunction(nullptr),
+    currentChildScope(nullptr),
+    capturedSyms(nullptr),
+    capturedSymMap(nullptr),
+    nextForInLoopLevel(0),
+    maxForInLoopLevel(0),
+    alloc(alloc),
     varRegsCount(0),
-    constRegsCount(2),
+    constRegsCount(InitialConstRegsCount),
     inArgsCount(0),
-    innerScopeCount(0),
-    currentInnerScopeIndex((uint)-1),
-    firstTmpReg(Js::Constants::NoRegister),
-    curTmpReg(Js::Constants::NoRegister),
     outArgsMaxDepth(0),
     outArgsCurrentExpr(0),
+    innerScopeCount(0),
+    currentInnerScopeIndex((uint)-1),
 #if DBG
     outArgsDepth(0),
 #endif
@@ -29,10 +41,7 @@ FuncInfo::FuncInfo(
     undefinedConstantRegister(Js::Constants::NoRegister),
     trueConstantRegister(Js::Constants::NoRegister),
     falseConstantRegister(Js::Constants::NoRegister),
-    thisPointerRegister(Js::Constants::NoRegister),
-    superRegister(Js::Constants::NoRegister),
-    superCtorRegister(Js::Constants::NoRegister),
-    newTargetRegister(Js::Constants::NoRegister),
+    thisConstantRegister(Js::Constants::NoRegister),
     envRegister(Js::Constants::NoRegister),
     frameObjRegister(Js::Constants::NoRegister),
     frameSlotsRegister(Js::Constants::NoRegister),
@@ -41,14 +50,11 @@ FuncInfo::FuncInfo(
     funcObjRegister(Js::Constants::NoRegister),
     localClosureReg(Js::Constants::NoRegister),
     yieldRegister(Js::Constants::NoRegister),
-    paramScope(paramScope),
-    bodyScope(bodyScope),
-    funcExprScope(nullptr),
-    root(pnode),
-    capturedSyms(nullptr),
-    capturedSymMap(nullptr),
-    currentChildFunction(nullptr),
-    currentChildScope(nullptr),
+    firstTmpReg(Js::Constants::NoRegister),
+    curTmpReg(Js::Constants::NoRegister),
+    argsPlaceHolderSlotCount(0),
+    originalAttributes(Js::FunctionInfo::Attributes::None),
+
     callsEval(false),
     childCallsEval(false),
     hasArguments(false),
@@ -56,62 +62,65 @@ FuncInfo::FuncInfo(
     isTopLevelEventHandler(false),
     hasLocalInClosure(false),
     hasClosureReference(false),
-    hasGlobalReference(false),
     hasCachedScope(false),
     funcExprNameReference(false),
     applyEnclosesArgs(false),
     escapes(false),
-    hasDeferredChild(false),
-    childHasWith(false),
     hasLoop(false),
     hasEscapedUseNestedFunc(false),
     needEnvRegister(false),
-    hasCapturedThis(false),
+    isBodyAndParamScopeMerged(true),
 #if DBG
     isReused(false),
 #endif
-    staticFuncId(-1),
-    inlineCacheMap(nullptr),
-    slotProfileIdMap(alloc),
-    argsPlaceHolderSlotCount(0),
-    thisScopeSlot(Js::Constants::NoProperty),
-    innerThisScopeSlot(Js::Constants::NoProperty),
-    superScopeSlot(Js::Constants::NoProperty),
-    innerSuperScopeSlot(Js::Constants::NoProperty),
-    superCtorScopeSlot(Js::Constants::NoProperty),
-    innerSuperCtorScopeSlot(Js::Constants::NoProperty),
-    newTargetScopeSlot(Js::Constants::NoProperty),
-    innerNewTargetScopeSlot(Js::Constants::NoProperty),
-    isThisLexicallyCaptured(false),
-    isSuperLexicallyCaptured(false),
-    isSuperCtorLexicallyCaptured(false),
-    isNewTargetLexicallyCaptured(false),
-    inlineCacheCount(0),
-    rootObjectLoadInlineCacheCount(0),
-    rootObjectLoadMethodInlineCacheCount(0),
-    rootObjectStoreInlineCacheCount(0),
-    isInstInlineCacheCount(0),
-    referencedPropertyIdCount(0),
-    argumentsSymbol(nullptr),
-    innerArgumentsSymbol(nullptr),
-    nonUserNonTempRegistersToInitialize(alloc),
+
     constantToRegister(alloc, 17),
     stringToRegister(alloc, 17),
     doubleConstantToRegister(alloc, 17),
     stringTemplateCallsiteRegisterMap(alloc, 17),
+
+    paramScope(paramScope),
+    bodyScope(bodyScope),
+    funcExprScope(nullptr),
+    root(pnode),
+    byteCodeFunction(byteCodeFunction),
     targetStatements(alloc),
-    nextForInLoopLevel(0),
-    maxForInLoopLevel(0)
+    singleExit(0),
+    rootObjectLoadInlineCacheMap(nullptr),
+    rootObjectLoadMethodInlineCacheMap(nullptr),
+    rootObjectStoreInlineCacheMap(nullptr),
+    inlineCacheMap(nullptr),
+    referencedPropertyIdToMapIndex(nullptr),
+    valueOfStoreCacheIds(),
+    toStringStoreCacheIds(),
+    slotProfileIdMap(alloc),
+    argumentsSymbol(nullptr),
+    thisSymbol(nullptr),
+    newTargetSymbol(nullptr),
+    superSymbol(nullptr),
+    superConstructorSymbol(nullptr),
+    nonUserNonTempRegistersToInitialize(alloc)
 {
-    this->byteCodeFunction = byteCodeFunction;
-    bodyScope->SetFunc(this);
+    if (bodyScope != nullptr)
+    {
+        bodyScope->SetFunc(this);
+    }
     if (paramScope != nullptr)
     {
         paramScope->SetFunc(this);
     }
-    if (pnode && pnode->sxFnc.NestedFuncEscapes())
+    if (pnode && pnode->NestedFuncEscapes())
     {
         this->SetHasMaybeEscapedNestedFunc(DebugOnly(_u("Child")));
+    }
+
+    if (byteCodeFunction && !byteCodeFunction->IsDeferred() && byteCodeFunction->CanBeDeferred())
+    {
+        // Disable (re-)deferral of this function temporarily. Add it to the list of FuncInfo's to be processed when 
+        // byte code gen is done.
+        this->originalAttributes = byteCodeFunction->GetAttributes();
+        byteCodeGenerator->AddFuncInfoToFinalizationSet(this);
+        byteCodeFunction->SetAttributes((Js::FunctionInfo::Attributes)(this->originalAttributes & ~Js::FunctionInfo::Attributes::CanDefer));
     }
 }
 
@@ -122,143 +131,49 @@ bool FuncInfo::IsGlobalFunction() const
 
 bool FuncInfo::IsDeferred() const
 {
-    return root && root->sxFnc.pnodeBody == nullptr;
+    return root && root->pnodeBody == nullptr;
 }
 
 BOOL FuncInfo::HasSuperReference() const
 {
-    return root->sxFnc.HasSuperReference();
+    return root->HasSuperReference();
 }
 
 BOOL FuncInfo::HasDirectSuper() const
 {
-    return root->sxFnc.HasDirectSuper();
+    return root->HasDirectSuper();
 }
 
 BOOL FuncInfo::IsClassMember() const
 {
-    return root->sxFnc.IsClassMember();
+    return this->byteCodeFunction->IsClassMethod();
 }
 
 BOOL FuncInfo::IsLambda() const
 {
-    return root->sxFnc.IsLambda();
+    return this->byteCodeFunction->IsLambda();
 }
 
 BOOL FuncInfo::IsClassConstructor() const
 {
-    return root->sxFnc.IsClassConstructor();
+    return this->byteCodeFunction->IsClassConstructor();
 }
 
 BOOL FuncInfo::IsBaseClassConstructor() const
 {
-    return root->sxFnc.IsBaseClassConstructor();
+    return this->byteCodeFunction->IsBaseClassConstructor();
 }
 
-void FuncInfo::EnsureThisScopeSlot()
+BOOL FuncInfo::IsDerivedClassConstructor() const
 {
-    if (this->thisScopeSlot == Js::Constants::NoProperty)
-    {
-        // In case of split scope param and body has separate closures. So we have to use different scope slots for them.
-        bool isSplitScope = this->paramScope && !this->paramScope->GetCanMergeWithBodyScope();
-        Scope* scope = isSplitScope ? this->paramScope : this->bodyScope;
-        Scope* currentScope = scope->IsGlobalEvalBlockScope() ? this->GetGlobalEvalBlockScope() : scope;
-
-        this->thisScopeSlot = currentScope->AddScopeSlot();
-        if (isSplitScope)
-        {
-            this->innerThisScopeSlot = this->bodyScope->AddScopeSlot();
-        }
-    }
-}
-
-void FuncInfo::EnsureSuperScopeSlot()
-{
-    if (this->superScopeSlot == Js::Constants::NoProperty)
-    {
-        // In case of split scope param and body has separate closures. So we have to use different scope slots for them.
-        bool isSplitScope = this->paramScope && !this->paramScope->GetCanMergeWithBodyScope();
-        Scope* scope = isSplitScope ? this->paramScope : this->bodyScope;
-
-        this->superScopeSlot = scope->AddScopeSlot();
-        if (isSplitScope)
-        {
-            this->innerSuperScopeSlot = this->bodyScope->AddScopeSlot();
-        }
-    }
-}
-
-void FuncInfo::EnsureSuperCtorScopeSlot()
-{
-    if (this->superCtorScopeSlot == Js::Constants::NoProperty)
-    {
-        // In case of split scope param and body has separate closures. So we have to use different scope slots for them.
-        bool isSplitScope = this->paramScope && !this->paramScope->GetCanMergeWithBodyScope();
-        Scope* scope = isSplitScope ? this->paramScope : this->bodyScope;
-
-        this->superCtorScopeSlot = scope->AddScopeSlot();
-        if (isSplitScope)
-        {
-            this->innerSuperCtorScopeSlot = this->bodyScope->AddScopeSlot();
-        }
-    }
-}
-
-void FuncInfo::EnsureNewTargetScopeSlot()
-{
-    if (this->newTargetScopeSlot == Js::Constants::NoProperty)
-    {
-        // In case of split scope param and body has separate closures. So we have to use different scope slots for them.
-        bool isSplitScope = this->paramScope && !this->paramScope->GetCanMergeWithBodyScope();
-        Scope* scope = isSplitScope ? this->paramScope : this->bodyScope;
-
-        this->newTargetScopeSlot = scope->AddScopeSlot();
-        if (isSplitScope)
-        {
-            this->innerNewTargetScopeSlot = this->bodyScope->AddScopeSlot();
-        }
-    }
-}
-
-void FuncInfo::UseInnerSpecialScopeSlots()
-{
-    Assert(this->paramScope != nullptr && !this->paramScope->GetCanMergeWithBodyScope());
-    Js::PropertyId temp = Js::Constants::NoProperty;
-    if (this->thisScopeSlot != Js::Constants::NoProperty)
-    {
-        Assert(this->innerThisScopeSlot != Js::Constants::NoProperty);
-        temp = this->thisScopeSlot;
-        this->thisScopeSlot = this->innerThisScopeSlot;
-        this->innerThisScopeSlot = temp;
-    }
-    if (this->superScopeSlot != Js::Constants::NoProperty)
-    {
-        Assert(this->innerSuperScopeSlot != Js::Constants::NoProperty);
-        temp = this->superScopeSlot;
-        this->superScopeSlot = this->innerSuperScopeSlot;
-        this->innerSuperScopeSlot = temp;
-    }
-    if (this->superCtorScopeSlot != Js::Constants::NoProperty)
-    {
-        Assert(this->innerSuperCtorScopeSlot != Js::Constants::NoProperty);
-        temp = this->superCtorScopeSlot;
-        this->superCtorScopeSlot = this->innerSuperCtorScopeSlot;
-        this->innerSuperCtorScopeSlot = temp;
-    }
-    if (this->newTargetScopeSlot != Js::Constants::NoProperty)
-    {
-        Assert(this->innerNewTargetScopeSlot != Js::Constants::NoProperty);
-        temp = this->newTargetScopeSlot;
-        this->newTargetScopeSlot = this->innerNewTargetScopeSlot;
-        this->innerNewTargetScopeSlot = temp;
-    }
+    return root->IsDerivedClassConstructor();
 }
 
 Scope *
 FuncInfo::GetGlobalBlockScope() const
 {
     Assert(this->IsGlobalFunction());
-    Scope * scope = this->root->sxFnc.pnodeScopes->sxBlock.scope;
+    Scope * scope = this->root->pnodeScopes->scope;
     Assert(scope == nullptr || scope == this->GetBodyScope() || scope->GetEnclosingScope() == this->GetBodyScope());
     return scope;
 }
@@ -366,12 +281,12 @@ void FuncInfo::ReleaseReference(ParseNode *pnode)
     switch (pnode->nop)
     {
     case knopDot:
-        this->ReleaseLoc(pnode->sxBin.pnode1);
+        this->ReleaseLoc(pnode->AsParseNodeBin()->pnode1);
         break;
 
     case knopIndex:
-        this->ReleaseLoc(pnode->sxBin.pnode2);
-        this->ReleaseLoc(pnode->sxBin.pnode1);
+        this->ReleaseLoc(pnode->AsParseNodeBin()->pnode2);
+        this->ReleaseLoc(pnode->AsParseNodeBin()->pnode1);
         break;
 
     case knopName:
@@ -384,24 +299,24 @@ void FuncInfo::ReleaseReference(ParseNode *pnode)
         // but we have the args in a singly linked list.
         // Fortunately, we know that the set we have to release is sequential.
         // So find the endpoints of the list and release them in descending order.
-        if (pnode->sxCall.pnodeArgs)
+        if (pnode->AsParseNodeCall()->pnodeArgs)
         {
-            ParseNode *pnodeArg = pnode->sxCall.pnodeArgs;
+            ParseNode *pnodeArg = pnode->AsParseNodeCall()->pnodeArgs;
             Js::RegSlot firstArg = Js::Constants::NoRegister;
             Js::RegSlot lastArg = Js::Constants::NoRegister;
             if (pnodeArg->nop == knopList)
             {
                 do
                 {
-                    if (this->IsTmpReg(pnodeArg->sxBin.pnode1->location))
+                    if (this->IsTmpReg(pnodeArg->AsParseNodeBin()->pnode1->location))
                     {
-                        lastArg = pnodeArg->sxBin.pnode1->location;
+                        lastArg = pnodeArg->AsParseNodeBin()->pnode1->location;
                         if (firstArg == Js::Constants::NoRegister)
                         {
                             firstArg = lastArg;
                         }
                     }
-                    pnodeArg = pnodeArg->sxBin.pnode2;
+                    pnodeArg = pnodeArg->AsParseNodeBin()->pnode2;
                 }
                 while (pnodeArg->nop == knopList);
             }
@@ -426,15 +341,15 @@ void FuncInfo::ReleaseReference(ParseNode *pnode)
             }
         }
         // Now release the call target.
-        switch (pnode->sxCall.pnodeTarget->nop)
+        switch (pnode->AsParseNodeCall()->pnodeTarget->nop)
         {
         case knopDot:
         case knopIndex:
-            this->ReleaseReference(pnode->sxCall.pnodeTarget);
-            this->ReleaseLoc(pnode->sxCall.pnodeTarget);
+            this->ReleaseReference(pnode->AsParseNodeCall()->pnodeTarget);
+            this->ReleaseLoc(pnode->AsParseNodeCall()->pnodeTarget);
             break;
         default:
-            this->ReleaseLoad(pnode->sxCall.pnodeTarget);
+            this->ReleaseLoad(pnode->AsParseNodeCall()->pnodeTarget);
             break;
         }
         break;
@@ -490,20 +405,20 @@ void FuncInfo::AddCapturedSym(Symbol *sym)
     this->capturedSyms->AddNew(sym);
 }
 
-void FuncInfo::OnStartVisitFunction(ParseNode *pnodeFnc)
+void FuncInfo::OnStartVisitFunction(ParseNodeFnc *pnodeFnc)
 {
     Assert(pnodeFnc->nop == knopFncDecl);
     Assert(this->GetCurrentChildFunction() == nullptr);
 
-    this->SetCurrentChildFunction(pnodeFnc->sxFnc.funcInfo);
+    this->SetCurrentChildFunction(pnodeFnc->funcInfo);
 }
 
-void FuncInfo::OnEndVisitFunction(ParseNode *pnodeFnc)
+void FuncInfo::OnEndVisitFunction(ParseNodeFnc *pnodeFnc)
 {
     Assert(pnodeFnc->nop == knopFncDecl);
-    Assert(this->GetCurrentChildFunction() == pnodeFnc->sxFnc.funcInfo);
+    Assert(this->GetCurrentChildFunction() == pnodeFnc->funcInfo);
 
-    pnodeFnc->sxFnc.funcInfo->SetCurrentChildScope(nullptr);
+    pnodeFnc->funcInfo->SetCurrentChildScope(nullptr);
     this->SetCurrentChildFunction(nullptr);
 }
 
@@ -524,7 +439,7 @@ void FuncInfo::OnStartVisitScope(Scope *scope, bool *pisMergedScope)
             Assert(childScope->GetEnclosingScope() == scope);
         }
         else if (childScope->GetScopeType() == ScopeType_Parameter
-                 && childScope->GetCanMergeWithBodyScope()
+                 && childScope->GetFunc()->IsBodyAndParamScopeMerged()
                  && scope->GetScopeType() == ScopeType_Block)
         {
             // If param and body are merged then the class declaration in param scope will have body as the parent

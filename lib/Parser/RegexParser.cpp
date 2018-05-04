@@ -118,7 +118,7 @@ namespace UnifiedRegex
         , ArenaAllocator* ctAllocator
         , StandardChars<EncodedChar>* standardEncodedChars
         , StandardChars<Char>* standardChars
-        , bool isFromExternalSource
+        , bool isUtf8
 #if ENABLE_REGEX_CONFIG_OPTIONS
         , DebugWriter* w
 #endif
@@ -151,8 +151,7 @@ namespace UnifiedRegex
         , deferredIfNotUnicodeError(nullptr)
         , deferredIfUnicodeError(nullptr)
     {
-        if (isFromExternalSource)
-            this->FromExternalSource();
+        this->SetIsUtf8(isUtf8);
     }
 
     //
@@ -234,7 +233,7 @@ namespace UnifiedRegex
     // Helpers
     //
     template <typename P, const bool IsLiteral>
-    int Parser<P, IsLiteral>::TryParseExtendedUnicodeEscape(Char& c, bool& previousSurrogatePart, bool trackSurrogatePair = false)
+    int Parser<P, IsLiteral>::TryParseExtendedUnicodeEscape(Char& c, bool& previousSurrogatePart, bool trackSurrogatePair /* = false */)
     {
         if (!scriptContext->GetConfig()->IsES6UnicodeExtensionsEnabled())
         {
@@ -755,6 +754,9 @@ namespace UnifiedRegex
             else if (next->tag == Node::Alt)
             {
                 AltNode* nextList = (AltNode*)next;
+                // Since we just had to dereference next to get here, we know that nextList
+                // can't be nullptr in this case.
+                AnalysisAssert(nextList != nullptr);
                 // Append inner list to current list
                 revisedPrev = UnionNodes(last == 0 ? node : last->head, nextList->head);
                 if (revisedPrev != 0)
@@ -766,11 +768,11 @@ namespace UnifiedRegex
                         last->head = revisedPrev;
                     nextList = nextList->tail;
                 }
-                AnalysisAssert(nextList != nullptr);
                 if (last == 0)
                     node = Anew(ctAllocator, AltNode, node, nextList);
                 else
                     last->tail = nextList;
+                AnalysisAssert(nextList != nullptr);
                 while (nextList->tail != 0)
                     nextList = nextList->tail;
                 last = nextList;
@@ -982,11 +984,17 @@ namespace UnifiedRegex
                     last->head = FinalTerm(last->head, &deferredLiteralNode);
                     last->tail = nextList;
                 }
+                // NextList can't be nullptr, since it was last set as next, which
+                // was dereferenced, or it was set on a path that already has this
+                // analysis assert.
+                AnalysisAssert(nextList != nullptr);
                 while (nextList->tail != 0)
                     nextList = nextList->tail;
                 last = nextList;
                 // No outstanding literals
                 Assert(deferredLiteralNode.length == 0);
+                // We just set this from nextList, which we know is not nullptr.
+                AnalysisAssert(last != nullptr);
                 if (last->head->LiteralLength() > 0)
                 {
                     // If the list ends with a literal, transfer it into deferredLiteralNode
@@ -1129,7 +1137,7 @@ namespace UnifiedRegex
     template <typename P, const bool IsLiteral>
     void Parser<P, IsLiteral>::TermPass0(int depth)
     {
-        PROBE_STACK(scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(scriptContext, Js::Constants::MinStackRegex);
         // Either we have a location at the start, or the end, never both. As in between it should have been cleared if surrogate pair
         // Or must be cleared if we didn't perform the check
         bool clearLocationIfPresent = this->tempLocationOfSurrogatePair != nullptr;
@@ -1282,7 +1290,7 @@ namespace UnifiedRegex
     template <typename P, const bool IsLiteral>
     Node* Parser<P, IsLiteral>::TermPass1(MatchCharNode* deferredCharNode, bool& previousSurrogatePart)
     {
-        PROBE_STACK(scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(scriptContext, Js::Constants::MinStackRegex);
 
         Node* node = 0;
         bool containsSurrogatePair = false;
@@ -1694,7 +1702,14 @@ namespace UnifiedRegex
             case 'w':
                 {
                     MatchSetNode *setNode = Anew(ctAllocator, MatchSetNode, false, false);
-                    standardChars->SetWordChars(ctAllocator, setNode->set);
+                    if (this->unicodeFlagPresent && this->caseInsensitiveFlagPresent)
+                    {
+                        standardChars->SetWordIUChars(ctAllocator, setNode->set);
+                    }
+                    else
+                    {
+                        standardChars->SetWordChars(ctAllocator, setNode->set);
+                    }
                     node = setNode;
                     return false; // not an assertion
                 }
@@ -1734,7 +1749,28 @@ namespace UnifiedRegex
                 }
                 // Take to be identity escape if ill-formed as per Annex B
                 break;
+            case '^':
+            case '$':
+            case '\\':
+            case '.':
+            case '*':
+            case '+':
+            case '?':
+            case '(':
+            case ')':
+            case '[':
+            case ']':
+            case '{':
+            case '}':
+            case '|':
+            case '/':
+                break; // fall-through for identity escape
             default:
+                if (this->unicodeFlagPresent)
+                {
+                    // As per #sec-forbidden-extensions, if unicode flag is present, we must disallow any other escape.
+                    this->Fail(JSERR_RegExpInvalidEscape); // throw SyntaxError
+                }
                 // As per Annex B, allow anything other than newlines and above. Embedded 0 is ok
                 break;
             }
@@ -2678,7 +2714,7 @@ namespace UnifiedRegex
                     }
                     flags = (RegexFlags)(flags | UnicodeRegexFlag);
                     // For telemetry
-                    CHAKRATEL_LANGSTATS_INC_LANGFEATURECOUNT(UnicodeRegexFlagCount, scriptContext);
+                    CHAKRATEL_LANGSTATS_INC_LANGFEATURECOUNT(ES6, UnicodeRegexFlag, scriptContext);
 
                     break;
                 }
@@ -2691,7 +2727,7 @@ namespace UnifiedRegex
                     }
                     flags = (RegexFlags)(flags | StickyRegexFlag);
                     // For telemetry
-                    CHAKRATEL_LANGSTATS_INC_LANGFEATURECOUNT(StickyRegexFlagCount, scriptContext);
+                    CHAKRATEL_LANGSTATS_INC_LANGFEATURECOUNT(ES6, StickyRegexFlag, scriptContext);
 
                     break;
                 }
@@ -2877,6 +2913,7 @@ namespace UnifiedRegex
           const EncodedChar*& currentCharacter,
           const CharCount totalLen,
           const CharCount bodyChars,
+          const CharCount bodyEncodedChars,
           const CharCount totalChars,
           const RegexFlags flags )
     {
@@ -2888,7 +2925,7 @@ namespace UnifiedRegex
         {
             const auto recycler = this->scriptContext->GetRecycler();
             program = Program::New(recycler, flags);
-            this->CaptureSourceAndGroups(recycler, program, currentCharacter, bodyChars);
+            this->CaptureSourceAndGroups(recycler, program, currentCharacter, bodyChars, bodyEncodedChars);
         }
 
         currentCharacter += totalLen;
@@ -2943,6 +2980,8 @@ namespace UnifiedRegex
 #ifdef PROFILE_EXEC
         this->scriptContext->ProfileEnd(Js::RegexCompilePhase);
 #endif
+        // CaptureSourceAndGroups throws if this condition doesn't hold.
+        Assert(0 < pattern->NumGroups() && pattern->NumGroups() <= MAX_NUM_GROUPS);
 
         return pattern;
     }
@@ -2961,7 +3000,7 @@ namespace UnifiedRegex
     }
 
     template <typename P, const bool IsLiteral>
-    void Parser<P, IsLiteral>::CaptureSourceAndGroups(Recycler* recycler, Program* program, const EncodedChar* body, CharCount bodyChars)
+    void Parser<P, IsLiteral>::CaptureSourceAndGroups(Recycler* recycler, Program* program, const EncodedChar* body, CharCount bodyChars, CharCount bodyEncodedChars)
     {
         Assert(program->source == 0);
         Assert(body != 0);
@@ -2969,11 +3008,22 @@ namespace UnifiedRegex
         // Program will own source string
         program->source = RecyclerNewArrayLeaf(recycler, Char, bodyChars + 1);
         // Don't need to zero out since we're writing to the buffer right here
-        this->ConvertToUnicode(program->source, bodyChars, body);
+        this->ConvertToUnicode(program->source, bodyChars, body, body + bodyEncodedChars);
+
         program->source[bodyChars] = 0;
         program->sourceLen = bodyChars;
 
-        program->numGroups = nextGroupId;
+        // We expect nextGroupId to be positive, because the full regexp itself always
+        // counts as a capturing group.
+        Assert(nextGroupId > 0);
+        if (nextGroupId > MAX_NUM_GROUPS)
+        {
+            Js::JavascriptError::ThrowRangeError(this->scriptContext, JSERR_RegExpTooManyCapturingGroups);
+        }
+        else
+        {
+            program->numGroups = static_cast<uint16>(nextGroupId);
+        }
 
         // Remaining to set during compilation: litbuf, litbufLen, numLoops, insts, instsLen, entryPointLabel
     }
@@ -3006,7 +3056,14 @@ namespace UnifiedRegex
                 standardChars->SetNonDigits(ctAllocator, partialPrefixSetNode->set);
                 break;
             case 'W':
-                standardChars->SetNonWordChars(ctAllocator, partialPrefixSetNode->set);
+                if (this->caseInsensitiveFlagPresent)
+                {
+                    standardChars->SetNonWordIUChars(ctAllocator, partialPrefixSetNode->set);
+                }
+                else
+                {
+                    standardChars->SetNonWordChars(ctAllocator, partialPrefixSetNode->set);
+                }
                 break;
             default:
                 AssertMsg(false, "");
@@ -3052,7 +3109,7 @@ namespace UnifiedRegex
         if (litbuf != 0)
         {
             ctAllocator->Free(litbuf, litbufLen);
-            litbuf = 0;
+            litbuf = nullptr;
             litbufLen = 0;
             litbufNext = 0;
         }
@@ -3060,7 +3117,7 @@ namespace UnifiedRegex
 
     // Instantiate all templates
 #define INSTANTIATE_REGEX_PARSER_COMPILE(EncodingPolicy, IsLiteral, BuildAST)    \
-    template RegexPattern* Parser<EncodingPolicy, IsLiteral>::CompileProgram<BuildAST>(Node* root, const EncodedChar*& currentCharacter, const CharCount totalLen, const CharCount bodyChars, const CharCount totalChars, const RegexFlags flags );
+    template RegexPattern* Parser<EncodingPolicy, IsLiteral>::CompileProgram<BuildAST>(Node* root, const EncodedChar*& currentCharacter, const CharCount totalLen, const CharCount bodyChars, const CharCount bodyEncodedChars, const CharCount totalChars, const RegexFlags flags );
 
 #define INSTANTIATE_REGEX_PARSER(EncodingPolicy)                     \
     INSTANTIATE_REGEX_PARSER_COMPILE(EncodingPolicy, false, false)   \
@@ -3072,6 +3129,5 @@ namespace UnifiedRegex
 
     // Instantiate the Parser
     INSTANTIATE_REGEX_PARSER(NullTerminatedUnicodeEncodingPolicy);
-    INSTANTIATE_REGEX_PARSER(NullTerminatedUTF8EncodingPolicy);
     INSTANTIATE_REGEX_PARSER(NotNullTerminatedUTF8EncodingPolicy);
 }

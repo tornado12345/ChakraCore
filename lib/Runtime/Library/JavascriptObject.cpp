@@ -3,7 +3,6 @@
 // Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.
 //-------------------------------------------------------------------------------------------------------
 #include "RuntimeLibraryPch.h"
-#include "Types/NullTypeHandler.h"
 
 namespace Js
 {
@@ -14,14 +13,12 @@ namespace Js
         ARGUMENTS(args, callInfo);
         ScriptContext* scriptContext = function->GetScriptContext();
 
-        AssertMsg(args.Info.Count > 0, "Should always have implicit 'this'");
+        AssertMsg(args.HasArg(), "Should always have implicit 'this'");
 
         // SkipDefaultNewObject function flag should have prevented the default object from
         // being created, except when call true a host dispatch.
-        Var newTarget = callInfo.Flags & CallFlags_NewTarget ? args.Values[args.Info.Count] : args[0];
-        bool isCtorSuperCall = (callInfo.Flags & CallFlags_New) && newTarget != nullptr && !JavascriptOperators::IsUndefined(newTarget);
-        Assert(isCtorSuperCall || !(callInfo.Flags & CallFlags_New) || args[0] == nullptr
-            || JavascriptOperators::GetTypeId(args[0]) == TypeIds_HostDispatch);
+        Var newTarget = args.GetNewTarget();
+        bool isCtorSuperCall = JavascriptOperators::GetAndAssertIsConstructorSuperCall(args);
 
         if (args.Info.Count > 1)
         {
@@ -98,9 +95,10 @@ namespace Js
         }
 
         const PropertyRecord* propertyRecord;
-        JavascriptConversion::ToPropertyKey(args[1], scriptContext, &propertyRecord);
+        PropertyString* propertyString;
+        JavascriptConversion::ToPropertyKey(args[1], scriptContext, &propertyRecord, &propertyString);
 
-        if (JavascriptOperators::HasOwnProperty(dynamicObject, propertyRecord->GetPropertyId(), scriptContext))
+        if (JavascriptOperators::HasOwnProperty(dynamicObject, propertyRecord->GetPropertyId(), scriptContext, propertyString))
         {
             return scriptContext->GetLibrary()->GetTrue();
         }
@@ -128,7 +126,7 @@ namespace Js
         if (args.Info.Count >= 2)
         {
             const PropertyRecord* propertyRecord;
-            JavascriptConversion::ToPropertyKey(args[1], scriptContext, &propertyRecord);
+            JavascriptConversion::ToPropertyKey(args[1], scriptContext, &propertyRecord, nullptr);
             PropertyId propertyId = propertyRecord->GetPropertyId();
 
             PropertyDescriptor currentDescriptor;
@@ -156,9 +154,9 @@ namespace Js
         {
             JavascriptProxy* proxy = JavascriptProxy::FromVar(object);
             CrossSite::ForceCrossSiteThunkOnPrototypeChain(newPrototype);
-            return proxy->SetPrototypeTrap(newPrototype, shouldThrow);
+            return proxy->SetPrototypeTrap(newPrototype, shouldThrow, scriptContext);
         }
-        
+
         // 2.   Let extensible be the value of the [[Extensible]] internal data property of O.
         // 3.   Let current be the value of the [[Prototype]] internal data property of O.
         // 4.   If SameValue(V, current), then return true.
@@ -233,6 +231,24 @@ namespace Js
                 obj->RemoveFromPrototype(scriptContext);
             });
 
+            // Examine new prototype chain. If it brings in any special property, we need to invalidate related caches.
+            bool objectAndPrototypeChainHasNoSpecialProperties =
+                JavascriptOperators::CheckIfObjectAndProtoChainHasNoSpecialProperties(newPrototype);
+
+            if (!objectAndPrototypeChainHasNoSpecialProperties
+                || object->GetScriptContext() != newPrototype->GetScriptContext())
+            {
+                // The HaveNoSpecialProperties cache is cleared when a property is added or changed,
+                // but only for types in the same script context. Therefore, if the prototype is in another
+                // context, the object's cache won't be cleared when a property is added or changed on the prototype.
+                // Moreover, an object is added to the cache only when its whole prototype chain is in the same
+                // context.
+                //
+                // Since we don't have a way to find out which objects have a certain object as their prototype,
+                // we clear the cache here instead.
+                object->GetLibrary()->GetTypesWithNoSpecialPropertyProtoChainCache()->Clear();
+            }
+
             // Examine new prototype chain. If it brings in any non-WritableData property, we need to invalidate related caches.
             bool objectAndPrototypeChainHasOnlyWritableDataProperties =
                 JavascriptOperators::CheckIfObjectAndPrototypeChainHasOnlyWritableDataProperties(newPrototype);
@@ -250,7 +266,7 @@ namespace Js
                 // we clear the cache here instead.
 
                 // Invalidate fast prototype chain writable data test flag
-                object->GetLibrary()->NoPrototypeChainsAreEnsuredToHaveOnlyWritableDataProperties();
+                object->GetLibrary()->GetTypesWithOnlyWritablePropertyProtoChainCache()->Clear();
             }
 
             if (!objectAndPrototypeChainHasOnlyWritableDataProperties)
@@ -267,7 +283,7 @@ namespace Js
         }
 
         // Set to new prototype
-        if (object->IsExternal() || (DynamicType::Is(object->GetTypeId()) && (DynamicObject::FromVar(object))->IsCrossSiteObject()))
+        if (object->IsExternal() || (DynamicType::Is(object->GetTypeId()) && (DynamicObject::UnsafeFromVar(object))->IsCrossSiteObject()))
         {
             CrossSite::ForceCrossSiteThunkOnPrototypeChain(newPrototype);
         }
@@ -304,7 +320,7 @@ namespace Js
             dynamicObject = RecyclableObject::FromVar(static_cast<Js::GlobalObject*>(dynamicObject)->ToThis());
         }
 
-        while (JavascriptOperators::GetTypeId(value) != TypeIds_Null)
+        while (!JavascriptOperators::IsNull(value))
         {
             value = JavascriptOperators::GetPrototype(value);
             if (dynamicObject == value)
@@ -341,7 +357,7 @@ namespace Js
         }
 
         RecyclableObject* toStringFunc = RecyclableObject::FromVar(toStringVar);
-        return CALL_FUNCTION(toStringFunc, CallInfo(CallFlags_Value, 1), thisValue);
+        return CALL_FUNCTION(scriptContext->GetThreadContext(), toStringFunc, CallInfo(CallFlags_Value, 1), thisValue);
     }
 
     Var JavascriptObject::EntryToString(RecyclableObject* function, CallInfo callInfo, ...)
@@ -357,6 +373,47 @@ namespace Js
         return ToStringHelper(args[0], scriptContext);
     }
 
+    Var JavascriptObject::GetToStringTagValue(RecyclableObject *thisArg, ScriptContext *scriptContext)
+    {
+        if (JavascriptOperators::CheckIfObjectAndProtoChainHasNoSpecialProperties(thisArg))
+        {
+            return nullptr;
+        }
+
+        const PropertyId toStringTagId(PropertyIds::_symbolToStringTag);
+        PolymorphicInlineCache *cache = scriptContext->GetLibrary()->GetToStringTagCache();
+        PropertyValueInfo info;
+        // We don't allow cache resizing, at least for the moment: it's more work, and since there's only one
+        // cache per script context, we can afford to create each cache with the maximum size.
+        PropertyValueInfo::SetCacheInfo(&info, cache, false);
+        Var value;
+        if (CacheOperators::TryGetProperty<
+            true,                                       // CheckLocal
+            true,                                       // CheckProto
+            true,                                       // CheckAccessor
+            true,                                       // CheckMissing
+            true,                                       // CheckPolymorphicInlineCache
+            true,                                       // CheckTypePropertyCache
+            !PolymorphicInlineCache::IsPolymorphic,     // IsInlineCacheAvailable
+            PolymorphicInlineCache::IsPolymorphic,      // IsPolymorphicInlineCacheAvailable
+            false,                                      // ReturnOperationInfo
+            false>                                      // OutputExistence
+            (thisArg, false, thisArg, toStringTagId, &value, scriptContext, nullptr, &info))
+        {
+            return value;
+        }
+        else
+        {
+#if DBG_DUMP
+            if (PHASE_VERBOSE_TRACE1(Js::InlineCachePhase))
+            {
+                CacheOperators::TraceCache(cache, _u("PatchGetValue"), toStringTagId, scriptContext, thisArg);
+            }
+#endif
+            return JavascriptOperators::GetProperty(thisArg, thisArg, toStringTagId, scriptContext, &info);
+        }
+    }
+
     // ES2017 19.1.3.6 Object.prototype.toString()
     JavascriptString* JavascriptObject::ToStringTagHelper(Var thisArg, ScriptContext *scriptContext, TypeId type)
     {
@@ -365,47 +422,48 @@ namespace Js
         // 1. If the this value is undefined, return "[object Undefined]".
         if (type == TypeIds_Undefined)
         {
-            return library->CreateStringFromCppLiteral(_u("[object Undefined]"));
+            return library->GetObjectUndefinedDisplayString();
         }
         // 2. If the this value is null, return "[object Null]".
         if (type == TypeIds_Null)
         {
-            return library->CreateStringFromCppLiteral(_u("[object Null]"));
+            return library->GetObjectNullDisplayString();
         }
 
         // 3. Let O be ToObject(this value).
-        RecyclableObject *thisArgAsObject = RecyclableObject::FromVar(JavascriptOperators::ToObject(thisArg, scriptContext));
-
-        // 4. Let isArray be ? IsArray(O).
-        // There is an implicit check for a null proxy handler in IsArray, so use the operator.
-        BOOL isArray = JavascriptOperators::IsArray(thisArgAsObject);
+        RecyclableObject *thisArgAsObject = JavascriptOperators::ToObject(thisArg, scriptContext);
 
         // 15. Let tag be ? Get(O, @@toStringTag).
-        Var tag = JavascriptOperators::GetProperty(thisArgAsObject, PropertyIds::_symbolToStringTag, scriptContext); // Let tag be the result of Get(O, @@toStringTag).
+        Var tag = JavascriptObject::GetToStringTagValue(thisArgAsObject, scriptContext);
 
-        // 17. Return the String that is the result of concatenating "[object ", tag, and "]". 
+        // 17. Return the String that is the result of concatenating "[object ", tag, and "]".
         auto buildToString = [&scriptContext](Var tag) {
             JavascriptString *tagStr = JavascriptString::FromVar(tag);
+            const WCHAR objectStartString[9] = _u("[object ");
+            const WCHAR objectEndString[1] = { _u(']') };
+            CompoundString *const cs = CompoundString::NewWithCharCapacity(_countof(objectStartString)
+              + _countof(objectEndString) + tagStr->GetLength(), scriptContext->GetLibrary());
 
-            CompoundString::Builder<32> stringBuilder(scriptContext);
+            cs->AppendChars(objectStartString, _countof(objectStartString) - 1 /* ditch \0 */);
+            cs->AppendChars(tagStr);
+            cs->AppendChars(objectEndString, _countof(objectEndString));
 
-            stringBuilder.AppendChars(_u("[object "));
-
-            stringBuilder.AppendChars(tagStr);
-            stringBuilder.AppendChars(_u(']'));
-
-            return stringBuilder.ToString();
+            return cs;
         };
         if (tag != nullptr && JavascriptString::Is(tag))
         {
             return buildToString(tag);
         }
 
+        // 4. Let isArray be ? IsArray(O).
+        // There is an implicit check for a null proxy handler in IsArray, so use the operator.
+        BOOL isArray = JavascriptOperators::IsArray(thisArgAsObject);
+
         // If we don't have a tag or it's not a string, use the 'built in tag'.
         if (isArray)
         {
             // 5. If isArray is true, let builtinTag be "Array".
-            return library->CreateStringFromCppLiteral(_u("[object Array]"));
+            return library->GetObjectArrayDisplayString();
         }
 
         JavascriptString* builtInTag = nullptr;
@@ -414,28 +472,28 @@ namespace Js
             // 6. Else if O is an exotic String object, let builtinTag be "String".
         case TypeIds_String:
         case TypeIds_StringObject:
-            builtInTag = library->CreateStringFromCppLiteral(_u("[object String]"));
+            builtInTag = library->GetObjectStringDisplayString();
             break;
 
             // 7. Else if O has an[[ParameterMap]] internal slot, let builtinTag be "Arguments".
         case TypeIds_Arguments:
-            builtInTag = library->CreateStringFromCppLiteral(_u("[object Arguments]"));
+            builtInTag = library->GetObjectArgumentsDisplayString();
             break;
 
             // 8. Else if O has a [[Call]] internal method, let builtinTag be "Function".
         case TypeIds_Function:
-            builtInTag = library->CreateStringFromCppLiteral(_u("[object Function]"));
+            builtInTag = library->GetObjectFunctionDisplayString();
             break;
 
             // 9. Else if O has an [[ErrorData]] internal slot, let builtinTag be "Error".
         case TypeIds_Error:
-            builtInTag = library->GetErrorDisplayString();
+            builtInTag = library->GetObjectErrorDisplayString();
             break;
 
             // 10. Else if O has a [[BooleanData]] internal slot, let builtinTag be "Boolean".
         case TypeIds_Boolean:
         case TypeIds_BooleanObject:
-            builtInTag = library->CreateStringFromCppLiteral(_u("[object Boolean]"));
+            builtInTag = library->GetObjectBooleanDisplayString();
             break;
 
             // 11. Else if O has a [[NumberData]] internal slot, let builtinTag be "Number".
@@ -444,18 +502,18 @@ namespace Js
         case TypeIds_UInt64Number:
         case TypeIds_Integer:
         case TypeIds_NumberObject:
-            builtInTag = library->CreateStringFromCppLiteral(_u("[object Number]"));
+            builtInTag = library->GetObjectNumberDisplayString();
             break;
 
             // 12. Else if O has a [[DateValue]] internal slot, let builtinTag be "Date".
         case TypeIds_Date:
         case TypeIds_WinRTDate:
-            builtInTag = library->CreateStringFromCppLiteral(_u("[object Date]"));
+            builtInTag = library->GetObjectDateDisplayString();
             break;
 
             // 13. Else if O has a [[RegExpMatcher]] internal slot, let builtinTag be "RegExp".
         case TypeIds_RegEx:
-            builtInTag = library->CreateStringFromCppLiteral(_u("[object RegExp]"));
+            builtInTag = library->GetObjectRegExpDisplayString();
             break;
 
             // 14. Else, let builtinTag be "Object".
@@ -486,7 +544,7 @@ namespace Js
         if (type == TypeIds_HostDispatch)
         {
             RecyclableObject* hostDispatchObject = RecyclableObject::FromVar(thisArg);
-            DynamicObject* remoteObject = hostDispatchObject->GetRemoteObject();
+            const DynamicObject* remoteObject = hostDispatchObject->GetRemoteObject();
             if (!remoteObject)
             {
                 Var result = nullptr;
@@ -535,11 +593,8 @@ namespace Js
 
         AssertMsg(args.Info.Count > 0, "Should always have implicit 'this'");
 
-        TypeId argType = JavascriptOperators::GetTypeId(args[0]);
-
         // throw a TypeError if TypeId is null or undefined, and apply ToObject to the 'this' value otherwise.
-
-        if ((argType == TypeIds_Null) || (argType == TypeIds_Undefined))
+        if (JavascriptOperators::IsUndefinedOrNull(args[0]))
         {
             JavascriptError::ThrowTypeError(scriptContext, JSERR_This_NullOrUndefined, _u("Object.prototype.valueOf"));
         }
@@ -561,12 +616,12 @@ namespace Js
         RecyclableObject* obj = nullptr;
         if (args.Info.Count < 2)
         {
-            obj = RecyclableObject::FromVar(JavascriptOperators::ToObject(scriptContext->GetLibrary()->GetUndefined(), scriptContext));
+            obj = JavascriptOperators::ToObject(scriptContext->GetLibrary()->GetUndefined(), scriptContext);
         }
         else
         {
             // Convert the argument to object first
-            obj = RecyclableObject::FromVar(JavascriptOperators::ToObject(args[1], scriptContext));
+            obj = JavascriptOperators::ToObject(args[1], scriptContext);
         }
 
         // If the object is HostDispatch try to invoke the operation remotely
@@ -587,10 +642,8 @@ namespace Js
     Var JavascriptObject::GetOwnPropertyDescriptorHelper(RecyclableObject* obj, Var propertyKey, ScriptContext* scriptContext)
     {
         const PropertyRecord* propertyRecord;
-        JavascriptConversion::ToPropertyKey(propertyKey, scriptContext, &propertyRecord);
+        JavascriptConversion::ToPropertyKey(propertyKey, scriptContext, &propertyRecord, nullptr);
         PropertyId propertyId = propertyRecord->GetPropertyId();
-
-        obj->ThrowIfCannotGetOwnPropertyDescriptor(propertyId);
 
         PropertyDescriptor propertyDescriptor;
         BOOL isPropertyDescriptorDefined;
@@ -606,7 +659,7 @@ namespace Js
     BOOL JavascriptObject::GetOwnPropertyDescriptorHelper(RecyclableObject* obj, PropertyId propertyId, ScriptContext* scriptContext, PropertyDescriptor& propertyDescriptor)
     {
         BOOL isPropertyDescriptorDefined;
-        if (obj->CanHaveInterceptors())
+        if (obj->IsExternal())
         {
             isPropertyDescriptorDefined = obj->HasOwnProperty(propertyId) ?
                 JavascriptOperators::GetOwnPropertyDescriptor(obj, propertyId, scriptContext, &propertyDescriptor) : obj->GetDefaultPropertyDescriptor(propertyDescriptor);
@@ -632,12 +685,12 @@ namespace Js
 
         if (args.Info.Count < 2)
         {
-            obj = RecyclableObject::FromVar(JavascriptOperators::ToObject(scriptContext->GetLibrary()->GetUndefined(), scriptContext));
+            obj = JavascriptOperators::ToObject(scriptContext->GetLibrary()->GetUndefined(), scriptContext);
         }
         else
         {
             // Convert the argument to object first
-            obj = RecyclableObject::FromVar(JavascriptOperators::ToObject(args[1], scriptContext));
+            obj = JavascriptOperators::ToObject(args[1], scriptContext);
         }
 
         // If the object is HostDispatch try to invoke the operation remotely
@@ -652,7 +705,7 @@ namespace Js
 
         JavascriptArray* ownPropertyKeys = JavascriptOperators::GetOwnPropertyKeys(obj, scriptContext);
         RecyclableObject* resultObj = scriptContext->GetLibrary()->CreateObject(true, (Js::PropertyIndex) ownPropertyKeys->GetLength());
-        
+
         PropertyDescriptor propDesc;
         Var propKey = nullptr;
 
@@ -665,9 +718,9 @@ namespace Js
             {
                 continue;
             }
-            
+
             PropertyRecord const * propertyRecord;
-            JavascriptConversion::ToPropertyKey(propKey, scriptContext, &propertyRecord);
+            JavascriptConversion::ToPropertyKey(propKey, scriptContext, &propertyRecord, nullptr);
 
             Var newDescriptor = JavascriptObject::GetOwnPropertyDescriptorHelper(obj, propKey, scriptContext);
             if (!JavascriptOperators::IsUndefined(newDescriptor))
@@ -687,7 +740,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ObjectGetPrototypeOfCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Object_Constructor_getPrototypeOf);
 
         // 19.1.2.9
         // Object.getPrototypeOf ( O )
@@ -765,7 +818,7 @@ namespace Js
 
         Assert(!(callInfo.Flags & CallFlags_New));
 
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ObjectSealCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Object_Constructor_seal);
 
         // Spec update in Rev29 under section 19.1.2.17
         if (args.Info.Count < 2)
@@ -798,7 +851,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ObjectFreezeCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Object_Constructor_freeze);
 
         // Spec update in Rev29 under section 19.1.2.5
         if (args.Info.Count < 2)
@@ -830,7 +883,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ObjectPreventExtensionCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Object_Constructor_preventExtensions);
 
         // Spec update in Rev29 under section 19.1.2.15
         if (args.Info.Count < 2)
@@ -863,7 +916,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ObjectIsSealedCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Object_Constructor_isSealed);
 
         if (args.Info.Count < 2 || !JavascriptOperators::IsObject(args[1]))
         {
@@ -891,7 +944,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ObjectIsFrozenCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Object_Constructor_isFrozen);
 
         if (args.Info.Count < 2 || !JavascriptOperators::IsObject(args[1]))
         {
@@ -917,7 +970,7 @@ namespace Js
 
         ARGUMENTS(args, callInfo);
         ScriptContext* scriptContext = function->GetScriptContext();
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ObjectIsExtensibleCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Object_Constructor_isExtensible);
 
         Assert(!(callInfo.Flags & CallFlags_New));
 
@@ -946,10 +999,10 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ObjectGetOwnPropertyNamesCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Object_Constructor_getOwnPropertyNames);
 
         Var tempVar = args.Info.Count < 2 ? scriptContext->GetLibrary()->GetUndefined() : args[1];
-        RecyclableObject *object = RecyclableObject::FromVar(JavascriptOperators::ToObject(tempVar, scriptContext));
+        RecyclableObject *object = JavascriptOperators::ToObject(tempVar, scriptContext);
 
         if (object->GetTypeId() == TypeIds_HostDispatch)
         {
@@ -973,7 +1026,7 @@ namespace Js
         Assert(!(callInfo.Flags & CallFlags_New));
 
         Var tempVar = args.Info.Count < 2 ? scriptContext->GetLibrary()->GetUndefined() : args[1];
-        RecyclableObject *object = RecyclableObject::FromVar(JavascriptOperators::ToObject(tempVar, scriptContext));
+        RecyclableObject *object = JavascriptOperators::ToObject(tempVar, scriptContext);
 
         if (object->GetTypeId() == TypeIds_HostDispatch)
         {
@@ -995,10 +1048,10 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ObjectKeysCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Object_Constructor_keys);
 
         Var tempVar = args.Info.Count < 2 ? scriptContext->GetLibrary()->GetUndefined() : args[1];
-        RecyclableObject *object = RecyclableObject::FromVar(JavascriptOperators::ToObject(tempVar, scriptContext));
+        RecyclableObject *object = JavascriptOperators::ToObject(tempVar, scriptContext);
 
         if (object->GetTypeId() == TypeIds_HostDispatch)
         {
@@ -1030,7 +1083,7 @@ namespace Js
 
             PropertyDescriptor propertyDescriptor;
 
-            JavascriptConversion::ToPropertyKey(nextKey, scriptContext, &propertyRecord);
+            JavascriptConversion::ToPropertyKey(nextKey, scriptContext, &propertyRecord, nullptr);
             propertyId = propertyRecord->GetPropertyId();
             Assert(propertyId != Constants::NoProperty);
 
@@ -1039,6 +1092,7 @@ namespace Js
                 if (propertyDescriptor.IsEnumerable())
                 {
                     Var value = JavascriptOperators::GetProperty(object, propertyId, scriptContext);
+
                     if (!valuesToReturn)
                     {
                         // For Object.entries each entry is key, value pair
@@ -1063,10 +1117,10 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ObjectValuesCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Object_Constructor_values);
 
         Var tempVar = args.Info.Count < 2 ? scriptContext->GetLibrary()->GetUndefined() : args[1];
-        RecyclableObject *object = RecyclableObject::FromVar(JavascriptOperators::ToObject(tempVar, scriptContext));
+        RecyclableObject *object = JavascriptOperators::ToObject(tempVar, scriptContext);
 
         return GetValuesOrEntries(object, true /*valuesToReturn*/, scriptContext);
     }
@@ -1079,10 +1133,10 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ObjectEntriesCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Object_Constructor_entries);
 
         Var tempVar = args.Info.Count < 2 ? scriptContext->GetLibrary()->GetUndefined() : args[1];
-        RecyclableObject *object = RecyclableObject::FromVar(JavascriptOperators::ToObject(tempVar, scriptContext));
+        RecyclableObject *object = JavascriptOperators::ToObject(tempVar, scriptContext);
 
         return GetValuesOrEntries(object, false /*valuesToReturn*/, scriptContext);
     }
@@ -1142,8 +1196,7 @@ namespace Js
             return newArr;  // Return an empty array if we don't have an enumerator
         }
 
-        RecyclableObject *undefined = scriptContext->GetLibrary()->GetUndefined();
-        Var propertyName = nullptr;
+        JavascriptString * propertyName = nullptr;
         PropertyId propertyId;
         uint32 propertyIndex = 0;
         uint32 symbolIndex = 0;
@@ -1152,7 +1205,7 @@ namespace Js
 
         while ((propertyName = enumerator.MoveAndGetNext(propertyId)) != NULL)
         {
-            if (!JavascriptOperators::IsUndefinedObject(propertyName, undefined)) //There are some code paths in which GetCurrentIndex can return undefined
+            if (propertyName)
             {
                 if (includeSymbolProperties)
                 {
@@ -1160,14 +1213,15 @@ namespace Js
 
                     if (propertyRecord->IsSymbol())
                     {
-                        symbol = scriptContext->GetLibrary()->CreateSymbol(propertyRecord);
-                        newArrForSymbols->DirectSetItemAt(symbolIndex++, CrossSite::MarshalVar(scriptContext, symbol));
+                        symbol = scriptContext->GetSymbol(propertyRecord);
+                        // no need to marshal symbol because it is created from scriptContext
+                        newArrForSymbols->DirectSetItemAt(symbolIndex++, symbol);
                         continue;
                     }
                 }
                 if (includeStringProperties)
                 {
-                    newArr->DirectSetItemAt(propertyIndex++, CrossSite::MarshalVar(scriptContext, propertyName));
+                    newArr->DirectSetItemAt(propertyIndex++, CrossSite::MarshalVar(scriptContext, propertyName, propertyName->GetScriptContext()));
                 }
             }
         }
@@ -1178,10 +1232,7 @@ namespace Js
             uint32 index = 0;
             while (object->GetSpecialPropertyName(index, &propertyName, scriptContext))
             {
-                if (!JavascriptOperators::IsUndefinedObject(propertyName, undefined))
-                {
-                    newArr->DirectSetItemAt(propertyIndex++, propertyName);
-                }
+                newArr->DirectSetItemAt(propertyIndex++, propertyName);
                 index++;
             }
         }
@@ -1229,7 +1280,7 @@ namespace Js
 
         Var propertyKey = args.Info.Count > 2 ? args[2] : obj->GetLibrary()->GetUndefined();
         PropertyRecord const * propertyRecord;
-        JavascriptConversion::ToPropertyKey(propertyKey, scriptContext, &propertyRecord);
+        JavascriptConversion::ToPropertyKey(propertyKey, scriptContext, &propertyRecord, nullptr);
 
         Var descVar = args.Info.Count > 3 ? args[3] : obj->GetLibrary()->GetUndefined();
         PropertyDescriptor propertyDescriptor;
@@ -1255,7 +1306,7 @@ namespace Js
         ARGUMENTS(args, callInfo);
         ScriptContext* scriptContext = function->GetScriptContext();
 
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ObjectDefinePropertiesCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Object_Constructor_defineProperties);
 
         Assert(!(callInfo.Flags & CallFlags_New));
 
@@ -1305,12 +1356,11 @@ namespace Js
 #if ENABLE_COPYONACCESS_ARRAY
         JavascriptLibrary::CheckAndConvertCopyOnAccessNativeIntArray<Var>(args[0]);
 #endif
-        Var thisArg = JavascriptOperators::OP_GetThisNoFastPath(args[0], 0, scriptContext);
-        RecyclableObject* obj = RecyclableObject::FromVar(thisArg);
-
-        Var propertyKey = args.Info.Count > 1 ? args[1] : obj->GetLibrary()->GetUndefined();
-        const PropertyRecord* propertyRecord;
-        JavascriptConversion::ToPropertyKey(propertyKey, scriptContext, &propertyRecord);
+        RecyclableObject* obj = nullptr;
+        if (!JavascriptConversion::ToObject(args[0], scriptContext, &obj))
+        {
+            JavascriptError::ThrowTypeError(scriptContext, JSERR_This_NullOrUndefined, _u("Object.prototype.__defineGetter__"));
+        }
 
         Var getterFunc = args.Info.Count > 2 ? args[2] : obj->GetLibrary()->GetUndefined();
 
@@ -1318,6 +1368,10 @@ namespace Js
         {
             JavascriptError::ThrowTypeError(scriptContext, JSERR_FunctionArgument_NeedFunction, _u("Object.prototype.__defineGetter__"));
         }
+
+        Var propertyKey = args.Info.Count > 1 ? args[1] : obj->GetLibrary()->GetUndefined();
+        const PropertyRecord* propertyRecord;
+        JavascriptConversion::ToPropertyKey(propertyKey, scriptContext, &propertyRecord, nullptr);
 
         PropertyDescriptor propertyDescriptor;
         propertyDescriptor.SetEnumerable(true);
@@ -1343,12 +1397,11 @@ namespace Js
         // For browser interop, simulate LdThis by calling OP implementation directly.
         // Do not have module id here so use the global id, 0.
         //
-        Var thisArg = JavascriptOperators::OP_GetThisNoFastPath(args[0], 0, scriptContext);
-        RecyclableObject* obj = RecyclableObject::FromVar(thisArg);
-
-        Var propertyKey = args.Info.Count > 1 ? args[1] : obj->GetLibrary()->GetUndefined();
-        const PropertyRecord* propertyRecord;
-        JavascriptConversion::ToPropertyKey(propertyKey, scriptContext, &propertyRecord);
+        RecyclableObject* obj = nullptr;
+        if (!JavascriptConversion::ToObject(args[0], scriptContext, &obj))
+        {
+            JavascriptError::ThrowTypeError(scriptContext, JSERR_This_NullOrUndefined, _u("Object.prototype.__defineSetter__"));
+        }
 
         Var setterFunc = args.Info.Count > 2 ? args[2] : obj->GetLibrary()->GetUndefined();
 
@@ -1356,6 +1409,10 @@ namespace Js
         {
             JavascriptError::ThrowTypeError(scriptContext, JSERR_FunctionArgument_NeedFunction, _u("Object.prototype.__defineSetter__"));
         }
+
+        Var propertyKey = args.Info.Count > 1 ? args[1] : obj->GetLibrary()->GetUndefined();
+        const PropertyRecord* propertyRecord;
+        JavascriptConversion::ToPropertyKey(propertyKey, scriptContext, &propertyRecord, nullptr);
 
         PropertyDescriptor propertyDescriptor;
         propertyDescriptor.SetEnumerable(true);
@@ -1385,7 +1442,7 @@ namespace Js
 
         Var propertyKey = args.Info.Count > 1 ? args[1] : obj->GetLibrary()->GetUndefined();
         const PropertyRecord* propertyRecord;
-        JavascriptConversion::ToPropertyKey(propertyKey, scriptContext, &propertyRecord);
+        JavascriptConversion::ToPropertyKey(propertyKey, scriptContext, &propertyRecord, nullptr);
 
         Var getter = nullptr;
         Var unused = nullptr;
@@ -1418,7 +1475,7 @@ namespace Js
 
         Var propertyKey = args.Info.Count > 1 ? args[1] : obj->GetLibrary()->GetUndefined();
         const PropertyRecord* propertyRecord;
-        JavascriptConversion::ToPropertyKey(propertyKey, scriptContext, &propertyRecord);
+        JavascriptConversion::ToPropertyKey(propertyKey, scriptContext, &propertyRecord, nullptr);
 
         Var unused = nullptr;
         Var setter = nullptr;
@@ -1474,83 +1531,112 @@ namespace Js
 
         // 4. Let sources be the List of argument values starting with the second argument.
         // 5. For each element nextSource of sources, in ascending index order,
-        for (unsigned int i = 2; i < args.Info.Count; i++)
+        AssignHelper<true>(args[2], to, scriptContext);
+        for (unsigned int i = 3; i < args.Info.Count; i++)
         {
-            //      a. If nextSource is undefined or null, let keys be an empty List.
-            //      b. Else,
-            //          i.Let from be ToObject(nextSource).
-            //          ii.ReturnIfAbrupt(from).
-            //          iii.Let keys be from.[[OwnPropertyKeys]]().
-            //          iv.ReturnIfAbrupt(keys).
-            if (JavascriptOperators::IsUndefinedOrNull(args[i]))
-            {
-                continue;
-            }
-
-            RecyclableObject* from = nullptr;
-            if (!JavascriptConversion::ToObject(args[i], scriptContext, &from))
-            {
-                JavascriptError::ThrowTypeError(scriptContext, JSERR_FunctionArgument_NeedObject, _u("Object.assign"));
-            }
-
-#if ENABLE_COPYONACCESS_ARRAY
-            JavascriptLibrary::CheckAndConvertCopyOnAccessNativeIntArray<Var>(from);
-#endif
-
-            // if proxy, take slow path by calling [[OwnPropertyKeys]] on source
-            if (JavascriptProxy::Is(from))
-            {
-                AssignForProxyObjects(from, to, scriptContext);
-            }
-            // else use enumerator to extract keys from source
-            else
-            {
-                AssignForGenericObjects(from, to, scriptContext);
-            }
+            AssignHelper<false>(args[i], to, scriptContext);
         }
 
         // 6. Return to.
         return to;
     }
 
+    template <bool tryCopy>
+    void JavascriptObject::AssignHelper(Var fromArg, RecyclableObject* to, ScriptContext* scriptContext)
+    {
+        //      a. If nextSource is undefined or null, let keys be an empty List.
+        //      b. Else,
+        //          i.Let from be ToObject(nextSource).
+        //          ii.ReturnIfAbrupt(from).
+        //          iii.Let keys be from.[[OwnPropertyKeys]]().
+        //          iv.ReturnIfAbrupt(keys).
+
+        RecyclableObject* from = nullptr;
+        if (!JavascriptConversion::ToObject(fromArg, scriptContext, &from))
+        {
+            if (JavascriptOperators::IsUndefinedOrNull(fromArg))
+            {
+                return;
+            }
+            JavascriptError::ThrowTypeError(scriptContext, JSERR_FunctionArgument_NeedObject, _u("Object.assign"));
+        }
+
+#if ENABLE_COPYONACCESS_ARRAY
+        JavascriptLibrary::CheckAndConvertCopyOnAccessNativeIntArray<Var>(from);
+#endif
+
+        // if proxy, take slow path by calling [[OwnPropertyKeys]] on source
+        if (JavascriptProxy::Is(from))
+        {
+            AssignForProxyObjects(from, to, scriptContext);
+        }
+        // else use enumerator to extract keys from source
+        else
+        {
+            bool copied = false;
+            if (tryCopy)
+            {
+                DynamicObject* fromObj = JavascriptOperators::TryFromVar<DynamicObject>(from);
+                DynamicObject* toObj = JavascriptOperators::TryFromVar<DynamicObject>(to);
+                if (toObj && fromObj && toObj->GetType() == scriptContext->GetLibrary()->GetObjectType())
+                {
+                    copied = toObj->TryCopy(fromObj);
+                }
+            }
+            if (!copied)
+            {
+                AssignForGenericObjects(from, to, scriptContext);
+            }
+        }
+    }
+
     void JavascriptObject::AssignForGenericObjects(RecyclableObject* from, RecyclableObject* to, ScriptContext* scriptContext)
     {
+        EnumeratorCache* cache = scriptContext->GetLibrary()->GetObjectAssignCache(from->GetType());
         JavascriptStaticEnumerator enumerator;
-        if (!from->GetEnumerator(&enumerator, EnumeratorFlags::SnapShotSemantics | EnumeratorFlags::EnumSymbols, scriptContext))
+        if (!from->GetEnumerator(&enumerator, EnumeratorFlags::SnapShotSemantics | EnumeratorFlags::EnumSymbols | EnumeratorFlags::UseCache, scriptContext, cache))
         {
-            //nothing to enumerate, continue with the nextSource.
+            // Nothing to enumerate, continue with the nextSource.
             return;
         }
 
         PropertyId nextKey = Constants::NoProperty;
         Var propValue = nullptr;
-        Var propertyVar = nullptr;
+        JavascriptString * propertyName = nullptr;
 
-        //enumerate through each property of properties and fetch the property descriptor
-        while ((propertyVar = enumerator.MoveAndGetNext(nextKey)) != NULL)
+        // Enumerate through each property of properties and fetch the property descriptor
+        while ((propertyName = enumerator.MoveAndGetNext(nextKey)) != NULL)
         {
             if (nextKey == Constants::NoProperty)
             {
-                if (JavascriptOperators::IsUndefinedObject(propertyVar)) //There are some code paths in which GetCurrentIndex can return undefined
-                {
-                    continue;
-                }
-
                 PropertyRecord const * propertyRecord = nullptr;
-                JavascriptString* propertyName = JavascriptString::FromVar(propertyVar);
 
-                scriptContext->GetOrAddPropertyRecord(propertyName->GetString(), propertyName->GetLength(), &propertyRecord);
+                scriptContext->GetOrAddPropertyRecord(propertyName, &propertyRecord);
                 nextKey = propertyRecord->GetPropertyId();
             }
+            PropertyString * propertyString = PropertyString::TryFromVar(propertyName);
 
-            if (!JavascriptOperators::GetOwnProperty(from, nextKey, &propValue, scriptContext))
+
+            // If propertyName is a PropertyString* we can try getting the property from the inline cache to avoid having a full property lookup
+            //
+            // Whenever possible, our enumerator populates the cache, so we should generally get a cache hit here
+            PropertyValueInfo getPropertyInfo;
+            if (propertyString == nullptr || !propertyString->TryGetPropertyFromCache<true /* OwnPropertyOnly */, false /* OutputExistence */>(from, from, &propValue, scriptContext, &getPropertyInfo))
             {
-                JavascriptError::ThrowTypeError(scriptContext, JSERR_Operand_Invalid_NeedObject, _u("Object.assign"));
+                if (!JavascriptOperators::GetOwnProperty(from, nextKey, &propValue, scriptContext, &getPropertyInfo))
+                {
+                    JavascriptError::ThrowTypeError(scriptContext, JSERR_Operand_Invalid_NeedObject, _u("Object.assign"));
+                }
             }
 
-            if (!JavascriptOperators::SetProperty(to, to, nextKey, propValue, scriptContext, PropertyOperationFlags::PropertyOperation_ThrowIfNonWritable))
+            // Similarly, try to set the property using our cache to avoid having to do the full work of SetProperty
+            PropertyValueInfo setPropertyInfo;
+            if (propertyString == nullptr || !propertyString->TrySetPropertyFromCache(to, propValue, scriptContext, PropertyOperation_ThrowIfNonWritable, &setPropertyInfo))
             {
-                JavascriptError::ThrowTypeError(scriptContext, JSERR_Operand_Invalid_NeedObject, _u("Object.assign"));
+                if (!JavascriptOperators::SetProperty(to, to, nextKey, propValue, &setPropertyInfo, scriptContext, PropertyOperation_ThrowIfNonWritable))
+                {
+                    JavascriptError::ThrowTypeError(scriptContext, JSERR_Operand_Invalid_NeedObject, _u("Object.assign"));
+                }
             }
         }
     }
@@ -1578,14 +1664,14 @@ namespace Js
             nextKey = keys->DirectGetItem(j);
             AssertMsg(JavascriptSymbol::Is(nextKey) || JavascriptString::Is(nextKey), "Invariant check during ownKeys proxy trap should make sure we only get property key here. (symbol or string primitives)");
             // Spec doesn't strictly call for us to use ToPropertyKey but since we know nextKey is already a symbol or string primitive, ToPropertyKey will be a nop and return us the propertyRecord
-            JavascriptConversion::ToPropertyKey(nextKey, scriptContext, &propertyRecord);
+            JavascriptConversion::ToPropertyKey(nextKey, scriptContext, &propertyRecord, nullptr);
             propertyId = propertyRecord->GetPropertyId();
             AssertMsg(propertyId != Constants::NoProperty, "AssignForProxyObjects - OwnPropertyKeys returned a propertyId with value NoProperty.");
             if (JavascriptOperators::GetOwnPropertyDescriptor(from, propertyRecord->GetPropertyId(), scriptContext, &propertyDescriptor))
             {
                 if (propertyDescriptor.IsEnumerable())
                 {
-                    if (!JavascriptOperators::GetOwnProperty(from, propertyId, &propValue, scriptContext))
+                    if (!JavascriptOperators::GetOwnProperty(from, propertyId, &propValue, scriptContext, nullptr))
                     {
                         JavascriptError::ThrowTypeError(scriptContext, JSERR_Operand_Invalid_NeedObject, _u("Object.assign"));
                     }
@@ -1605,10 +1691,9 @@ namespace Js
 
         ARGUMENTS(args, callInfo);
         ScriptContext* scriptContext = function->GetScriptContext();
-        Recycler *recycler = scriptContext->GetRecycler();
 
 
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ObjectCreateCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Object_Constructor_create)
 
         Assert(!(callInfo.Flags & CallFlags_New));
 
@@ -1617,18 +1702,15 @@ namespace Js
             JavascriptError::ThrowTypeError(scriptContext, JSERR_FunctionArgument_NotObjectOrNull, _u("Object.create"));
         }
 
-        TypeId typeId = JavascriptOperators::GetTypeId(args[1]);
-        if (typeId != TypeIds_Null && !JavascriptOperators::IsObjectType(typeId))
+        Var protoVar = args[1];
+        if (!JavascriptOperators::IsObjectOrNull(protoVar))
         {
             JavascriptError::ThrowTypeError(scriptContext, JSERR_FunctionArgument_NotObjectOrNull, _u("Object.create"));
         }
 
-        //Create a new DynamicType with first argument as prototype and non shared type
-        RecyclableObject *prototype = RecyclableObject::FromVar(args[1]);
-        DynamicType *objectType = DynamicType::New(scriptContext, TypeIds_Object, prototype, nullptr, NullTypeHandler<false>::GetDefaultInstance(), false);
+        RecyclableObject* protoObj = RecyclableObject::FromVar(protoVar);
+        DynamicObject* object = function->GetLibrary()->CreateObject(protoObj);
 
-        //Create a new Object using this type.
-        DynamicObject* object = DynamicObject::New(recycler, objectType);
         JS_ETW(EventWriteJSCRIPT_RECYCLER_ALLOCATE_OBJECT(object));
 #if ENABLE_DEBUG_CONFIG_OPTIONS
         if (Js::Configuration::Global.flags.IsEnabled(Js::autoProxyFlag))
@@ -1668,9 +1750,9 @@ namespace Js
         size_t descCount = 0;
         struct DescriptorMap
         {
-            PropertyRecord const * propRecord;
-            PropertyDescriptor descriptor;
-            Var originalVar;
+            Field(PropertyRecord const *) propRecord;
+            Field(PropertyDescriptor) descriptor;
+            Field(Var) originalVar;
         };
 
         JavascriptStaticEnumerator enumerator;
@@ -1685,28 +1767,18 @@ namespace Js
         PropertyId propId;
         PropertyRecord const * propertyRecord;
         JavascriptString* propertyName = nullptr;
-        RecyclableObject *undefined = scriptContext->GetLibrary()->GetUndefined();
-        Var tempVar;
 
         //enumerate through each property of properties and fetch the property descriptor
-        while ((tempVar = enumerator.MoveAndGetNext(propId)) != NULL)
+        while ((propertyName = enumerator.MoveAndGetNext(propId)) != NULL)
         {
             if (propId == Constants::NoProperty) //try current property id query first
             {
-                if (!JavascriptOperators::IsUndefinedObject(tempVar, undefined)) //There are some enumerators returning propertyName but not propId
-                {
-                    propertyName = JavascriptString::FromVar(tempVar);
-                    scriptContext->GetOrAddPropertyRecord(propertyName->GetString(), propertyName->GetLength(), &propertyRecord);
-                    propId = propertyRecord->GetPropertyId();
-                }
-                else
-                {
-                    continue;
-                }
+                scriptContext->GetOrAddPropertyRecord(propertyName, &propertyRecord);
+                propId = propertyRecord->GetPropertyId();
             }
             else
             {
-                propertyRecord = scriptContext->GetPropertyName(propId);
+                propertyName->GetPropertyRecord(&propertyRecord);
             }
 
             if (descCount == descSize)
@@ -1723,8 +1795,9 @@ namespace Js
                 descriptors = temp;
             }
 
-            tempVar = JavascriptOperators::GetProperty(props, propId, scriptContext);
+            Var tempVar = JavascriptOperators::GetPropertyNoCache(props, propId, scriptContext);
 
+            AnalysisAssert(descCount < descSize);
             if (!JavascriptOperators::ToPropertyDescriptor(tempVar, &descriptors[descCount].descriptor, scriptContext))
             {
                 JavascriptError::ThrowTypeError(scriptContext, JSERR_PropertyDescriptor_Invalid, scriptContext->GetPropertyName(propId)->GetBuffer());
@@ -1764,8 +1837,8 @@ namespace Js
         size_t descCount = 0;
         struct DescriptorMap
         {
-            PropertyRecord const * propRecord;
-            PropertyDescriptor descriptor;
+            Field(PropertyRecord const *) propRecord;
+            Field(PropertyDescriptor) descriptor;
         };
 
         //3.  Let keys be props.[[OwnPropertyKeys]]().
@@ -1796,7 +1869,7 @@ namespace Js
             PropertyDescriptor propertyDescriptor;
             nextKey = keys->DirectGetItem(j);
             AssertMsg(JavascriptSymbol::Is(nextKey) || JavascriptString::Is(nextKey), "Invariant check during ownKeys proxy trap should make sure we only get property key here. (symbol or string primitives)");
-            JavascriptConversion::ToPropertyKey(nextKey, scriptContext, &propertyRecord);
+            JavascriptConversion::ToPropertyKey(nextKey, scriptContext, &propertyRecord, nullptr);
             propertyId = propertyRecord->GetPropertyId();
             AssertMsg(propertyId != Constants::NoProperty, "DefinePropertiesHelper - OwnPropertyKeys returned a propertyId with value NoProperty.");
 
@@ -1856,6 +1929,14 @@ namespace Js
         });
     }
 
+    bool JavascriptObject::IsPrototypeOfStopAtProxy(RecyclableObject* proto, RecyclableObject* object, ScriptContext* scriptContext)
+    {
+        return JavascriptOperators::MapObjectAndPrototypesUntil<true>(object, [=](RecyclableObject* obj)
+        {
+            return obj == proto;
+        });
+    }
+
     static const size_t ConstructNameGetSetLength = 5;    // 5 = 1 ( for .) + 3 (get or set) + 1 for null)
 
     /*static*/
@@ -1870,7 +1951,7 @@ namespace Js
             size_t totalChars;
             if (SizeTAdd(propertyLength, ConstructNameGetSetLength, &totalChars) == S_OK)
             {
-                finalName = RecyclerNewArrayLeaf(scriptContext->GetRecycler(), char16, totalChars);
+                finalName = RecyclerNewArrayLeafZ(scriptContext->GetRecycler(), char16, totalChars);
                 Assert(finalName != nullptr);
                 const char16* propertyName = propertyRecord->GetBuffer();
                 Assert(propertyName != nullptr);
@@ -1899,7 +1980,7 @@ namespace Js
                 && _wcsicmp(Js::ScriptFunction::FromVar(descriptor.GetGetter())->GetFunctionProxy()->GetDisplayName(), _u("get")) == 0)
             {
                 // modify to name.get
-                char16* finalName = ConstructName(propertyRecord, _u(".get"), scriptContext);
+                const char16* finalName = ConstructName(propertyRecord, _u(".get"), scriptContext);
                 if (finalName != nullptr)
                 {
                     FunctionProxy::SetDisplayNameFlags flags = (FunctionProxy::SetDisplayNameFlags) (FunctionProxy::SetDisplayNameFlagsDontCopy | FunctionProxy::SetDisplayNameFlagsRecyclerAllocated);
@@ -1914,7 +1995,7 @@ namespace Js
                 && _wcsicmp(Js::ScriptFunction::FromVar(descriptor.GetSetter())->GetFunctionProxy()->GetDisplayName(), _u("set")) == 0)
             {
                 // modify to name.set
-                char16* finalName = ConstructName(propertyRecord, _u(".set"), scriptContext);
+                const char16* finalName = ConstructName(propertyRecord, _u(".set"), scriptContext);
                 if (finalName != nullptr)
                 {
                     FunctionProxy::SetDisplayNameFlags flags = (FunctionProxy::SetDisplayNameFlags) (FunctionProxy::SetDisplayNameFlagsDontCopy | FunctionProxy::SetDisplayNameFlagsRecyclerAllocated);
@@ -1931,7 +2012,7 @@ namespace Js
         BOOL returnValue;
         obj->ThrowIfCannotDefineProperty(propId, descriptor);
 
-        Type* oldType = obj->GetType();
+        const Type* oldType = obj->GetType();
         obj->ClearWritableDataOnlyDetectionBit();
 
         // HostDispatch: it doesn't support changing property attributes and default attributes are not per ES5,
@@ -1969,7 +2050,7 @@ namespace Js
                 // Also, if the object's type has not changed, we need to ensure that
                 // the cached property string for this property, if any, does not
                 // specify this object's type.
-                scriptContext->InvalidatePropertyStringCache(propId, obj->GetType());
+                scriptContext->InvalidatePropertyStringAndSymbolCaches(propId, obj->GetType());
             }
         }
 

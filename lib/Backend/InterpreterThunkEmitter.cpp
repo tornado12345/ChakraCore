@@ -4,19 +4,28 @@
 //-------------------------------------------------------------------------------------------------------
 #include "Backend.h"
 
-#ifdef ENABLE_NATIVE_CODEGEN
+#if ENABLE_NATIVE_CODEGEN
+
+namespace {
+
+// The definitions in this anonymous namespace must be constexpr to allow OACR to conclude that certain operations
+// in InterpreterThunkEmitter::EncodeInterpreterThunk are safe.  Because constexpr requires that the declaration
+// and the definition appear at the same place (i.e., no forward declarations), this means that we either have
+// to move all 5 definitions of InterpreterThunk into the header file, or we have to make InterpreterThunkSize
+// public.  The latter option seems the less objectionable, so that's what I've done here.
+
 #ifdef _M_X64
 #ifdef _WIN32
-const BYTE InterpreterThunkEmitter::FunctionInfoOffset = 23;
-const BYTE InterpreterThunkEmitter::FunctionProxyOffset = 27;
-const BYTE InterpreterThunkEmitter::DynamicThunkAddressOffset = 31;
-const BYTE InterpreterThunkEmitter::CallBlockStartAddrOffset = 41;
-const BYTE InterpreterThunkEmitter::ThunkSizeOffset = 55;
-const BYTE InterpreterThunkEmitter::ErrorOffset = 64;
-const BYTE InterpreterThunkEmitter::ThunkAddressOffset = 81;
+constexpr BYTE FunctionInfoOffset = 23;
+constexpr BYTE FunctionProxyOffset = 27;
+constexpr BYTE DynamicThunkAddressOffset = 31;
+constexpr BYTE CallBlockStartAddrOffset = 41;
+constexpr BYTE ThunkSizeOffset = 55;
+constexpr BYTE ErrorOffset = 64;
+constexpr BYTE ThunkAddressOffset = 81;
 
-const BYTE InterpreterThunkEmitter::PrologSize = 80;
-const BYTE InterpreterThunkEmitter::StackAllocSize = 0x28;
+constexpr BYTE PrologSize = 80;
+constexpr BYTE StackAllocSize = 0x28;
 
 //
 // Home the arguments onto the stack and pass a pointer to the base of the stack location to the inner thunk
@@ -25,7 +34,7 @@ const BYTE InterpreterThunkEmitter::StackAllocSize = 0x28;
 // Hence, we allocate 0x28 bytes of stack space for the callee to use. The callee uses 8 bytes to push the first
 // argument and the rest 0x20 ensures alignment is correct.
 //
-const BYTE InterpreterThunkEmitter::InterpreterThunk[] = {
+constexpr BYTE InterpreterThunk[InterpreterThunkEmitter::InterpreterThunkSize] = {
     0x48, 0x89, 0x54, 0x24, 0x10,                                  // mov         qword ptr [rsp+10h],rdx
     0x48, 0x89, 0x4C, 0x24, 0x08,                                  // mov         qword ptr [rsp+8],rcx
     0x4C, 0x89, 0x44, 0x24, 0x18,                                  // mov         qword ptr [rsp+18h],r8
@@ -51,23 +60,25 @@ const BYTE InterpreterThunkEmitter::InterpreterThunk[] = {
     0xCC, 0xCC, 0xCC, 0xCC, 0xCC                                   // int         3                           ;for alignment to size of 8 we are adding this
 };
 
-const BYTE InterpreterThunkEmitter::Epilog[] = {
+constexpr BYTE Epilog[] = {
     0x48, 0x83, 0xC4, StackAllocSize,                              // add         rsp,28h
     0xC3                                                           // ret
 };
+
 #else  // Sys V AMD64
-const BYTE InterpreterThunkEmitter::FunctionInfoOffset = 7;
-const BYTE InterpreterThunkEmitter::FunctionProxyOffset = 11;
-const BYTE InterpreterThunkEmitter::DynamicThunkAddressOffset = 15;
-const BYTE InterpreterThunkEmitter::CallBlockStartAddrOffset = 25;
-const BYTE InterpreterThunkEmitter::ThunkSizeOffset = 39;
-const BYTE InterpreterThunkEmitter::ErrorOffset = 48;
-const BYTE InterpreterThunkEmitter::ThunkAddressOffset = 61;
 
-const BYTE InterpreterThunkEmitter::PrologSize = 60;
-const BYTE InterpreterThunkEmitter::StackAllocSize = 0x0;
+constexpr BYTE FunctionInfoOffset = 7;
+constexpr BYTE FunctionProxyOffset = 11;
+constexpr BYTE DynamicThunkAddressOffset = 15;
+constexpr BYTE CallBlockStartAddrOffset = 25;
+constexpr BYTE ThunkSizeOffset = 39;
+constexpr BYTE ErrorOffset = 48;
+constexpr BYTE ThunkAddressOffset = 61;
 
-const BYTE InterpreterThunkEmitter::InterpreterThunk[] = {
+constexpr BYTE PrologSize = 60;
+constexpr BYTE StackAllocSize = 0x0;
+
+constexpr BYTE InterpreterThunk[InterpreterThunkEmitter::InterpreterThunkSize] = {
     0x55,                                                       // push   rbp                   // Prolog - setup the stack frame
     0x48, 0x89, 0xe5,                                           // mov    rbp, rsp
     0x48, 0x8b, 0x47, 0x00,                                     // mov    rax, qword ptr [rdi + FunctionInfoOffset]
@@ -90,21 +101,22 @@ const BYTE InterpreterThunkEmitter::InterpreterThunk[] = {
     0xcc                                                        // int    3                     // for alignment to size of 8
 };
 
-const BYTE InterpreterThunkEmitter::Epilog[] = {
+constexpr BYTE Epilog[] = {
     0x5d,                                                       // pop    rbp
     0xc3                                                        // ret
 };
 #endif
 #elif defined(_M_ARM)
-const BYTE InterpreterThunkEmitter::ThunkAddressOffset = 8;
-const BYTE InterpreterThunkEmitter::FunctionInfoOffset = 18;
-const BYTE InterpreterThunkEmitter::FunctionProxyOffset = 22;
-const BYTE InterpreterThunkEmitter::DynamicThunkAddressOffset = 26;
-const BYTE InterpreterThunkEmitter::CallBlockStartAddressInstrOffset = 42;
-const BYTE InterpreterThunkEmitter::CallThunkSizeInstrOffset = 54;
-const BYTE InterpreterThunkEmitter::ErrorOffset = 64;
 
-const BYTE InterpreterThunkEmitter::InterpreterThunk[] = {
+constexpr BYTE ThunkAddressOffset = 8;
+constexpr BYTE FunctionInfoOffset = 18;
+constexpr BYTE FunctionProxyOffset = 22;
+constexpr BYTE DynamicThunkAddressOffset = 26;
+constexpr BYTE CallBlockStartAddressInstrOffset = 42;
+constexpr BYTE CallThunkSizeInstrOffset = 54;
+constexpr BYTE ErrorOffset = 64;
+
+constexpr BYTE InterpreterThunk[InterpreterThunkEmitter::InterpreterThunkSize] = {
     0x0F, 0xB4,                                                      // push        {r0-r3}
     0x2D, 0xE9, 0x00, 0x48,                                          // push        {r11,lr}
     0xEB, 0x46,                                                      // mov         r11,sp
@@ -131,26 +143,27 @@ const BYTE InterpreterThunkEmitter::InterpreterThunk[] = {
     0x18, 0x47                                                       // bx          r3
 };
 
-const BYTE InterpreterThunkEmitter::JmpOffset = 2;
+constexpr BYTE JmpOffset = 2;
 
-const BYTE InterpreterThunkEmitter::Call[] = {
+constexpr BYTE Call[] = {
     0x88, 0x47,                                                      // blx         r1
     0x00, 0x00, 0x00, 0x00,                                          // b.w         epilog
     0xFE, 0xDE,                                                      // int         3       ;Required for alignment
 };
 
-const BYTE InterpreterThunkEmitter::Epilog[] = {
+constexpr BYTE Epilog[] = {
     0x5D, 0xF8, 0x04, 0xBB,                                         // pop         {r11}
     0x5D, 0xF8, 0x14, 0xFB                                          // ldr         pc,[sp],#0x14
 };
 #elif defined(_M_ARM64)
-const BYTE InterpreterThunkEmitter::FunctionInfoOffset = 24;
-const BYTE InterpreterThunkEmitter::FunctionProxyOffset = 28;
-const BYTE InterpreterThunkEmitter::DynamicThunkAddressOffset = 32;
-const BYTE InterpreterThunkEmitter::ThunkAddressOffset = 36;
+
+constexpr BYTE FunctionInfoOffset = 24;
+constexpr BYTE FunctionProxyOffset = 28;
+constexpr BYTE DynamicThunkAddressOffset = 32;
+constexpr BYTE ThunkAddressOffset = 36;
 
 //TODO: saravind :Implement Range Check for ARM64
-const BYTE InterpreterThunkEmitter::InterpreterThunk[] = {
+constexpr BYTE InterpreterThunk[InterpreterThunkEmitter::InterpreterThunkSize] = {
     0xFD, 0x7B, 0xBB, 0xA9,                                         //stp         fp, lr, [sp, #-80]!   ;Prologue
     0xFD, 0x03, 0x00, 0x91,                                         //mov         fp, sp                ;update frame pointer to the stack pointer
     0xE0, 0x07, 0x01, 0xA9,                                         //stp         x0, x1, [sp, #16]     ;Prologue again; save all registers
@@ -166,30 +179,32 @@ const BYTE InterpreterThunkEmitter::InterpreterThunk[] = {
     0x00, 0x00, 0x00, 0x00,                                         //movk        x1, #0x00, lsl #32    ;This is overwritten with the actual thunk address(48 - 32 bits) move
     0x00, 0x00, 0x00, 0x00,                                         //movk        x1, #0x00, lsl #48    ;This is overwritten with the actual thunk address(64 - 48 bits) move
     0xE0, 0x43, 0x00, 0x91,                                         //add         x0, sp, #16
-    0x60, 0x00, 0x1F, 0xD6                                          //br          x3
+    0x60, 0x00, 0x1F, 0xD6,                                         //br          x3
+    0xCC, 0xCC, 0xCC, 0xCC                                          //int 3 for 8byte alignment
 };
 
-const BYTE InterpreterThunkEmitter::JmpOffset = 4;
+constexpr BYTE JmpOffset = 4;
 
-const BYTE InterpreterThunkEmitter::Call[] = {
+constexpr BYTE Call[] = {
     0x20, 0x00, 0x3f, 0xd6,                                         // blr         x1
     0x00, 0x00, 0x00, 0x00                                          // b           epilog
 };
 
-const BYTE InterpreterThunkEmitter::Epilog[] = {
+constexpr BYTE Epilog[] = {
     0xfd, 0x7b, 0xc5, 0xa8,                                         // ldp         fp, lr, [sp], #80
     0xc0, 0x03, 0x5f, 0xd6                                          // ret
 };
-#else
-const BYTE InterpreterThunkEmitter::FunctionInfoOffset = 8;
-const BYTE InterpreterThunkEmitter::FunctionProxyOffset = 11;
-const BYTE InterpreterThunkEmitter::DynamicThunkAddressOffset = 14;
-const BYTE InterpreterThunkEmitter::CallBlockStartAddrOffset = 21;
-const BYTE InterpreterThunkEmitter::ThunkSizeOffset = 26;
-const BYTE InterpreterThunkEmitter::ErrorOffset = 33;
-const BYTE InterpreterThunkEmitter::ThunkAddressOffset = 44;
+#else // x86
 
-const BYTE InterpreterThunkEmitter::InterpreterThunk[] = {
+constexpr BYTE FunctionInfoOffset = 8;
+constexpr BYTE FunctionProxyOffset = 11;
+constexpr BYTE DynamicThunkAddressOffset = 14;
+constexpr BYTE CallBlockStartAddrOffset = 21;
+constexpr BYTE ThunkSizeOffset = 26;
+constexpr BYTE ErrorOffset = 33;
+constexpr BYTE ThunkAddressOffset = 44;
+
+constexpr BYTE InterpreterThunk[InterpreterThunkEmitter::InterpreterThunkSize] = {
     0x55,                                                           //   push        ebp                ;Prolog - setup the stack frame
     0x8B, 0xEC,                                                     //   mov         ebp,esp
     0x8B, 0x45, 0x08,                                               //   mov         eax, dword ptr [ebp+8]
@@ -213,16 +228,16 @@ const BYTE InterpreterThunkEmitter::InterpreterThunk[] = {
     0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC                              //   int 3 for 8byte alignment
 };
 
-const BYTE InterpreterThunkEmitter::Epilog[] = {
+constexpr BYTE Epilog[] = {
     0x5D,                                                         // pop ebp
     0xC3                                                          // ret
 };
 #endif
 
 #if defined(_M_X64) || defined(_M_IX86)
-const BYTE InterpreterThunkEmitter::JmpOffset = 3;
+constexpr BYTE JmpOffset = 3;
 
-const BYTE InterpreterThunkEmitter::Call[] = {
+constexpr BYTE Call[] = {
     0xFF, 0xD0,                                                // call       rax
     0xE9, 0x00, 0x00, 0x00, 0x00,                              // jmp        [offset]
     0xCC,                                                      // int 3      ;for alignment to size of 8 we are adding this
@@ -230,18 +245,26 @@ const BYTE InterpreterThunkEmitter::Call[] = {
 
 #endif
 
-const BYTE InterpreterThunkEmitter::HeaderSize = sizeof(InterpreterThunk);
-const BYTE InterpreterThunkEmitter::ThunkSize = sizeof(Call);
-const uint InterpreterThunkEmitter::ThunksPerBlock = (BlockSize - HeaderSize) / ThunkSize;
+constexpr BYTE HeaderSize = sizeof(InterpreterThunk);
 
-InterpreterThunkEmitter::InterpreterThunkEmitter(Js::ScriptContext* context, ArenaAllocator* allocator, CustomHeap::CodePageAllocators * codePageAllocators, bool isAsmInterpreterThunk) :
-    emitBufferManager(allocator, codePageAllocators, /*scriptContext*/ nullptr, _u("Interpreter thunk buffer"), GetCurrentProcess()),
+} // anonymous namespace
+
+const BYTE InterpreterThunkEmitter::ThunkSize = sizeof(Call);
+
+InterpreterThunkEmitter::InterpreterThunkEmitter(Js::ScriptContext* context, ArenaAllocator* allocator, CustomHeap::InProcCodePageAllocators * codePageAllocators, bool isAsmInterpreterThunk) :
+    emitBufferManager(allocator, codePageAllocators, /*scriptContext*/ nullptr, nullptr, _u("Interpreter thunk buffer"), GetCurrentProcess()),
     scriptContext(context),
     allocator(allocator),
     thunkCount(0),
     thunkBuffer(nullptr),
     isAsmInterpreterThunk(isAsmInterpreterThunk)
 {
+}
+
+SListBase<ThunkBlock>* 
+InterpreterThunkEmitter::GetThunkBlocksList()
+{
+    return &thunkBlocks;
 }
 
 //
@@ -258,7 +281,15 @@ BYTE* InterpreterThunkEmitter::GetNextThunk(PVOID* ppDynamicInterpreterThunk)
         {
             return AllocateFromFreeList(ppDynamicInterpreterThunk);
         }
-        NewThunkBlock();
+        if (!NewThunkBlock())
+        {
+#ifdef ASMJS_PLAT
+            return this->isAsmInterpreterThunk ? (BYTE*)&Js::InterpreterStackFrame::StaticInterpreterAsmThunk : (BYTE*)&Js::InterpreterStackFrame::StaticInterpreterThunk;
+#else
+            Assert(!this->isAsmInterpreterThunk);
+            return (BYTE*)&Js::InterpreterStackFrame::StaticInterpreterThunk;
+#endif
+        }
     }
 
     Assert(this->thunkBuffer != nullptr);
@@ -290,21 +321,30 @@ void* InterpreterThunkEmitter::ConvertToEntryPoint(PVOID dynamicInterpreterThunk
     return entryPoint;
 }
 
-void InterpreterThunkEmitter::NewThunkBlock()
+bool InterpreterThunkEmitter::NewThunkBlock()
 {
+    if (this->scriptContext->GetConfig()->IsNoDynamicThunks())
+    {
+        return false;
+    }
+
 #ifdef ENABLE_OOP_NATIVE_CODEGEN
+    if (CONFIG_FLAG(ForceStaticInterpreterThunk))
+    {
+        return false;
+    }
+
     if (JITManager::GetJITManager()->IsOOPJITEnabled())
     {
-        NewOOPJITThunkBlock();
-        return;
+        return NewOOPJITThunkBlock();
     }
 #endif
 
     Assert(this->thunkCount == 0);
     BYTE* buffer;
 
-    EmitBufferAllocation * allocation = emitBufferManager.AllocateBuffer(BlockSize, &buffer);
-    if (allocation == nullptr) 
+    EmitBufferAllocation<VirtualAllocWrapper, PreReservedVirtualAllocWrapper> * allocation = emitBufferManager.AllocateBuffer(BlockSize, &buffer);
+    if (allocation == nullptr)
     {
         Js::Throw::OutOfMemory();
     }
@@ -314,8 +354,8 @@ void InterpreterThunkEmitter::NewThunkBlock()
     }
 
 #if PDATA_ENABLED
-    PRUNTIME_FUNCTION pdataStart;
-    intptr_t epilogEnd;
+    PRUNTIME_FUNCTION pdataStart = nullptr;
+    intptr_t epilogEnd = 0;
 #endif
 
     DWORD count = this->thunkCount;
@@ -332,16 +372,21 @@ void InterpreterThunkEmitter::NewThunkBlock()
         &count
     );
 
-    if (!emitBufferManager.CommitReadWriteBufferForInterpreter(allocation, buffer, BlockSize))
+    if (!emitBufferManager.CommitBufferForInterpreter(allocation, buffer, BlockSize))
     {
         Js::Throw::OutOfMemory();
     }
 
     // Call to set VALID flag for CFG check
-    ThreadContext::GetContextForCurrentThread()->SetValidCallTargetForCFG(buffer);
+    BYTE* callTarget = buffer;
+#ifdef _M_ARM
+    // We want to allow the actual callable value, so thumb-tag the address
+    callTarget = (BYTE*)((uintptr_t)buffer | 0x1);
+#endif
+    ThreadContext::GetContextForCurrentThread()->SetValidCallTargetForCFG(callTarget);
 
     // Update object state only at the end when everything has succeeded - and no exceptions can be thrown.
-    auto block = this->thunkBlocks.PrependNode(allocator, buffer);
+    auto block = this->thunkBlocks.PrependNode(allocator, buffer, count);
 #if PDATA_ENABLED
     void* pdataTable;
     PDataManager::RegisterPdata((PRUNTIME_FUNCTION)pdataStart, (ULONG_PTR)buffer, (ULONG_PTR)epilogEnd, &pdataTable);
@@ -351,39 +396,52 @@ void InterpreterThunkEmitter::NewThunkBlock()
 #endif
     this->thunkBuffer = buffer;
     this->thunkCount = count;
+    return true;
 }
 
 #ifdef ENABLE_OOP_NATIVE_CODEGEN
-void InterpreterThunkEmitter::NewOOPJITThunkBlock()
+bool InterpreterThunkEmitter::NewOOPJITThunkBlock()
 {
-    InterpreterThunkInfoIDL thunkInfo;
-    HRESULT hr = JITManager::GetJITManager()->NewInterpreterThunkBlock(
-        this->scriptContext->GetRemoteScriptAddr(),
-        this->isAsmInterpreterThunk,
-        &thunkInfo
-    );
-    JITManager::HandleServerCallResult(hr);
+    PSCRIPTCONTEXT_HANDLE remoteScriptContext = this->scriptContext->GetRemoteScriptAddr();
+    if (!JITManager::GetJITManager()->IsConnected())
+    {
+        return false;
+    }
+    InterpreterThunkInputIDL thunkInput;
+    thunkInput.asmJsThunk = this->isAsmInterpreterThunk;
 
+    InterpreterThunkOutputIDL thunkOutput;
+    HRESULT hr = JITManager::GetJITManager()->NewInterpreterThunkBlock(remoteScriptContext, &thunkInput, &thunkOutput);
+    if (!JITManager::HandleServerCallResult(hr, RemoteCallType::ThunkCreation))
+    {
+        return false;
+    }
 
-    BYTE* buffer = (BYTE*)thunkInfo.thunkBlockAddr;
+    BYTE* buffer = (BYTE*)thunkOutput.mappedBaseAddr;
 
     if (!CONFIG_FLAG(OOPCFGRegistration))
     {
-        this->scriptContext->GetThreadContext()->SetValidCallTargetForCFG(buffer);
+        BYTE* callTarget = buffer;
+#ifdef _M_ARM
+        // Need to register the thumb-tagged call target for CFG
+        callTarget = (BYTE*)((uintptr_t)callTarget | 0x1);
+#endif
+        this->scriptContext->GetThreadContext()->SetValidCallTargetForCFG(callTarget);
     }
 
     // Update object state only at the end when everything has succeeded - and no exceptions can be thrown.
-    auto block = this->thunkBlocks.PrependNode(allocator, buffer);
+    auto block = this->thunkBlocks.PrependNode(allocator, buffer, thunkOutput.thunkCount);
 #if PDATA_ENABLED
     void* pdataTable;
-    PDataManager::RegisterPdata((PRUNTIME_FUNCTION)thunkInfo.pdataTableStart, (ULONG_PTR)buffer, (ULONG_PTR)thunkInfo.epilogEndAddr, &pdataTable);
+    PDataManager::RegisterPdata((PRUNTIME_FUNCTION)thunkOutput.pdataTableStart, (ULONG_PTR)thunkOutput.mappedBaseAddr, (ULONG_PTR)thunkOutput.epilogEndAddr, &pdataTable);
     block->SetPdata(pdataTable);
 #else
     Unused(block);
 #endif
 
-    this->thunkCount = thunkInfo.thunkCount;
-    this->thunkBuffer = (BYTE*)thunkInfo.thunkBlockAddr;
+    this->thunkBuffer = (BYTE*)thunkOutput.mappedBaseAddr;
+    this->thunkCount = thunkOutput.thunkCount;
+    return true;
 }
 #endif
 
@@ -393,7 +451,7 @@ void InterpreterThunkEmitter::FillBuffer(
     _In_ bool asmJsThunk,
     _In_ intptr_t finalAddr,
     _In_ size_t bufferSize,
-    _Out_writes_bytes_all_(bufferSize) BYTE* buffer,
+    _Out_writes_bytes_all_(BlockSize) BYTE* buffer,
 #if PDATA_ENABLED
     _Out_ PRUNTIME_FUNCTION * pdataTableStart,
     _Out_ intptr_t * epilogEndAddr,
@@ -412,8 +470,10 @@ void InterpreterThunkEmitter::FillBuffer(
 #endif
     DWORD bytesRemaining = BlockSize;
     DWORD bytesWritten = 0;
-    DWORD epilogSize = sizeof(Epilog);
     DWORD thunks = 0;
+    DWORD epilogSize = sizeof(Epilog);
+    const BYTE *epilog = Epilog;
+    const BYTE *header = InterpreterThunk;
 
     intptr_t interpreterThunk;
 
@@ -421,13 +481,14 @@ void InterpreterThunkEmitter::FillBuffer(
 #ifdef ASMJS_PLAT
     if (asmJsThunk)
     {
-        interpreterThunk = SHIFT_ADDR(threadContext, &Js::InterpreterStackFrame::InterpreterAsmThunk);
+        interpreterThunk = ShiftAddr(threadContext, &Js::InterpreterStackFrame::InterpreterAsmThunk);
     }
     else
 #endif
     {
-        interpreterThunk = SHIFT_ADDR(threadContext, &Js::InterpreterStackFrame::InterpreterThunk);
+        interpreterThunk = ShiftAddr(threadContext, &Js::InterpreterStackFrame::InterpreterThunk);
     }
+
 
     BYTE * currentBuffer = buffer;
     // Ensure there is space for PDATA at the end
@@ -439,8 +500,8 @@ void InterpreterThunkEmitter::FillBuffer(
     intptr_t finalEpilogStart = finalPdataStart - Math::Align(epilogSize, EMIT_BUFFER_ALIGNMENT);
 
     // Copy the thunk buffer and modify it.
-    js_memcpy_s(currentBuffer, bytesRemaining, InterpreterThunk, HeaderSize);
-    EncodeInterpreterThunk(currentBuffer, finalAddr, HeaderSize, finalEpilogStart, epilogSize, interpreterThunk);
+    js_memcpy_s(currentBuffer, bytesRemaining, header, HeaderSize);
+    EncodeInterpreterThunk(currentBuffer, finalAddr, finalEpilogStart, epilogSize, interpreterThunk);
     currentBuffer += HeaderSize;
     bytesRemaining -= HeaderSize;
 
@@ -478,7 +539,7 @@ void InterpreterThunkEmitter::FillBuffer(
     currentBuffer += bytesWritten;
 
     // Copy epilog
-    bytesWritten = CopyWithAlignment(currentBuffer, bytesRemaining, Epilog, epilogSize, EMIT_BUFFER_ALIGNMENT);
+    bytesWritten = CopyWithAlignment(currentBuffer, bytesRemaining, epilog, epilogSize, EMIT_BUFFER_ALIGNMENT);
     currentBuffer += bytesWritten;
     bytesRemaining -= bytesWritten;
 
@@ -504,14 +565,12 @@ void InterpreterThunkEmitter::FillBuffer(
 
 #if _M_ARM
 void InterpreterThunkEmitter::EncodeInterpreterThunk(
-    __in_bcount(thunkSize) BYTE* thunkBuffer,
+    __in_bcount(InterpreterThunkSize) BYTE* thunkBuffer,
     __in const intptr_t thunkBufferStartAddress,
-    __in const DWORD thunkSize,
     __in const intptr_t epilogStart,
     __in const DWORD epilogSize,
     __in const intptr_t interpreterThunk)
 {
-    _Analysis_assume_(thunkSize == HeaderSize);
     // Encode MOVW
     DWORD lowerThunkBits = (uint32)interpreterThunk & 0x0000FFFF;
     DWORD movW = EncodeMove(/*Opcode*/ 0x0000F240, /*register*/1, lowerThunkBits);
@@ -552,9 +611,14 @@ void InterpreterThunkEmitter::EncodeInterpreterThunk(
 DWORD InterpreterThunkEmitter::EncodeMove(DWORD opCode, int reg, DWORD imm16)
 {
     DWORD encodedMove = reg << 24;
+#if _M_ARM
     DWORD encodedImm = 0;
     EncoderMD::EncodeImmediate16(imm16, &encodedImm);
     encodedMove |= encodedImm;
+#elif _M_ARM64
+    // ToDo (SaAgarwa) - From Aaron change. Validate for ARM64
+    encodedMove |= (imm16 & 0xFFFF) << 5;
+#endif
     AssertMsg((encodedMove & opCode) == 0, "Any bits getting overwritten?");
     encodedMove |= opCode;
     return encodedMove;
@@ -576,17 +640,13 @@ void InterpreterThunkEmitter::GeneratePdata(_In_ const BYTE* entryPoint, _In_ co
 
 #elif _M_ARM64
 void InterpreterThunkEmitter::EncodeInterpreterThunk(
-    __in_bcount(thunkSize) BYTE* thunkBuffer,
+    __in_bcount(InterpreterThunkSize) BYTE* thunkBuffer,
     __in const intptr_t thunkBufferStartAddress,
-    __in const DWORD thunkSize,
     __in const intptr_t epilogStart,
     __in const DWORD epilogSize,
     __in const intptr_t interpreterThunk)
 {
     int addrOffset = ThunkAddressOffset;
-
-    _Analysis_assume_(thunkSize == HeaderSize);
-    AssertMsg(thunkSize == HeaderSize, "Mismatch in the size of the InterpreterHeaderThunk and the thunkSize used in this API (EncodeInterpreterThunk)");
 
     // Following 4 MOV Instrs are to move the 64-bit address of the InterpreterThunk address into register x1.
 
@@ -594,27 +654,25 @@ void InterpreterThunkEmitter::EncodeInterpreterThunk(
     DWORD lowerThunkBits = (uint64)interpreterThunk & 0x0000FFFF;
     DWORD movZ = EncodeMove(/*Opcode*/ 0xD2800000, /*register x1*/1, lowerThunkBits); // no shift; hw = 00
     Emit(thunkBuffer,addrOffset, movZ);
-    AssertMsg(sizeof(movZ) == 4, "movZ has to be 32-bit encoded");
+    static_assert(sizeof(movZ) == 4, "movZ has to be 32-bit encoded");
     addrOffset+= sizeof(movZ);
 
     // Encode MOVK (movk        x1, #<interpreterThunk 32-16 bits>, lsl #16)
     DWORD higherThunkBits = ((uint64)interpreterThunk & 0xFFFF0000) >> 16;
     DWORD movK = EncodeMove(/*Opcode*/ 0xF2A00000, /*register x1*/1, higherThunkBits); // left shift 16 bits; hw = 01
     Emit(thunkBuffer, addrOffset, movK);
-    AssertMsg(sizeof(movK) == 4, "movK has to be 32-bit encoded");
+    static_assert(sizeof(movK) == 4, "movK has to be 32-bit encoded");
     addrOffset+= sizeof(movK);
 
     // Encode MOVK (movk        x1, #<interpreterThunk 48-32 bits>, lsl #16)
     higherThunkBits = ((uint64)interpreterThunk & 0xFFFF00000000) >> 32;
     movK = EncodeMove(/*Opcode*/ 0xF2C00000, /*register x1*/1, higherThunkBits); // left shift 32 bits; hw = 02
     Emit(thunkBuffer, addrOffset, movK);
-    AssertMsg(sizeof(movK) == 4, "movK has to be 32-bit encoded");
     addrOffset += sizeof(movK);
 
     // Encode MOVK (movk        x1, #<interpreterThunk 64-48 bits>, lsl #16)
     higherThunkBits = ((uint64)interpreterThunk & 0xFFFF000000000000) >> 48;
     movK = EncodeMove(/*Opcode*/ 0xF2E00000, /*register x1*/1, higherThunkBits); // left shift 48 bits; hw = 03
-    AssertMsg(sizeof(movK) == 4, "movK has to be 32-bit encoded");
     Emit(thunkBuffer, addrOffset, movK);
 
     // Encode LDR - Load of function Body
@@ -638,9 +696,14 @@ void InterpreterThunkEmitter::EncodeInterpreterThunk(
 DWORD InterpreterThunkEmitter::EncodeMove(DWORD opCode, int reg, DWORD imm16)
 {
     DWORD encodedMove = reg << 0;
+#if _M_ARM
     DWORD encodedImm = 0;
     EncoderMD::EncodeImmediate16(imm16, &encodedImm);
     encodedMove |= encodedImm;
+#elif _M_ARM64
+    // ToDo (SaAgarwa) - From Aaron change. Validate for ARM64
+    encodedMove |= (imm16 & 0xFFFF) << 5;
+#endif
     AssertMsg((encodedMove & opCode) == 0, "Any bits getting overwritten?");
     encodedMove |= opCode;
     return encodedMove;
@@ -661,14 +724,12 @@ void InterpreterThunkEmitter::GeneratePdata(_In_ const BYTE* entryPoint, _In_ co
 }
 #else
 void InterpreterThunkEmitter::EncodeInterpreterThunk(
-    __in_bcount(thunkSize) BYTE* thunkBuffer,
+    __in_bcount(InterpreterThunkSize) BYTE* thunkBuffer,
     __in const intptr_t thunkBufferStartAddress,
-    __in const DWORD thunkSize,
     __in const intptr_t epilogStart,
     __in const DWORD epilogSize,
     __in const intptr_t interpreterThunk)
 {
-    _Analysis_assume_(thunkSize == HeaderSize);
     Emit(thunkBuffer, ThunkAddressOffset, (uintptr_t)interpreterThunk);
     thunkBuffer[DynamicThunkAddressOffset] = Js::FunctionBody::GetOffsetOfDynamicInterpreterThunk();
     thunkBuffer[FunctionInfoOffset] = Js::JavascriptFunction::GetOffsetOfFunctionInfo();
@@ -680,27 +741,23 @@ void InterpreterThunkEmitter::EncodeInterpreterThunk(
 }
 #endif
 
-
-
-inline /*static*/
-DWORD InterpreterThunkEmitter::FillDebugBreak(_In_ BYTE* dest, _In_ DWORD count)
+/*static*/
+DWORD InterpreterThunkEmitter::FillDebugBreak(_Out_writes_bytes_all_(count) BYTE* dest, _In_ DWORD count)
 {
 #if defined(_M_ARM)
     Assert(count % 2 == 0);
 #elif defined(_M_ARM64)
     Assert(count % 4 == 0);
 #endif
-    CustomHeap::FillDebugBreak(dest, count, GetCurrentProcess());
+    CustomHeap::FillDebugBreak(dest, count);
     return count;
 }
 
-
-
-inline /*static*/
+/*static*/
 DWORD InterpreterThunkEmitter::CopyWithAlignment(
-    _In_ BYTE* dest,
+    _Out_writes_bytes_all_(sizeInBytes) BYTE* dest,
     _In_ const DWORD sizeInBytes,
-    _In_ const BYTE* src,
+    _In_reads_bytes_(srcSize) const BYTE* src,
     _In_ const DWORD srcSize,
     _In_ const DWORD alignment)
 {
@@ -725,13 +782,18 @@ InterpreterThunkEmitter::IsInHeap(void* address)
     if (JITManager::GetJITManager()->IsOOPJITEnabled())
     {
         PSCRIPTCONTEXT_HANDLE remoteScript = this->scriptContext->GetRemoteScriptAddr(false);
-        if (!remoteScript)
+        if (!remoteScript || !JITManager::GetJITManager()->IsConnected())
         {
-            return false;
+            // this method is used in asserts to validate whether an entry point is valid
+            // in case JIT process crashed, let's just say true to keep asserts from firing
+            return true;
         }
         boolean result;
         HRESULT hr = JITManager::GetJITManager()->IsInterpreterThunkAddr(remoteScript, (intptr_t)address, this->isAsmInterpreterThunk, &result);
-        JITManager::HandleServerCallResult(hr);
+        if (!JITManager::HandleServerCallResult(hr, RemoteCallType::HeapQuery))
+        {
+            return true;
+        }
         return result != FALSE;
     }
     else
@@ -755,14 +817,26 @@ void InterpreterThunkEmitter::Close()
     thunkBlocks.Iterate(unregisterPdata);
     freeListedThunkBlocks.Iterate(unregisterPdata);
 #endif
+
     this->thunkBlocks.Clear(allocator);
     this->freeListedThunkBlocks.Clear(allocator);
+
 #ifdef ENABLE_OOP_NATIVE_CODEGEN
-    if (!JITManager::GetJITManager()->IsOOPJITEnabled())
+    if (JITManager::GetJITManager()->IsOOPJITEnabled())
+    {
+        PSCRIPTCONTEXT_HANDLE remoteScript = this->scriptContext->GetRemoteScriptAddr(false);
+        if (remoteScript && JITManager::GetJITManager()->IsConnected())
+        {
+            JITManager::GetJITManager()->DecommitInterpreterBufferManager(remoteScript, this->isAsmInterpreterThunk);
+        }
+    }
+    else
 #endif
     {
         emitBufferManager.Decommit();
     }
+
+
     this->thunkBuffer = nullptr;
     this->thunkCount = 0;
 }
@@ -838,15 +912,15 @@ BYTE* ThunkBlock::AllocateFromFreeList()
 
 BVIndex ThunkBlock::FromThunkAddress(BYTE* address)
 {
-    int index = ((uint)(address - start) - InterpreterThunkEmitter::HeaderSize) / InterpreterThunkEmitter::ThunkSize;
-    Assert(index < InterpreterThunkEmitter::ThunksPerBlock);
+    uint index = ((uint)(address - start) - HeaderSize) / InterpreterThunkEmitter::ThunkSize;
+    Assert(index < this->thunkCount);
     return index;
 }
 
 BYTE* ThunkBlock::ToThunkAddress(BVIndex index)
 {
-    Assert(index < InterpreterThunkEmitter::ThunksPerBlock);
-    BYTE* address = start + InterpreterThunkEmitter::HeaderSize + InterpreterThunkEmitter::ThunkSize * index;
+    Assert(index < this->thunkCount);
+    BYTE* address = start + HeaderSize + InterpreterThunkEmitter::ThunkSize * index;
     return address;
 }
 
@@ -854,7 +928,7 @@ bool ThunkBlock::EnsureFreeList(ArenaAllocator* allocator)
 {
     if(!this->freeList)
     {
-        this->freeList = BVFixed::NewNoThrow(InterpreterThunkEmitter::ThunksPerBlock, allocator);
+        this->freeList = BVFixed::NewNoThrow(this->thunkCount, allocator);
     }
     return this->freeList != nullptr;
 }
@@ -865,5 +939,4 @@ bool ThunkBlock::IsFreeListEmpty() const
     return this->freeList->IsAllClear();
 }
 
-#endif
-
+#endif  // ENABLE_NATIVE_CODEGEN

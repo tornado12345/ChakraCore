@@ -57,7 +57,7 @@ GenerateFunction(NativeCodeGenerator * nativeCodeGen, Js::FunctionBody * fn, Js:
 {
     nativeCodeGen->GenerateFunction(fn, function);
 }
-CodeGenAllocators* GetForegroundAllocator(NativeCodeGenerator * nativeCodeGen, PageAllocator* pageallocator)
+InProcCodeGenAllocators* GetForegroundAllocator(NativeCodeGenerator * nativeCodeGen, PageAllocator* pageallocator)
 {
     return nativeCodeGen->GetCodeGenAllocator(pageallocator);
 }
@@ -73,6 +73,12 @@ Js::Var
 RejitIRViewerFunction(NativeCodeGenerator *nativeCodeGen, Js::FunctionBody *fn, Js::ScriptContext *scriptContext)
 {
     return nativeCodeGen->RejitIRViewerFunction(fn, scriptContext);
+}
+#endif
+#ifdef ALLOW_JIT_REPRO
+HRESULT JitFromEncodedWorkItem(NativeCodeGenerator *nativeCodeGen, _In_reads_(bufferSize) const byte* buffer, _In_ uint bufferSize)
+{
+    return nativeCodeGen->JitFromEncodedWorkItem(buffer, bufferSize);
 }
 #endif
 
@@ -137,8 +143,13 @@ void CheckIsExecutable(Js::RecyclableObject * function, Js::JavascriptMethod ent
     Js::ScriptContext * scriptContext = function->GetScriptContext();
     // it's easy to call the default entry point from RecyclableObject.
     AssertMsg((Js::JavascriptFunction::Is(function) && Js::JavascriptFunction::FromVar(function)->IsExternalFunction())
-        || Js::CrossSite::IsThunk(entrypoint) || !scriptContext->IsActuallyClosed() ||
-        (scriptContext->GetThreadContext()->IsScriptActive() && !Js::JavascriptConversion::IsCallable(function)),
+        || Js::CrossSite::IsThunk(entrypoint)
+        // External object with entrypoint
+        || (!Js::JavascriptFunction::Is(function)
+            && function->IsExternal()
+            && Js::JavascriptConversion::IsCallable(function))
+        || !scriptContext->IsActuallyClosed()
+        || (scriptContext->GetThreadContext()->IsScriptActive() && !Js::JavascriptConversion::IsCallable(function)),
         "Can't call function when the script context is closed");
 
     if (scriptContext->GetThreadContext()->IsScriptActive())
@@ -149,11 +160,13 @@ void CheckIsExecutable(Js::RecyclableObject * function, Js::JavascriptMethod ent
     {
         return;
     }
-    if (Js::JavascriptOperators::GetTypeId(function) == Js::TypeIds_HostDispatch)
+    
+    Js::TypeId typeId = Js::JavascriptOperators::GetTypeId(function);
+    if (typeId == Js::TypeIds_HostDispatch)
     {
         AssertMsg(false, "Has to go through CallRootFunction to start calling Javascript function");
     }
-    else if (Js::JavascriptFunction::Is(function))
+    else if (typeId == Js::TypeId::TypeIds_Function)
     {
         if (((Js::JavascriptFunction*)function)->IsExternalFunction())
         {
@@ -197,5 +210,8 @@ SetProfilerFromNativeCodeGen(NativeCodeGenerator * toNativeCodeGen, NativeCodeGe
 
 void DeleteNativeCodeData(NativeCodeData * data)
 {
-    delete data;
+    if (data)
+    {
+        HeapDelete(data);
+    }
 }

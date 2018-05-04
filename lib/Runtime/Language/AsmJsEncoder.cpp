@@ -3,6 +3,7 @@
 // Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.
 //-------------------------------------------------------------------------------------------------------
 #include "RuntimeLanguagePch.h"
+#include "RuntimeMathPch.h"
 
 #ifdef ASMJS_PLAT
 
@@ -23,7 +24,13 @@ namespace Js
     template<> int AsmJsEncoder::GetOffset<Var>() const{return AsmJsJitTemplate::Globals::StackVarCount * sizeof( Var );}
     template<> int AsmJsEncoder::GetOffset<double>() const{ return mDoubleOffset; }
     template<> int AsmJsEncoder::GetOffset<float>() const{ return mFloatOffset; }
-    template<> int AsmJsEncoder::GetOffset<AsmJsSIMDValue>() const{ return mSimdOffset; }
+    template<> int AsmJsEncoder::GetOffset<AsmJsSIMDValue>() const { 
+#ifdef ENABLE_WASM_SIMD
+        return mSimdOffset;
+#else
+        return 0;
+#endif
+    }
 
     template<>
     void AsmJsEncoder::ReadOpTemplate<Js::SmallLayout>( OpCodeAsmJs op )
@@ -169,8 +176,9 @@ namespace Js
         mIntOffset = asmInfo->GetIntByteOffset() + GetOffset<Var>();
         mDoubleOffset = asmInfo->GetDoubleByteOffset() + GetOffset<Var>();
         mFloatOffset = asmInfo->GetFloatByteOffset() + GetOffset<Var>();
+#ifdef ENABLE_WASM_SIMD
         mSimdOffset = asmInfo->GetSimdByteOffset() + GetOffset<Var>();
-
+#endif
         NoRecoverMemoryArenaAllocator localAlloc(_u("BE-AsmJsEncoder"), GetPageAllocator(), Js::Throw::OutOfMemory);
         mLocalAlloc = &localAlloc;
 
@@ -207,7 +215,7 @@ namespace Js
             Assert( ::Math::FitsInDWord( codeSize ) );
 
             BYTE *buffer;
-            EmitBufferAllocation *allocation = GetCodeGenAllocator()->emitBufferManager.AllocateBuffer( codeSize, &buffer, 0, 0 );
+            EmitBufferAllocation<VirtualAllocWrapper, PreReservedVirtualAllocWrapper> *allocation = GetCodeGenAllocator()->emitBufferManager.AllocateBuffer( codeSize, &buffer, 0, 0 );
             functionBody->GetAsmJsFunctionInfo()->mTJBeginAddress = buffer;
 
             if (buffer == nullptr)
@@ -215,12 +223,16 @@ namespace Js
                 Js::Throw::OutOfMemory();
             }
 
-            if (!GetCodeGenAllocator()->emitBufferManager.CommitBuffer(allocation, buffer, codeSize, mEncodeBuffer))
+            if (!GetCodeGenAllocator()->emitBufferManager.CommitBuffer(allocation, allocation->bytesCommitted, buffer, codeSize, mEncodeBuffer))
             {
                 Js::Throw::OutOfMemory();
             }
 
-            functionBody->GetScriptContext()->GetThreadContext()->SetValidCallTargetForCFG(buffer);
+            BYTE* callTarget = buffer;
+#ifdef _M_ARM
+            callTarget = (BYTE*)((uintptr_t)buffer | 0x1); // We have to add the thumb bit on arm
+#endif
+            functionBody->GetScriptContext()->GetThreadContext()->SetValidCallTargetForCFG(callTarget);
 
             // TODO: improve this once EntryPoint cleanup work is complete!
 #if 0

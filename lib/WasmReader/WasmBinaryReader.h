@@ -10,13 +10,14 @@ namespace Wasm
     // Language Types binary encoding with varint7
     namespace LanguageTypes
     { 
-        const int8 i32 = 0x80 - 0x1;
-        const int8 i64 = 0x80 - 0x2;
-        const int8 f32 = 0x80 - 0x3;
-        const int8 f64 = 0x80 - 0x4;
-        const int8 anyfunc = 0x80 - 0x10;
-        const int8 func = 0x80 - 0x20;
-        const int8 emptyBlock = 0x80 - 0x40;
+        const int8 i32 = -0x1;
+        const int8 i64 = -0x2;
+        const int8 f32 = -0x3;
+        const int8 f64 = -0x4;
+        const int8 m128 = -0x5;
+        const int8 anyfunc = -0x10;
+        const int8 func = -0x20;
+        const int8 emptyBlock = -0x40;
         WasmTypes::WasmType ToWasmType(int8);
     }
 
@@ -25,32 +26,47 @@ namespace Wasm
         SectionCode code;
         const byte* start;
         const byte* end;
+        uint32 nameLength;
+        const char16* name;
     };
 
-    static const unsigned int experimentalVersion = 0xd;
+    struct BinaryLocation
+    {
+        intptr_t offset;
+        intptr_t size;
+    };
+
+    static const uint32 binaryVersion = 0x1;
 
     class WasmBinaryReader : public WasmReaderBase
     {
     public:
-        WasmBinaryReader(ArenaAllocator* alloc, Js::WebAssemblyModule * module, const byte* source, size_t length);
+        WasmBinaryReader(ArenaAllocator* alloc, Js::WebAssemblyModule* module, const byte* source, size_t length);
 
         void InitializeReader();
-        bool ReadNextSection(SectionCode nextSection);
+        SectionHeader ReadNextSection();
         // Fully read the section in the reader. Return true if the section fully read
         bool ProcessCurrentSection();
-        virtual void SeekToFunctionBody(FunctionBodyReaderInfo readerInfo) override;
+        virtual void SeekToFunctionBody(class WasmFunctionInfo* funcInfo) override;
         virtual bool IsCurrentFunctionCompleted() const override;
+
+        WasmOp ReadPrefixedOpCode(WasmOp prefix, bool isSupported, const char16* notSupportedMsg);
+        WasmOp ReadOpCode();
         virtual WasmOp ReadExpr() override;
         virtual void FunctionEnd() override;
+        virtual const uint32 EstimateCurrentFunctionBytecodeSize() const override;
 #if DBG_DUMP
         void PrintOps();
 #endif
-        intptr_t GetCurrentOffset() const { return m_pc - m_start; }
+        BinaryLocation GetCurrentLocation() const { return {m_pc - m_start, m_end - m_start}; }
     private:
         struct ReaderState
         {
-            UINT32 count; // current entry
-            size_t size;  // number of entries
+#if ENABLE_DEBUG_CONFIG_OPTIONS
+            Js::FunctionBody* body = nullptr;
+#endif
+            uint32 count; // current entry
+            uint32 size;  // binary size of the function
         };
 
         void BlockNode();
@@ -59,43 +75,52 @@ namespace Wasm
         void BrNode();
         void BrTableNode();
         void MemNode();
+        void LaneNode();
+        void ShuffleNode();
         void VarNode();
 
         // Module readers
         void ValidateModuleHeader();
         SectionHeader ReadSectionHeader();
         void ReadMemorySection(bool isImportSection);
-        void ReadSignatures();
-        void ReadFunctionsSignatures();
+        void ReadSignatureTypeSection();
+        void ReadFunctionSignatures();
         void ReadFunctionHeaders();
-        void ReadExportTable();
+        void ReadExportSection();
         void ReadTableSection(bool isImportSection);
-        void ReadDataSegments();
-        void ReadImportEntries();
+        void ReadDataSection();
+        void ReadImportSection();
         void ReadStartFunction();
-        void ReadNamesSection();
+        void ReadNameSection();
         void ReadElementSection();
-        void ReadGlobalsSection();
+        void ReadGlobalSection();
+        void ReadCustomSection();
 
         // Primitive reader
         template <WasmTypes::WasmType type> void ConstNode();
         template <typename T> T ReadConst();
+        ExternalKinds ReadExternalKind() { return (ExternalKinds)ReadConst<uint8>(); }
+        bool ReadMutableValue();
         const char16* ReadInlineName(uint32& length, uint32& nameLength);
-        const char16* CvtUtf8Str(LPCUTF8 name, uint32 nameLen);
-        template<typename MaxAllowedType = UINT>
-        MaxAllowedType LEB128(UINT &length, bool sgn = false);
-        template<typename MaxAllowedType = INT>
-        MaxAllowedType SLEB128(UINT &length);
-        WasmNode ReadInitExpr();
+        template<typename LEBType = uint32, uint32 bits = sizeof(LEBType) * 8>
+        LEBType LEB128(uint32 &length);
+        template<typename LEBType = int32, uint32 bits = sizeof(LEBType) * 8>
+        LEBType SLEB128(uint32 &length)
+        {
+            CompileAssert(LEBType(-1) < LEBType(0));
+            return LEB128<LEBType, bits>(length);
+        }
+        WasmNode ReadInitExpr(bool isOffset = false);
+        template<typename SectionLimitType>
+        SectionLimitType ReadSectionLimitsBase(uint32 maxInitial, uint32 maxMaximum, const char16* errorMsg);
 
-        void CheckBytesLeft(UINT bytesNeeded);
+        void CheckBytesLeft(uint32 bytesNeeded);
         bool EndOfFunc();
         bool EndOfModule();
-        DECLSPEC_NORETURN void ThrowDecodingError(const char16* msg, ...);
+        DECLSPEC_NORETURN void ThrowDecodingError(const char16* msg, ...) const;
         Wasm::WasmTypes::WasmType ReadWasmType(uint32& length);
 
         ArenaAllocator* m_alloc;
-        uint m_funcNumber;
         const byte* m_start, *m_end, *m_pc, *m_curFuncEnd;
         SectionHeader m_currentSection;
         ReaderState m_funcState;   // func AST level
@@ -107,7 +132,10 @@ namespace Wasm
             READER_STATE_FUNCTION,
             READER_STATE_MODULE
         } m_readerState;
-        Js::WebAssemblyModule * m_module;
+        Js::WebAssemblyModule* m_module;
+#if ENABLE_DEBUG_CONFIG_OPTIONS
+        Js::FunctionBody* GetFunctionBody() const;
+#endif
 #if DBG_DUMP
         typedef JsUtil::BaseHashSet<WasmOp, ArenaAllocator, PowerOf2SizePolicy> OpSet;
         OpSet* m_ops;

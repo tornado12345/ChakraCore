@@ -14,7 +14,8 @@ namespace Js
         STOP_STEPCOMPLETE,
         STOP_EXCEPTIONTHROW,
         STOP_ASYNCBREAK,
-        STOP_MUTATIONBREAKPOINT
+        STOP_MUTATIONBREAKPOINT,
+        STOP_DOMMUTATIONBREAKPOINT
     };
 
     struct ReturnedValue
@@ -30,9 +31,9 @@ namespace Js
             }
         }
 
-        Js::Var returnedValue;
-        Js::JavascriptFunction *calledFunction;
-        bool isValueOfReturnStatement;
+        Field(Js::Var) returnedValue;
+        Field(Js::JavascriptFunction *) calledFunction;
+        Field(bool) isValueOfReturnStatement;
     };
 
     typedef JsUtil::List<ReturnedValue*> ReturnedValueList;

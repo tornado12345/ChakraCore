@@ -9,9 +9,9 @@ namespace Js
     class IndexPropertyDescriptor
     {
     public:
-        PropertyAttributes Attributes;
-        Var Getter;
-        Var Setter;
+        Field(PropertyAttributes) Attributes;
+        Field(Var) Getter;
+        Field(Var) Setter;
 
         IndexPropertyDescriptor(PropertyAttributes attributes = PropertyDynamicTypeDefaults,
             Var getter = NULL, Var setter = NULL)
@@ -36,10 +36,10 @@ namespace Js
         typedef JsUtil::BaseDictionary<uint32, IndexPropertyDescriptor, ForceNonLeafAllocator<Recycler>::AllocatorType, PowerOf2SizePolicy>
             InnerMap;
 
-        Recycler* recycler;
-        InnerMap* indexPropertyMap; // The internal real index property map
-        uint32* indexList;          // The index list that's created on demand
-        int lastIndexAt;            // Last used index list entry
+        FieldNoBarrier(Recycler*) recycler;
+        Field(InnerMap*) indexPropertyMap; // The internal real index property map
+        Field(uint32*) indexList;          // The index list that's created on demand
+        Field(int) lastIndexAt;            // Last used index list entry
 
     private:
         void EnsureIndexList();
@@ -99,9 +99,9 @@ namespace Js
         template <typename T> friend class ES5ArrayTypeHandlerBase;
 
     private:
-        IndexPropertyDescriptorMap* indexPropertyMap;
-        PropertyAttributes dataItemAttributes; // attributes for data item not in map
-        bool lengthWritable;
+        Field(IndexPropertyDescriptorMap*) indexPropertyMap;
+        Field(PropertyAttributes) dataItemAttributes; // attributes for data item not in map
+        Field(bool) lengthWritable;
 
     public:
         DEFINE_GETCPPNAME();
@@ -158,7 +158,7 @@ namespace Js
         BOOL GetItemAccessors(ES5Array* arr, DynamicObject* instance, uint32 index, Var* getter, Var* setter);
 
     public:
-        virtual BOOL HasProperty(DynamicObject* instance, PropertyId propertyId, bool *noRedecl = nullptr) override;
+        virtual BOOL HasProperty(DynamicObject* instance, PropertyId propertyId, bool *noRedecl = nullptr, _Inout_opt_ PropertyValueInfo* info = nullptr) override;
         virtual BOOL HasProperty(DynamicObject* instance, JavascriptString* propertyNameString) override;
         virtual BOOL GetProperty(DynamicObject* instance, Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
         virtual BOOL GetProperty(DynamicObject* instance, Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
@@ -187,7 +187,7 @@ namespace Js
         virtual BOOL SetAttributes(DynamicObject* instance, PropertyId propertyId, PropertyAttributes attributes) override;
 
         virtual bool IsLengthWritable() const override;
-        virtual void SetLength(ES5Array* arr, uint32 newLen, PropertyOperationFlags propertyOperationFlags) override;
+        virtual uint32 SetLength(ES5Array* arr, uint32 newLen, PropertyOperationFlags propertyOperationFlags) override;
         virtual BOOL IsObjectArrayFrozen(ES5Array* arr) override;
         virtual BOOL IsItemEnumerable(ES5Array* arr, uint32 index) override;
         virtual BOOL IsValidDescriptorToken(void * descriptorValidationToken) const override;
@@ -203,6 +203,11 @@ namespace Js
         //
         //We let the handler processing fall through -- the snap object extraction will take care of visiting/copying the info from this type into the object representation.
         //
+#endif
+
+#if DBG_DUMP
+    public:
+        void Dump(unsigned indent = 0) const override;
 #endif
     };
 }

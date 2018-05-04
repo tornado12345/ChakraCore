@@ -8,9 +8,9 @@ struct CodeGenWorkItem;
 struct JsFunctionCodeGen;
 struct JsLoopBodyCodeGen;
 class InliningDecider;
+class ObjTypeSpecFldInfo;
 namespace Js
 {
-    class ObjTypeSpecFldInfo;
     class FunctionCodeGenJitTimeData;
     class RemoteScriptContext;
 };
@@ -44,6 +44,9 @@ public:
 
 #ifdef IR_VIEWER
     Js::Var RejitIRViewerFunction(Js::FunctionBody *fn, Js::ScriptContext *scriptContext);
+#endif
+#ifdef ALLOW_JIT_REPRO
+    HRESULT JitFromEncodedWorkItem(_In_reads_(bufferSize) const byte* buf, _In_ uint bufferSize);
 #endif
 void SetProfileMode(BOOL fSet);
 public:
@@ -81,7 +84,7 @@ private:
     void UpdateJITState();
     static void LogCodeGenStart(CodeGenWorkItem * workItem, LARGE_INTEGER * start_time);
     static void LogCodeGenDone(CodeGenWorkItem * workItem, LARGE_INTEGER * start_time);
-    typedef SListCounted<Js::ObjTypeSpecFldInfo*, ArenaAllocator> ObjTypeSpecFldInfoList;
+    typedef SListCounted<ObjTypeSpecFldInfo*, ArenaAllocator> ObjTypeSpecFldInfoList;
 
     template<bool IsInlinee> void GatherCodeGenData(
         Recycler *const recycler,
@@ -101,14 +104,14 @@ public:
     void UpdateQueueForDebugMode();
     bool IsBackgroundJIT() const;
     void EnterScriptStart();
-    void FreeNativeCodeGenAllocation(void* address);
+    void FreeNativeCodeGenAllocation(void* codeAddress);
     bool TryReleaseNonHiPriWorkItem(CodeGenWorkItem* workItem);
 
-    void QueueFreeNativeCodeGenAllocation(void* address);
+    void QueueFreeNativeCodeGenAllocation(void* codeAddress, void* thunkAddress);
 
     bool IsClosed() { return isClosed; }
     void AddWorkItem(CodeGenWorkItem* workItem);
-    CodeGenAllocators* GetCodeGenAllocator(PageAllocator* pageallocator){ return EnsureForegroundAllocators(pageallocator); }
+    InProcCodeGenAllocators* GetCodeGenAllocator(PageAllocator* pageallocator){ return EnsureForegroundAllocators(pageallocator); }
 
 #if DBG_DUMP
     FILE * asmFile;
@@ -126,19 +129,20 @@ public:
 private:
 
     void CodeGen(PageAllocator * pageAllocator, CodeGenWorkItem* workItem, const bool foreground);
+    void CodeGen(PageAllocator* pageAllocator, CodeGenWorkItemIDL* workItemData, _Out_ JITOutputIDL& jitWriteData, const bool foreground, Js::EntryPointInfo* epInfo = nullptr);
 
-    CodeGenAllocators *CreateAllocators(PageAllocator *const pageAllocator)
+    InProcCodeGenAllocators *CreateAllocators(PageAllocator *const pageAllocator)
     {
-        return HeapNew(CodeGenAllocators, pageAllocator->GetAllocationPolicyManager(), scriptContext, scriptContext->GetThreadContext()->GetCodePageAllocators(), GetCurrentProcess());
+        return HeapNew(InProcCodeGenAllocators, pageAllocator->GetAllocationPolicyManager(), scriptContext, scriptContext->GetThreadContext(), scriptContext->GetThreadContext()->GetCodePageAllocators(), GetCurrentProcess());
     }
 
-    CodeGenAllocators *EnsureForegroundAllocators(PageAllocator * pageAllocator)
+    InProcCodeGenAllocators *EnsureForegroundAllocators(PageAllocator * pageAllocator)
     {
         if (this->foregroundAllocators == nullptr)
         {
             this->foregroundAllocators = CreateAllocators(pageAllocator);
 
-#if !_M_X64_OR_ARM64 && _CONTROL_FLOW_GUARD
+#if !TARGET_64 && _CONTROL_FLOW_GUARD
             if (this->scriptContext->webWorkerId != Js::Constants::NonWebWorkerContextId)
             {
                 this->foregroundAllocators->canCreatePreReservedSegment = true;
@@ -150,7 +154,7 @@ private:
     }
 
 
-    CodeGenAllocators * GetBackgroundAllocator(PageAllocator *pageAllocator)
+    InProcCodeGenAllocators * GetBackgroundAllocator(PageAllocator *pageAllocator)
     {
         return this->backgroundAllocators;
     }
@@ -164,7 +168,7 @@ private:
         if (!this->backgroundAllocators)
         {
             this->backgroundAllocators = CreateAllocators(pageAllocator);
-#if !_M_X64_OR_ARM64 && _CONTROL_FLOW_GUARD
+#if !TARGET_64 && _CONTROL_FLOW_GUARD
             this->backgroundAllocators->canCreatePreReservedSegment = true;
 #endif
         }
@@ -197,15 +201,17 @@ private:
     class FreeLoopBodyJob: public JsUtil::Job
     {
     public:
-        FreeLoopBodyJob(JsUtil::JobManager *const manager, void* address, bool isHeapAllocated = true):
+        FreeLoopBodyJob(JsUtil::JobManager *const manager, void* codeAddress, void* thunkAddress, bool isHeapAllocated = true):
           JsUtil::Job(manager),
-          codeAddress(address),
+          codeAddress(codeAddress),
+          thunkAddress(thunkAddress),
           heapAllocated(isHeapAllocated)
         {
         }
 
         bool heapAllocated;
         void* codeAddress;
+        void* thunkAddress;
     };
 
     class FreeLoopBodyJobManager sealed: public WaitableJobManager
@@ -297,7 +303,7 @@ private:
             }
         }
 
-        void QueueFreeLoopBodyJob(void* codeAddress);
+        void QueueFreeLoopBodyJob(void* codeAddress, void* thunkAddress);
 
     private:
         NativeCodeGenerator* nativeCodeGen;
@@ -311,8 +317,8 @@ private:
 
     FreeLoopBodyJobManager freeLoopBodyManager;
 
-    CodeGenAllocators * foregroundAllocators;
-    CodeGenAllocators * backgroundAllocators;
+    InProcCodeGenAllocators * foregroundAllocators;
+    InProcCodeGenAllocators * backgroundAllocators;
 #ifdef PROFILE_EXEC
     Js::ScriptContextProfiler * foregroundCodeGenProfiler;
     Js::ScriptContextProfiler * backgroundCodeGenProfiler;

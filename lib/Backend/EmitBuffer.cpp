@@ -8,13 +8,14 @@
 // EmitBufferManager::EmitBufferManager
 //      Constructor
 //----------------------------------------------------------------------------
-template <typename SyncObject>
-EmitBufferManager<SyncObject>::EmitBufferManager(ArenaAllocator * allocator, CustomHeap::CodePageAllocators * codePageAllocators,
-    Js::ScriptContext * scriptContext, LPCWSTR name, HANDLE processHandle) :
+template <typename TAlloc, typename TPreReservedAlloc, typename SyncObject>
+EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::EmitBufferManager(ArenaAllocator * allocator, CustomHeap::CodePageAllocators<TAlloc, TPreReservedAlloc> * codePageAllocators,
+    Js::ScriptContext * scriptContext, ThreadContextInfo * threadContext, LPCWSTR name, HANDLE processHandle) :
     allocationHeap(allocator, codePageAllocators, processHandle),
     allocator(allocator),
     allocations(nullptr),
     scriptContext(scriptContext),
+    threadContext(threadContext),
     processHandle(processHandle)
 {
 #if DBG_DUMP
@@ -31,29 +32,33 @@ EmitBufferManager<SyncObject>::EmitBufferManager(ArenaAllocator * allocator, Cus
 // EmitBufferManager::~EmitBufferManager()
 //      Free up all the VirtualAlloced memory
 //----------------------------------------------------------------------------
-template <typename SyncObject>
-EmitBufferManager<SyncObject>::~EmitBufferManager()
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
+EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::~EmitBufferManager()
 {
     Clear();
 }
 
-template <typename SyncObject>
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
 void
-EmitBufferManager<SyncObject>::Decommit()
+EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::Decommit()
 {
     FreeAllocations(false);
 }
-template <typename SyncObject>
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
 void
-EmitBufferManager<SyncObject>::Clear()
+EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::Clear()
 {
     FreeAllocations(true);
 }
 
-template <typename SyncObject>
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
 void
-EmitBufferManager<SyncObject>::FreeAllocations(bool release)
+EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::FreeAllocations(bool release)
 {
+#if PDATA_ENABLED && defined(_WIN32)
+    DelayDeletingFunctionTable::Clear();
+#endif
+
     AutoRealOrFakeCriticalSection<SyncObject> autoCs(&this->criticalSection);
 
 #if DBG_DUMP
@@ -63,7 +68,7 @@ EmitBufferManager<SyncObject>::FreeAllocations(bool release)
     }
 #endif
 
-    EmitBufferAllocation * allocation = this->allocations;
+    TEmitBufferAllocation * allocation = this->allocations;
     while (allocation != nullptr)
     {
 #ifdef ENABLE_DEBUG_CONFIG_OPTIONS
@@ -95,17 +100,18 @@ EmitBufferManager<SyncObject>::FreeAllocations(bool release)
     }
 }
 
-template <typename SyncObject>
-bool EmitBufferManager<SyncObject>::IsInHeap(__in void* address)
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
+bool EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::IsInHeap(__in void* address)
 {
     AutoRealOrFakeCriticalSection<SyncObject> autocs(&this->criticalSection);
     return this->allocationHeap.IsInHeap(address);
 }
 
+template <typename TAlloc, typename TPreReservedAlloc>
 class AutoCustomHeapPointer
 {
 public:
-    AutoCustomHeapPointer(CustomHeap::Heap* allocationHeap, CustomHeap::Allocation* heapAllocation) :
+    AutoCustomHeapPointer(CustomHeap::Heap<TAlloc, TPreReservedAlloc> * allocationHeap, CustomHeap::Allocation* heapAllocation) :
         _allocationHeap(allocationHeap),
         _heapAllocation(heapAllocation)
     {
@@ -129,16 +135,16 @@ public:
 
 private:
     CustomHeap::Allocation* _heapAllocation;
-    CustomHeap::Heap* _allocationHeap;
+    CustomHeap::Heap<TAlloc, TPreReservedAlloc>* _allocationHeap;
 };
 
 //----------------------------------------------------------------------------
 // EmitBufferManager::NewAllocation
 //      Create a new allocation
 //----------------------------------------------------------------------------
-template <typename SyncObject>
-EmitBufferAllocation *
-EmitBufferManager<SyncObject>::NewAllocation(size_t bytes, ushort pdataCount, ushort xdataSize, bool canAllocInPreReservedHeapPageSegment, bool isAnyJittedCode)
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
+EmitBufferAllocation<TAlloc, TPreReservedAlloc> *
+EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::NewAllocation(size_t bytes, ushort pdataCount, ushort xdataSize, bool canAllocInPreReservedHeapPageSegment, bool isAnyJittedCode)
 {
     FAULTINJECT_MEMORY_THROW(_u("JIT"), bytes);
 
@@ -167,9 +173,9 @@ EmitBufferManager<SyncObject>::NewAllocation(size_t bytes, ushort pdataCount, us
     heapAllocation->isAllocationUsed = true;
 #endif
 
-    AutoCustomHeapPointer allocatedMemory(&this->allocationHeap, heapAllocation);
+    AutoCustomHeapPointer<TAlloc, TPreReservedAlloc> allocatedMemory(&this->allocationHeap, heapAllocation);
     VerboseHeapTrace(_u("New allocation: 0x%p, size: %p\n"), heapAllocation->address, heapAllocation->size);
-    EmitBufferAllocation * allocation = AnewStruct(this->allocator, EmitBufferAllocation);
+    TEmitBufferAllocation * allocation = AnewStruct(this->allocator, TEmitBufferAllocation);
 
     allocation->bytesCommitted = heapAllocation->size;
     allocation->allocation = allocatedMemory.Detach();
@@ -187,17 +193,24 @@ EmitBufferManager<SyncObject>::NewAllocation(size_t bytes, ushort pdataCount, us
     return allocation;
 }
 
-template <typename SyncObject>
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
 bool
-EmitBufferManager<SyncObject>::FreeAllocation(void* address)
+EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::FreeAllocation(void* address)
 {
+#if PDATA_ENABLED && defined(_WIN32)
+    DelayDeletingFunctionTable::Clear();
+#endif
+
     AutoRealOrFakeCriticalSection<SyncObject> autoCs(&this->criticalSection);
 
-    EmitBufferAllocation* previous = nullptr;
-    EmitBufferAllocation* allocation = allocations;
+#if _M_ARM
+    address = (void*)((uintptr_t)address & ~0x1); // clear the thumb bit
+#endif
+    TEmitBufferAllocation* previous = nullptr;
+    TEmitBufferAllocation* allocation = allocations;
     while(allocation != nullptr)
     {
-        if (address >= allocation->allocation->address && address < (allocation->allocation->address + allocation->bytesUsed))
+        if (address == allocation->allocation->address)
         {
             if (previous == nullptr)
             {
@@ -213,10 +226,34 @@ EmitBufferManager<SyncObject>::FreeAllocation(void* address)
                 this->scriptContext->GetThreadContext()->SubCodeSize(allocation->bytesCommitted);
             }
 
+#if defined(_CONTROL_FLOW_GUARD) && !defined(_M_ARM)
+            if (allocation->allocation->thunkAddress)
+            {
+                if (JITManager::GetJITManager()->IsJITServer())
+                {
+                    ((ServerThreadContext*)this->threadContext)->GetJITThunkEmitter()->FreeThunk(allocation->allocation->thunkAddress);
+                }
+                else
+                {
+                    ((ThreadContext*)this->threadContext)->GetJITThunkEmitter()->FreeThunk(allocation->allocation->thunkAddress);
+                }
+            }
+            else
+#endif
+            {
+                if (!JITManager::GetJITManager()->IsJITServer() || CONFIG_FLAG(OOPCFGRegistration))
+                {
+                    void* callTarget = address;
+#if _M_ARM
+                    callTarget = (void*)((uintptr_t)callTarget | 0x1); // add the thumb bit back, so we CFG-unregister the actual call target
+#endif
+                    threadContext->SetValidCallTargetForCFG(callTarget, false);
+                }
+            }
             VerboseHeapTrace(_u("Freeing 0x%p, allocation: 0x%p\n"), address, allocation->allocation->address);
 
             this->allocationHeap.Free(allocation->allocation);
-            this->allocator->Free(allocation, sizeof(EmitBufferAllocation));
+            this->allocator->Free(allocation, sizeof(TEmitBufferAllocation));
 
             return true;
         }
@@ -228,10 +265,10 @@ EmitBufferManager<SyncObject>::FreeAllocation(void* address)
 
 //----------------------------------------------------------------------------
 // EmitBufferManager::FinalizeAllocation
-//      Fill the rest of the page with debugger breakpoint.
+//      Fill the rest of the buffer (length given by allocation->BytesFree()) with debugger breakpoints.
 //----------------------------------------------------------------------------
-template <typename SyncObject>
-bool EmitBufferManager<SyncObject>::FinalizeAllocation(EmitBufferAllocation *allocation)
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
+bool EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::FinalizeAllocation(TEmitBufferAllocation *allocation, BYTE * dstBuffer)
 {
     Assert(this->criticalSection.IsLocked());
 
@@ -240,7 +277,7 @@ bool EmitBufferManager<SyncObject>::FinalizeAllocation(EmitBufferAllocation *all
     {
         BYTE* buffer = nullptr;
         this->GetBuffer(allocation, bytes, &buffer);
-        if (!this->CommitBuffer(allocation, buffer, 0, /*sourceBuffer=*/ nullptr, /*alignPad=*/ bytes))
+        if (!this->CommitBuffer(allocation, allocation->bytesCommitted, dstBuffer, 0, /*sourceBuffer=*/ nullptr, /*alignPad=*/ bytes))
         {
             return false;
         }
@@ -253,8 +290,9 @@ bool EmitBufferManager<SyncObject>::FinalizeAllocation(EmitBufferAllocation *all
     return true;
 }
 
-template <typename SyncObject>
-EmitBufferAllocation* EmitBufferManager<SyncObject>::GetBuffer(EmitBufferAllocation *allocation, __in size_t bytes, __deref_bcount(bytes) BYTE** ppBuffer)
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
+EmitBufferAllocation<TAlloc, TPreReservedAlloc>*
+EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::GetBuffer(TEmitBufferAllocation *allocation, __in size_t bytes, __deref_bcount(bytes) BYTE** ppBuffer)
 {
     Assert(this->criticalSection.IsLocked());
 
@@ -278,38 +316,31 @@ EmitBufferAllocation* EmitBufferManager<SyncObject>::GetBuffer(EmitBufferAllocat
 //      NOTE: This buffer is not readable or writable. Use CommitBuffer
 //      to modify this buffer one page at a time.
 //----------------------------------------------------------------------------
-template <typename SyncObject>
-EmitBufferAllocation* EmitBufferManager<SyncObject>::AllocateBuffer(__in size_t bytes, __deref_bcount(bytes) BYTE** ppBuffer, ushort pdataCount /*=0*/, ushort xdataSize  /*=0*/, bool canAllocInPreReservedHeapPageSegment /*=false*/,
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
+EmitBufferAllocation<TAlloc, TPreReservedAlloc>*
+EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::AllocateBuffer(__in size_t bytes, __deref_bcount(bytes) BYTE** ppBuffer, ushort pdataCount /*=0*/, ushort xdataSize  /*=0*/, bool canAllocInPreReservedHeapPageSegment /*=false*/,
     bool isAnyJittedCode /* = false*/)
 {
     AutoRealOrFakeCriticalSection<SyncObject> autoCs(&this->criticalSection);
 
     Assert(ppBuffer != nullptr);
 
-    EmitBufferAllocation * allocation = this->NewAllocation(bytes, pdataCount, xdataSize, canAllocInPreReservedHeapPageSegment, isAnyJittedCode);
+    TEmitBufferAllocation * allocation = this->NewAllocation(bytes, pdataCount, xdataSize, canAllocInPreReservedHeapPageSegment, isAnyJittedCode);
 
     GetBuffer(allocation, bytes, ppBuffer);
 
 #if DBG
     MEMORY_BASIC_INFORMATION memBasicInfo;
     size_t resultBytes = VirtualQueryEx(this->processHandle, allocation->allocation->address, &memBasicInfo, sizeof(memBasicInfo));
-    if (resultBytes == 0) 
-    {
-        MemoryOperationLastError::RecordLastError();
-        if (this->processHandle != GetCurrentProcess())
-        {            
-            return nullptr;
-        }
-    }
-    Assert(resultBytes != 0 && memBasicInfo.Protect == PAGE_EXECUTE);
+    Assert(resultBytes == 0 || memBasicInfo.Protect == PAGE_EXECUTE_READ);
 #endif
 
     return allocation;
 }
 
 #ifdef ENABLE_DEBUG_CONFIG_OPTIONS
-template <typename SyncObject>
-bool EmitBufferManager<SyncObject>::CheckCommitFaultInjection()
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
+bool EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::CheckCommitFaultInjection()
 {
     if (Js::Configuration::Global.flags.ForceOOMOnEBCommit == 0)
     {
@@ -333,18 +364,18 @@ bool EmitBufferManager<SyncObject>::CheckCommitFaultInjection()
 #endif
 
 #if DBG
-template <typename SyncObject>
-bool EmitBufferManager<SyncObject>::IsBufferExecuteReadOnly(EmitBufferAllocation * allocation)
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
+bool EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::IsBufferExecuteReadOnly(TEmitBufferAllocation * allocation)
 {
     AutoRealOrFakeCriticalSection<SyncObject> autoCs(&this->criticalSection);
     MEMORY_BASIC_INFORMATION memBasicInfo;
     size_t resultBytes = VirtualQuery(allocation->allocation->address, &memBasicInfo, sizeof(memBasicInfo));
-    return resultBytes != 0 && memBasicInfo.Protect == PAGE_EXECUTE;
+    return resultBytes != 0 && memBasicInfo.Protect == PAGE_EXECUTE_READ;
 }
 #endif
 
-template <typename SyncObject>
-bool EmitBufferManager<SyncObject>::ProtectBufferWithExecuteReadWriteForInterpreter(EmitBufferAllocation* allocation)
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
+bool EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::ProtectBufferWithExecuteReadWriteForInterpreter(TEmitBufferAllocation* allocation)
 {
     Assert(this->criticalSection.IsLocked());
     Assert(allocation != nullptr);
@@ -353,8 +384,8 @@ bool EmitBufferManager<SyncObject>::ProtectBufferWithExecuteReadWriteForInterpre
 
 // Returns true if we successfully commit the buffer
 // Returns false if we OOM
-template <typename SyncObject>
-bool EmitBufferManager<SyncObject>::CommitReadWriteBufferForInterpreter(EmitBufferAllocation* allocation, _In_reads_bytes_(bufferSize) BYTE* pBuffer, _In_ size_t bufferSize)
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
+bool EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::CommitBufferForInterpreter(TEmitBufferAllocation* allocation, _In_reads_bytes_(bufferSize) BYTE* pBuffer, _In_ size_t bufferSize)
 {
     Assert(this->criticalSection.IsLocked());
 
@@ -373,7 +404,7 @@ bool EmitBufferManager<SyncObject>::CommitReadWriteBufferForInterpreter(EmitBuff
     }
 #endif
 
-    if (!this->allocationHeap.ProtectAllocationWithExecuteReadOnly(allocation->allocation))
+    if (!JITManager::GetJITManager()->IsJITServer() && !this->allocationHeap.ProtectAllocationWithExecuteReadOnly(allocation->allocation))
     {
         return false;
     }
@@ -389,18 +420,28 @@ bool EmitBufferManager<SyncObject>::CommitReadWriteBufferForInterpreter(EmitBuff
 //      Copies contents of source buffer to the destination buffer - at max of one page at a time.
 //      This ensures that only 1 page is writable at any point of time.
 //      Commit a buffer from the last AllocateBuffer call that is filled.
+//
+// Skips over the initial allocation->GetBytesUsed() bytes of destBuffer.  Then, fills in `alignPad` bytes with debug breakpoint instructions,
+// copies `bytes` bytes from sourceBuffer, and finally fills in the rest of destBuffer with debug breakpoint instructions.
 //----------------------------------------------------------------------------
-template <typename SyncObject>
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
 bool
-EmitBufferManager<SyncObject>::CommitBuffer(EmitBufferAllocation* allocation, __out_bcount(bytes) BYTE* destBuffer, __in size_t bytes, __in_bcount(bytes) const BYTE* sourceBuffer, __in DWORD alignPad)
+EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::CommitBuffer(TEmitBufferAllocation* allocation, __in const size_t destBufferBytes, __out_bcount(destBufferBytes) BYTE* destBuffer, __in size_t bytes, __in_bcount(bytes) const BYTE* sourceBuffer, __in DWORD alignPad)
 {
     AutoRealOrFakeCriticalSection<SyncObject> autoCs(&this->criticalSection);
 
     Assert(destBuffer != nullptr);
     Assert(allocation != nullptr);
 
-    BYTE *currentDestBuffer = allocation->GetUnused();
-    BYTE *bufferToFlush = currentDestBuffer;
+    // The size of destBuffer is actually given by allocation->bytesCommitted, but due to a bug in some versions of PREFast, we can't refer to allocation->bytesCommitted in the
+    // SAL annotation on destBuffer above.  We've informed the PREFast maintainers, but we'll have to use destBufferBytes as a workaround until their fix makes it to Jenkins.
+    Assert(destBufferBytes == allocation->bytesCommitted);
+    
+    // Must have at least enough room in destBuffer for the initial skipped bytes plus the bytes we're going to write.
+    AnalysisAssert(allocation->bytesUsed + bytes + alignPad <= destBufferBytes);
+
+    BYTE *currentDestBuffer = destBuffer + allocation->GetBytesUsed();
+    char *bufferToFlush = allocation->allocation->address + allocation->GetBytesUsed();
     Assert(allocation->BytesFree() >= bytes + alignPad);
 
     size_t bytesLeft = bytes + alignPad;
@@ -409,6 +450,10 @@ EmitBufferManager<SyncObject>::CommitBuffer(EmitBufferAllocation* allocation, __
     // Copy the contents and set the alignment pad
     while(bytesLeft != 0)
     {
+        // currentDestBuffer must still point to somewhere in the interior of destBuffer.
+        AnalysisAssert(destBuffer <= currentDestBuffer);
+        AnalysisAssert(currentDestBuffer < destBuffer + destBufferBytes);
+
         DWORD spaceInCurrentPage = AutoSystemInfo::PageSize - ((size_t)currentDestBuffer & (AutoSystemInfo::PageSize - 1));
         size_t bytesToChange = bytesLeft > spaceInCurrentPage ? spaceInCurrentPage : bytesLeft;
 
@@ -423,16 +468,16 @@ EmitBufferManager<SyncObject>::CommitBuffer(EmitBufferAllocation* allocation, __
             return false;
         }
 #endif
-
-        if (!this->allocationHeap.ProtectAllocationWithExecuteReadWrite(allocation->allocation, (char*)readWriteBuffer))
+        if (!JITManager::GetJITManager()->IsJITServer() && !this->allocationHeap.ProtectAllocationWithExecuteReadWrite(allocation->allocation, (char*)readWriteBuffer))
         {
             return false;
         }
 
+        // Pad with debug-breakpoint instructions up to alignBytes or the end of the current page, whichever is less.
         if (alignPad != 0)
         {
             DWORD alignBytes = alignPad < spaceInCurrentPage ? alignPad : spaceInCurrentPage;
-            CustomHeap::FillDebugBreak(currentDestBuffer, alignBytes, this->processHandle);
+            CustomHeap::FillDebugBreak(currentDestBuffer, alignBytes);
 
             alignPad -= alignBytes;
             currentDestBuffer += alignBytes;
@@ -445,12 +490,16 @@ EmitBufferManager<SyncObject>::CommitBuffer(EmitBufferAllocation* allocation, __
 #endif
         }
 
-        // If there are bytes still left to be copied then we should do the copy.
+        // If there are bytes still left to be copied then we should do the copy, but only through the end of the current page.
         if(bytesToChange > 0)
         {
             AssertMsg(alignPad == 0, "If we are copying right now - we should be done with setting alignment.");
 
-            ChakraMemCopy(currentDestBuffer, allocation->BytesFree(), sourceBuffer, bytesToChange, this->processHandle);
+            const DWORD bufferBytesFree(allocation->BytesFree());
+            // Use <= here instead of < to allow this memcopy to fill up the rest of destBuffer.  If we do, then FinalizeAllocation,
+            // called below, determines that no additional padding is necessary based on the values in `allocation'.
+            AnalysisAssert(currentDestBuffer + bufferBytesFree <= destBuffer + destBufferBytes);
+            memcpy_s(currentDestBuffer, bufferBytesFree, sourceBuffer, bytesToChange);
 
             currentDestBuffer += bytesToChange;
             sourceBuffer += bytesToChange;
@@ -460,7 +509,7 @@ EmitBufferManager<SyncObject>::CommitBuffer(EmitBufferAllocation* allocation, __
 
         Assert(readWriteBuffer + readWriteBytes == currentDestBuffer);
 
-        if (!this->allocationHeap.ProtectAllocationWithExecuteReadOnly(allocation->allocation, (char*)readWriteBuffer))
+        if (!JITManager::GetJITManager()->IsJITServer() && !this->allocationHeap.ProtectAllocationWithExecuteReadOnly(allocation->allocation, (char*)readWriteBuffer))
         {
             return false;
         }
@@ -471,13 +520,13 @@ EmitBufferManager<SyncObject>::CommitBuffer(EmitBufferAllocation* allocation, __
     this->totalBytesCode += bytes;
 #endif
 
-    //Finish the current EmitBufferAllocation
-    return FinalizeAllocation(allocation);
+    //Finish the current EmitBufferAllocation by filling out the rest of destBuffer with debug breakpoint instructions.
+    return FinalizeAllocation(allocation, destBuffer);
 }
 
-template <typename SyncObject>
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
 void
-EmitBufferManager<SyncObject>::CompletePreviousAllocation(EmitBufferAllocation* allocation)
+EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::CompletePreviousAllocation(TEmitBufferAllocation* allocation)
 {
     AutoRealOrFakeCriticalSection<SyncObject> autoCs(&this->criticalSection);
     if (allocation != nullptr)
@@ -487,9 +536,9 @@ EmitBufferManager<SyncObject>::CompletePreviousAllocation(EmitBufferAllocation* 
 }
 
 #ifdef ENABLE_DEBUG_CONFIG_OPTIONS
-template <typename SyncObject>
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
 void
-EmitBufferManager<SyncObject>::CheckBufferPermissions(EmitBufferAllocation *allocation)
+EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::CheckBufferPermissions(TEmitBufferAllocation *allocation)
 {
     AutoRealOrFakeCriticalSection<SyncObject> autoCs(&this->criticalSection);
 
@@ -541,9 +590,9 @@ EmitBufferManager<SyncObject>::CheckBufferPermissions(EmitBufferAllocation *allo
 #endif
 
 #if DBG_DUMP
-template <typename SyncObject>
+template <typename TAlloc, typename TPreReservedAlloc, class SyncObject>
 void
-EmitBufferManager<SyncObject>::DumpAndResetStats(char16 const * filename)
+EmitBufferManager<TAlloc, TPreReservedAlloc, SyncObject>::DumpAndResetStats(char16 const * filename)
 {
     if (this->totalBytesCommitted != 0)
     {
@@ -568,5 +617,9 @@ EmitBufferManager<SyncObject>::DumpAndResetStats(char16 const * filename)
 }
 #endif
 
-template class EmitBufferManager<FakeCriticalSection>;
-template class EmitBufferManager<CriticalSection>;
+template class EmitBufferManager<VirtualAllocWrapper, PreReservedVirtualAllocWrapper, FakeCriticalSection>;
+template class EmitBufferManager<VirtualAllocWrapper, PreReservedVirtualAllocWrapper, CriticalSection>;
+#if ENABLE_OOP_NATIVE_CODEGEN
+template class EmitBufferManager<SectionAllocWrapper, PreReservedSectionAllocWrapper, FakeCriticalSection>;
+template class EmitBufferManager<SectionAllocWrapper, PreReservedSectionAllocWrapper, CriticalSection>;
+#endif

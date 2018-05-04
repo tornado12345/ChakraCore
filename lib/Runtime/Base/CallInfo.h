@@ -29,26 +29,85 @@ namespace Js
          * to pass this object by reference. Interpreter stack setup code expects
          * CallInfo to be passed by value.
          */
-        explicit CallInfo(ushort count)
+        explicit CallInfo(ArgSlot count)
             : Flags(CallFlags_None)
             , Count(count)
 #ifdef TARGET_64
             , unused(0)
 #endif
         {
+            // Keeping this version to avoid the assert
         }
 
-        CallInfo(CallFlags flags, ushort count)
+        // The bool is used to avoid the signature confusion between the ArgSlot and uint version of the constructor
+        explicit CallInfo(uint count, bool unusedBool)
+            : Flags(CallFlags_None)
+            , Count(count)
+#ifdef TARGET_64
+            , unused(0)
+#endif
+        {
+            AssertOrFailFastMsg(count < CallInfo::kMaxCountArgs, "Argument list too large");
+        }
+
+        CallInfo(CallFlags flags, uint count)
             : Flags(flags)
             , Count(count)
 #ifdef TARGET_64
             , unused(0)
 #endif
         {
+            // Keeping this version to avoid the assert
         }
+
 
         CallInfo(VirtualTableInfoCtorEnum v)
         {
+        }
+
+        ArgSlot GetArgCountWithExtraArgs() const
+        {
+            return CallInfo::GetArgCountWithExtraArgs(this->Flags, this->Count);
+        }
+
+        uint GetLargeArgCountWithExtraArgs() const
+        {
+            return CallInfo::GetLargeArgCountWithExtraArgs(this->Flags, this->Count);
+        }
+
+        bool HasExtraArg() const
+        {
+            return (this->Flags & CallFlags_ExtraArg) || this->HasNewTarget();
+        }
+
+        bool HasNewTarget() const
+        {
+            return CallInfo::HasNewTarget(this->Flags);
+        }
+
+        static ArgSlot GetArgCountWithExtraArgs(CallFlags flags, uint count);
+
+        static uint GetLargeArgCountWithExtraArgs(CallFlags flags, uint count);
+
+        static ArgSlot GetArgCountWithoutExtraArgs(CallFlags flags, ArgSlot count);
+
+        static bool HasNewTarget(CallFlags flags)
+        {
+            return (flags & CallFlags_NewTarget) == CallFlags_NewTarget;
+        }
+
+        // New target value is passed as an extra argument which is nto included in the Count
+        static Var GetNewTarget(CallFlags flag, Var* values, uint count)
+        {
+            if (HasNewTarget(flag))
+            {
+                return values[count];
+            }
+            else
+            {
+                AssertOrFailFast(count > 0);
+                return values[0];
+            }
         }
 
         // Assumes big-endian layout
@@ -56,10 +115,10 @@ namespace Js
         //  - scriptdirect.idl
         //  - LowererMDArch::LoadInputParamCount
         //
-        unsigned  Count : 24;
-        CallFlags Flags : 8;
+        Field(unsigned)  Count : 24;
+        Field(CallFlags) Flags : 8;
 #ifdef TARGET_64
-        unsigned unused : 32;
+        Field(unsigned) unused : 32;
 #endif
 
 #if DBG

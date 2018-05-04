@@ -31,18 +31,19 @@ namespace Js
         friend class DOMBuiltInPropertyRecords;
 
     private:
-        PropertyId pid;
+        Field(PropertyId) pid;
         //Made this mutable so that we can set it for Built-In js property records when we are adding it.
         //If we try to set it when initializing; we get extra code added for each built in; and thus increasing the size of chakracore
-        mutable uint hash;
-        bool isNumeric;
-        bool isBound;
-        bool isSymbol;
+        mutable Field(hash_t) hash;
+        Field(bool) isNumeric;
+        Field(bool) isBound;
+        Field(bool) isSymbol;
         // Have the length before the buffer so that the buffer would have a BSTR format
-        DWORD byteCount;
+        Field(DWORD) byteCount;
 
         PropertyRecord(DWORD bytelength, bool isNumeric, uint hash, bool isSymbol);
         PropertyRecord(PropertyId pid, uint hash, bool isNumeric, DWORD byteCount, bool isSymbol);
+        PropertyRecord(const WCHAR* buffer, const int length, DWORD bytelength, bool isSymbol);
         PropertyRecord() { Assert(false); } // never used, needed by compiler for BuiltInPropertyRecord
 
         static bool IsPropertyNameNumeric(const char16* str, int length, uint32* intVal);
@@ -99,6 +100,11 @@ namespace Js
         }
 
         virtual void Mark(Recycler *recycler) override { AssertMsg(false, "Mark called on object that isn't TrackableObject"); }
+
+#if DBG_DUMP
+    public:
+        void Dump(unsigned indent = 0) const;
+#endif
     };
 
     // This struct maps to the layout of runtime allocated PropertyRecord. Used for creating built-in PropertyRecords statically.
@@ -115,8 +121,36 @@ namespace Js
 
         bool Equals(JsUtil::CharacterBuffer<WCHAR> const & str) const
         {
-            return (LEN - 1 == str.GetLength() &&
-                JsUtil::CharacterBuffer<WCHAR>::StaticEquals(buffer, str.GetBuffer(), LEN - 1));
+#ifndef _NTBUILD
+            AssertMsg(false, "Do you really have to use this interface?");
+#endif
+            return Equals(str.GetBuffer(), str.GetLength());
+        }
+
+        bool Equals(JavascriptString * str) const
+        {
+            const PropertyRecord * propRecord = nullptr;
+            str->GetPropertyRecord(&propRecord);
+
+            if (propRecord == nullptr)
+            {
+                return Equals(str->GetString(), str->GetLength());
+            }
+            else
+            {
+                return Equals(propRecord->GetPropertyId());
+            }
+        }
+
+        bool Equals(const PropertyId & propertyId) const
+        {
+            return propertyId == propertyRecord.GetPropertyId();
+        }
+
+        bool Equals(const WCHAR * str, const charcount_t length) const
+        {
+            return (LEN - 1 == length &&
+                JsUtil::CharacterBuffer<WCHAR>::StaticEquals(buffer, str, LEN - 1));
         }
     };
 
@@ -147,7 +181,7 @@ namespace Js
     class HashedCharacterBuffer : public JsUtil::CharacterBuffer<TChar>
     {
     private:
-        hash_t hashCode;
+        Field(hash_t) hashCode;
 
     public:
         HashedCharacterBuffer(TChar const * string, charcount_t len) :
@@ -163,8 +197,7 @@ namespace Js
     {
         inline static bool Equals(PropertyRecord const * str1, PropertyRecord const * str2)
         {
-            return (str1->GetLength() == str2->GetLength() &&
-                JsUtil::CharacterBuffer<WCHAR>::StaticEquals(str1->GetBuffer(), str2->GetBuffer(), str1->GetLength()));
+            return str1->GetPropertyId() == str2->GetPropertyId();
         }
 
         inline static bool Equals(PropertyRecord const * str1, JsUtil::CharacterBuffer<WCHAR> const * str2)
@@ -257,6 +290,22 @@ namespace Js
         }
     };
 
+    template<>
+    struct PropertyRecordStringHashComparer<HashedCharacterBuffer<char16> *>
+    {
+        inline static bool Equals(HashedCharacterBuffer<char16>* const str1, HashedCharacterBuffer<char16>* const str2)
+        {
+            return (str1->GetLength() == str2->GetLength() &&
+                str1->GetHashCode() == str2->GetHashCode() &&
+                JsUtil::CharacterBuffer<char16>::StaticEquals(str1->GetBuffer(), str2->GetBuffer(), str1->GetLength()));
+        }
+
+        inline static hash_t GetHashCode(HashedCharacterBuffer<char16>* const str)
+        {
+            return str->GetHashCode();
+        }
+    };
+
     class CaseInvariantPropertyListWithHashCode: public JsUtil::List<const RecyclerWeakReference<Js::PropertyRecord const>*>
     {
     public:
@@ -266,7 +315,7 @@ namespace Js
           {
           }
 
-        uint caseInvariantHashCode;
+        Field(uint) caseInvariantHashCode;
     };
 }
 

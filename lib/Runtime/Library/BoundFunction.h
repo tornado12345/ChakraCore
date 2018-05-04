@@ -10,11 +10,7 @@ namespace Js
     {
     protected:
         DEFINE_VTABLE_CTOR(BoundFunction, JavascriptFunction);
-        virtual void MarshalToScriptContext(Js::ScriptContext * scriptContext) override;
-
-#if ENABLE_TTD
-        virtual void MarshalCrossSite_TTDInflate() override;
-#endif
+        DEFINE_MARSHAL_OBJECT_TO_SCRIPT_CONTEXT(BoundFunction);
 
     private:
         bool GetPropertyBuiltIns(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext, BOOL* result);
@@ -27,13 +23,13 @@ namespace Js
     public:
         static BoundFunction* New(ScriptContext* scriptContext, ArgumentReader args);
 
-        static bool Is(Var func){ return JavascriptFunction::Is(func) && JavascriptFunction::FromVar(func)->IsBoundFunction(); }
+        static bool Is(Var func){ return JavascriptFunction::Is(func) && JavascriptFunction::UnsafeFromVar(func)->IsBoundFunction(); }
         static Var NewInstance(RecyclableObject* function, CallInfo callInfo, ...);
         virtual JavascriptString* GetDisplayNameImpl() const override;
-        virtual BOOL HasProperty(PropertyId propertyId) override;
-        virtual BOOL GetProperty(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
-        virtual BOOL GetProperty(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
-        virtual BOOL GetPropertyReference(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
+        virtual PropertyQueryFlags HasPropertyQuery(PropertyId propertyId, _Inout_opt_ PropertyValueInfo* info) override;
+        virtual PropertyQueryFlags GetPropertyQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
+        virtual PropertyQueryFlags GetPropertyQuery(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
+        virtual PropertyQueryFlags GetPropertyReferenceQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
         virtual BOOL SetProperty(PropertyId propertyId, Var value, PropertyOperationFlags flags, PropertyValueInfo* info) override;
         virtual BOOL SetProperty(JavascriptString* propertyNameString, Var value, PropertyOperationFlags flags, PropertyValueInfo* info) override;
 
@@ -56,7 +52,7 @@ namespace Js
         JavascriptFunction * GetTargetFunction() const;
         // Below functions are used by heap enumerator
         uint GetArgsCountForHeapEnum() { return count;}
-        Var* GetArgsForHeapEnum() { return boundArgs;}
+        Field(Var)* GetArgsForHeapEnum() { return boundArgs;}
         RecyclableObject* GetBoundThis();
 
 #if ENABLE_TTD
@@ -67,14 +63,15 @@ namespace Js
         virtual TTD::NSSnapObjects::SnapObjectType GetSnapTag_TTD() const override;
         virtual void ExtractSnapObjectDataInto(TTD::NSSnapObjects::SnapObject* objData, TTD::SlabAllocator& alloc) override;
 
-        static BoundFunction* InflateBoundFunction(ScriptContext* ctx, RecyclableObject* function, Var bThis, uint32 ct, Var* args);
+        static BoundFunction* InflateBoundFunction(
+            ScriptContext* ctx, RecyclableObject* function, Var bThis, uint32 ct, Field(Var)* args);
 #endif
 
     private:
         static FunctionInfo        functionInfo;
-        RecyclableObject*   targetFunction;
-        Var                 boundThis;
-        uint                count;
-        Var*                boundArgs;
+        Field(RecyclableObject*)   targetFunction;
+        Field(Var)                 boundThis;
+        Field(uint)                count;
+        Field(Field(Var)*)                boundArgs;
     };
 } // namespace Js

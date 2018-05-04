@@ -3,18 +3,17 @@
 // Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.
 //-------------------------------------------------------------------------------------------------------
 #include "RuntimeTypePch.h"
-#include "Library/JavascriptSymbol.h"
 
 namespace Js
 {
 
-    bool JavascriptStaticEnumerator::Initialize(JavascriptEnumerator * prefixEnumerator, ArrayObject * arrayToEnumerate, 
-        DynamicObject * objectToEnumerate, EnumeratorFlags flags, ScriptContext * requestContext, ForInCache * forInCache)
+    bool JavascriptStaticEnumerator::Initialize(JavascriptEnumerator * prefixEnumerator, ArrayObject * arrayToEnumerate,
+        DynamicObject * objectToEnumerate, EnumeratorFlags flags, ScriptContext * requestContext, EnumeratorCache * enumeratorCache)
     {
         this->prefixEnumerator = prefixEnumerator;
         this->arrayEnumerator = arrayToEnumerate ? arrayToEnumerate->GetIndexEnumerator(flags, requestContext) : nullptr;
-        this->currentEnumerator = prefixEnumerator ? prefixEnumerator : arrayEnumerator;
-        return this->propertyEnumerator.Initialize(objectToEnumerate, flags, requestContext, forInCache);
+        this->currentEnumerator = prefixEnumerator ? prefixEnumerator : PointerValue(arrayEnumerator);
+        return this->propertyEnumerator.Initialize(objectToEnumerate, flags, requestContext, enumeratorCache);
     }
 
     void JavascriptStaticEnumerator::Clear(EnumeratorFlags flags, ScriptContext * requestContext)
@@ -66,11 +65,11 @@ namespace Js
         }
     }
 
-    Var JavascriptStaticEnumerator::MoveAndGetNextFromEnumerator(PropertyId& propertyId, PropertyAttributes* attributes)
+    JavascriptString * JavascriptStaticEnumerator::MoveAndGetNextFromEnumerator(PropertyId& propertyId, PropertyAttributes* attributes)
     {
         while (this->currentEnumerator)
         {
-            Var currentIndex = this->currentEnumerator->MoveAndGetNext(propertyId, attributes);
+            JavascriptString * currentIndex = this->currentEnumerator->MoveAndGetNext(propertyId, attributes);
             if (currentIndex != nullptr)
             {
                 return currentIndex;
@@ -81,15 +80,14 @@ namespace Js
         return nullptr;
     }
 
-    Var JavascriptStaticEnumerator::MoveAndGetNext(PropertyId& propertyId, PropertyAttributes* attributes)
+    JavascriptString * JavascriptStaticEnumerator::MoveAndGetNext(PropertyId& propertyId, PropertyAttributes* attributes)
     {
-        Var currentIndex = MoveAndGetNextFromEnumerator(propertyId, attributes);
+        JavascriptString * currentIndex = MoveAndGetNextFromEnumerator(propertyId, attributes);
         if (currentIndex == nullptr)
         {
             currentIndex = propertyEnumerator.MoveAndGetNext(propertyId, attributes);
         }
         Assert(!currentIndex || !CrossSite::NeedMarshalVar(currentIndex, this->propertyEnumerator.GetScriptContext()));
-        Assert(!currentIndex || JavascriptString::Is(currentIndex) || (this->propertyEnumerator.GetEnumSymbols() && JavascriptSymbol::Is(currentIndex)));
         return currentIndex;
     }
 }

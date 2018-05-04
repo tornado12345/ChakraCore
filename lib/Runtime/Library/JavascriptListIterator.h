@@ -9,9 +9,9 @@ namespace Js
     class JavascriptListIterator : public DynamicObject
     {
     private:
-        ListForListIterator* listForIterator;
-        uint index;
-        uint count;
+        Field(ListForListIterator*) listForIterator;
+        Field(uint) index;
+        Field(uint) count;
 
     protected:
         DEFINE_VTABLE_CTOR(JavascriptListIterator, DynamicObject);
@@ -22,6 +22,7 @@ namespace Js
 
         static bool Is(Var aValue);
         static JavascriptListIterator* FromVar(Var aValue);
+        static JavascriptListIterator* UnsafeFromVar(Var aValue);
 
         class EntryInfo
         {

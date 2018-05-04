@@ -114,7 +114,10 @@ JITTimeWorkItem::InitializeReader(
 #endif
     bool hasSpanSequenceMap = m_jitBody.InitializeStatementMap(&m_statementMap, alloc);
     Js::SmallSpanSequence * spanSeq = hasSpanSequenceMap ? &m_statementMap : nullptr;
-    statementReader->Create(m_jitBody.GetByteCodeBuffer(), startOffset, spanSeq, m_fullStatementList);
+    if (statementReader)
+    {
+        statementReader->Create(m_jitBody.GetByteCodeBuffer(), startOffset, spanSeq, m_fullStatementList);
+    }
 }
 
 JITTimeFunctionBody *
@@ -146,7 +149,7 @@ JITTimeWorkItem::GetInlineePolymorphicInlineCacheInfo(intptr_t funcBodyAddr)
 {
     for (uint i = 0; i < m_workItemData->inlineeInfoCount; ++i)
     {
-        if (m_workItemData->inlineeInfo[i].functionBodyAddr == funcBodyAddr)
+        if (m_workItemData->inlineeInfo[i].functionBodyAddr == (void*)funcBodyAddr)
         {
             return (JITTimePolymorphicInlineCacheInfo *)&m_workItemData->inlineeInfo[i];
         }

@@ -54,6 +54,7 @@ StackSym::New(SymID id, IRType type, Js::RegSlot byteCodeRegSlot, Func *func)
     stackSym->m_isArgCaptured = false;
     stackSym->m_requiresBailOnNotNumber = false;
     stackSym->m_isCatchObjectSym = false;
+    stackSym->m_isClosureSym = false;
     stackSym->m_builtInIndex = Js::BuiltinFunction::None;
     stackSym->m_slotNum = StackSym::InvalidSlot;
 
@@ -322,8 +323,10 @@ StackSym::SetIsIntConst(IntConstType value)
     Assert(this->m_instrDef);
     this->m_isConst = true;
     this->m_isIntConst = true;
+    this->m_isInt64Const = false;
     this->m_isTaggableIntConst = !Js::TaggedInt::IsOverflow(value);
     this->m_isFltConst = false;
+    this->m_isStrConst = false;
 }
 
 void StackSym::SetIsInt64Const()
@@ -335,6 +338,7 @@ void StackSym::SetIsInt64Const()
     this->m_isIntConst = false;
     this->m_isTaggableIntConst = false;
     this->m_isFltConst = false;
+    this->m_isStrConst = false;
 }
 
 void
@@ -346,6 +350,7 @@ StackSym::SetIsFloatConst()
     this->m_isIntConst = false;
     this->m_isTaggableIntConst = false;
     this->m_isFltConst = true;
+    this->m_isStrConst = false;
 }
 
 void
@@ -358,6 +363,22 @@ StackSym::SetIsSimd128Const()
     this->m_isTaggableIntConst = false;
     this->m_isFltConst = false;
     this->m_isSimd128Const = true;
+    this->m_isStrConst = false;
+    this->m_isNotNumber = true;
+}
+
+void
+StackSym::SetIsStrConst()
+{
+    Assert(this->m_isSingleDef);
+    Assert(this->m_instrDef);
+    this->m_isConst = true;
+    this->m_isIntConst = false;
+    this->m_isTaggableIntConst = false;
+    this->m_isFltConst = false;
+    this->m_isSimd128Const = false;
+    this->m_isStrConst = true;
+    this->m_isNotNumber = true;
 }
 
 Js::RegSlot
@@ -502,7 +523,7 @@ StackSym::CloneDef(Func *func)
         newSym->m_allocated = m_allocated;
         newSym->m_isInlinedArgSlot = m_isInlinedArgSlot;
         newSym->m_isCatchObjectSym = m_isCatchObjectSym;
-
+        newSym->m_isClosureSym = m_isClosureSym;
         newSym->m_type = m_type;
 
         newSym->CopySymAttrs(this);
@@ -541,7 +562,7 @@ StackSym::CloneUse(Func *func)
 void
 StackSym::CopySymAttrs(StackSym *symSrc)
 {
-    m_isNotInt = symSrc->m_isNotInt;
+    m_isNotNumber = symSrc->m_isNotNumber;
     m_isSafeThis = symSrc->m_isSafeThis;
     m_builtInIndex = symSrc->m_builtInIndex;
 }
@@ -570,7 +591,7 @@ StackSym::GetIntConstValue() const
         {
             return Js::TaggedInt::ToInt32(var);
         }
-        int32 value;
+        int32 value = 0xCCCCCCCC;
         const bool isInt32 = Js::JavascriptNumber::TryGetInt32Value(Js::JavascriptNumber::GetValue(var), &value);
         Assert(isInt32);
         return value;
@@ -760,6 +781,11 @@ StackSym::GetConstOpnd() const
         defInstr->m_opcode = Js::OpCode::Ld_A;
 
     }
+    else if (src1->IsFloat32ConstOpnd())
+    {
+        Assert(this->IsFloatConst());
+        Assert(defInstr->m_opcode == Js::OpCode::LdC_F8_R8 || LowererMD::IsAssign(defInstr));
+    }
     else if (src1->IsAddrOpnd())
     {
         Assert(defInstr->m_opcode == Js::OpCode::Ld_A || LowererMD::IsAssign(defInstr) || defInstr->m_opcode == Js::OpCode::ArgOut_A_InlineBuiltIn);
@@ -784,55 +810,6 @@ BailoutConstantValue StackSym::GetConstValueForBailout() const
     return src1->GetConstValue();
 }
 
-
-// SIMD_JS
-StackSym *
-StackSym::GetSimd128EquivSym(IRType type, Func *func)
-{
-    switch (type)
-    {
-    case TySimd128F4:
-        return this->GetSimd128F4EquivSym(func);
-        break;
-    case TySimd128I4:
-        return this->GetSimd128I4EquivSym(func);
-        break;
-    case TySimd128I16:
-        return this->GetSimd128I16EquivSym(func);
-        break;
-    case TySimd128D2:
-        return this->GetSimd128D2EquivSym(func);
-        break;
-    default:
-        Assert(UNREACHED);
-        return nullptr;
-    }
-}
-
-StackSym *
-StackSym::GetSimd128F4EquivSym(Func *func)
-{
-    return this->GetTypeEquivSym(TySimd128F4, func);
-}
-
-StackSym *
-StackSym::GetSimd128I4EquivSym(Func *func)
-{
-    return this->GetTypeEquivSym(TySimd128I4, func);
-}
-
-StackSym *
-StackSym::GetSimd128I16EquivSym(Func *func)
-{
-    return this->GetTypeEquivSym(TySimd128I16, func);
-}
-
-StackSym *
-StackSym::GetSimd128D2EquivSym(Func *func)
-{
-    return this->GetTypeEquivSym(TySimd128D2, func);
-}
-
 StackSym *
 StackSym::GetFloat64EquivSym(Func *func)
 {
@@ -852,21 +829,25 @@ StackSym::GetVarEquivSym(Func *func)
 }
 
 StackSym *
+StackSym::GetVarEquivSym_NoCreate()
+{
+    return this->GetTypeEquivSym_NoCreate(TyVar);
+}
+
+StackSym const *
+StackSym::GetVarEquivSym_NoCreate() const
+{
+    return this->GetTypeEquivSym_NoCreate(TyVar);
+}
+
+StackSym *
 StackSym::GetTypeEquivSym(IRType type, Func *func)
 {
-    Assert(this->m_type != type);
+    StackSym *sym = this->GetTypeEquivSym_NoCreate(type);
 
-    StackSym *sym = this->m_equivNext;
-    int i = 1;
-    while (sym != this)
+    if (sym != nullptr)
     {
-        Assert(i <= 5); // circular of at most 6 syms : var, f64, i32, simd128I4, simd128F4, simd128D2
-        if (sym->m_type == type)
-        {
-            return sym;
-        }
-        sym = sym->m_equivNext;
-        i++;
+        return sym;
     }
 
     // Don't allocate if func wasn't passed in.
@@ -894,7 +875,38 @@ StackSym::GetTypeEquivSym(IRType type, Func *func)
     return sym;
 }
 
+StackSym *
+StackSym::GetTypeEquivSym_NoCreate(IRType type)
+{
+    return const_cast<StackSym*>(static_cast<const StackSym*>(this)->GetTypeEquivSym_NoCreate(type));
+}
+
+StackSym const *
+StackSym::GetTypeEquivSym_NoCreate(IRType type) const
+{
+    Assert(this->m_type != type);
+
+    StackSym *sym = this->m_equivNext;
+    int i = 1;
+    while (sym != this)
+    {
+        Assert(i <= 5); // circular of at most 6 syms : var, f64, i32, simd128I4, simd128F4, simd128D2
+        if (sym->m_type == type)
+        {
+            return sym;
+        }
+        sym = sym->m_equivNext;
+        i++;
+    }
+    return nullptr;
+}
+
 StackSym *StackSym::GetVarEquivStackSym_NoCreate(Sym *const sym)
+{
+    return const_cast<StackSym*>(GetVarEquivStackSym_NoCreate((Sym const * const)sym));
+}
+
+StackSym const *StackSym::GetVarEquivStackSym_NoCreate(Sym const * const sym)
 {
     Assert(sym);
 
@@ -903,12 +915,23 @@ StackSym *StackSym::GetVarEquivStackSym_NoCreate(Sym *const sym)
         return nullptr;
     }
 
-    StackSym *stackSym = sym->AsStackSym();
+    StackSym const *stackSym = sym->AsStackSym();
     if(stackSym->IsTypeSpec())
     {
-        stackSym = stackSym->GetVarEquivSym(nullptr);
+        stackSym = stackSym->GetVarEquivSym_NoCreate();
     }
     return stackSym;
+}
+
+StackSym *StackSym::EnsureAuxSlotPtrSym(Func * func)
+{
+    Assert(HasObjectInfo());
+    StackSym * auxSlotPtrSym = GetObjectInfo()->m_auxSlotPtrSym;
+    if (auxSlotPtrSym == nullptr)
+    {
+        auxSlotPtrSym = GetObjectInfo()->m_auxSlotPtrSym = StackSym::New(func);
+    }
+    return auxSlotPtrSym;
 }
 
 ///----------------------------------------------------------------------------
@@ -1015,7 +1038,7 @@ PropertySym::FindOrCreate(SymID stackSymID, int32 propertyId, uint32 propertyIdI
 ///----------------------------------------------------------------------------
 
 void
-Sym::Dump(IRDumpFlags flags, const ValueType valueType)
+Sym::Dump(IRDumpFlags flags, const ValueType valueType) const
 {
     bool const AsmDumpMode = flags & IRDumpFlags_AsmDumpMode;
     bool const SimpleForm = !!(flags & IRDumpFlags_SimpleForm);
@@ -1033,7 +1056,7 @@ Sym::Dump(IRDumpFlags flags, const ValueType valueType)
     }
     else if (this->IsStackSym())
     {
-        StackSym *stackSym = this->AsStackSym();
+        StackSym const *stackSym = this->AsStackSym();
 
         if (stackSym->IsArgSlotSym())
         {
@@ -1103,7 +1126,7 @@ Sym::Dump(IRDumpFlags flags, const ValueType valueType)
             }
             else
             {
-                StackSym *varSym = stackSym->GetVarEquivSym(nullptr);
+                StackSym const *varSym = stackSym->GetVarEquivSym_NoCreate();
                 if (varSym)
                 {
                     Output::Print(_u("(s%d)"), varSym->m_id);
@@ -1121,7 +1144,7 @@ Sym::Dump(IRDumpFlags flags, const ValueType valueType)
     }
     else if (this->IsPropertySym())
     {
-        PropertySym *propertySym = this->AsPropertySym();
+        PropertySym const *propertySym = this->AsPropertySym();
 
         if (!SimpleForm)
         {
@@ -1165,13 +1188,13 @@ Sym::Dump(IRDumpFlags flags, const ValueType valueType)
 
 
 void
-Sym::Dump(const ValueType valueType)
+Sym::Dump(const ValueType valueType) const
 {
     this->Dump(IRDumpFlags_None, valueType);
 }
 
 void
-Sym::DumpSimple()
+Sym::DumpSimple() const
 {
     this->Dump(IRDumpFlags_SimpleForm);
 }

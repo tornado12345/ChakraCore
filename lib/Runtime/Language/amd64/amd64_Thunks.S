@@ -62,21 +62,7 @@ NESTED_ENTRY _ZN2Js21InterpreterStackFrame33AsmJsDelayDynamicInterpreterThunkEPN
         push r8
         push r9
 
-        sub rsp, 40h
-
-        // spill potential floating point arguments to stack
-        movaps xmmword ptr [rsp + 00h], xmm0
-        movaps xmmword ptr [rsp + 10h], xmm1
-        movaps xmmword ptr [rsp + 20h], xmm2
-        movaps xmmword ptr [rsp + 30h], xmm3
         call C_FUNC(_ZN2Js21InterpreterStackFrame29EnsureDynamicInterpreterThunkEPNS_14ScriptFunctionE)
-        // restore potential floating point arguments from stack
-        movaps xmm0, xmmword ptr [rsp + 00h]
-        movaps xmm1, xmmword ptr [rsp + 10h]
-        movaps xmm2, xmmword ptr [rsp + 20h]
-        movaps xmm3, xmmword ptr [rsp + 30h]
-
-        add rsp, 40h
 
         pop r9
         pop r8
@@ -118,47 +104,31 @@ NESTED_END _ZN2Js18DynamicProfileInfo29EnsureDynamicProfileInfoThunkEPNS_16Recyc
 #endif // _ENABLE_DYNAMIC_THUNKS
 
 
-#ifdef ENABLE_SCRIPT_PROFILING
-
 //============================================================================================================
 // ScriptContext::ProfileModeDeferredParsingThunk
 //============================================================================================================
 
-// Js::JavascriptMethod ScriptContext::ProfileModeDeferredParse(ScriptFunction *function)
-extrn ?ProfileModeDeferredParse@ScriptContext@Js@@SAP6APEAXPEAVRecyclableObject@2@UCallInfo@2@ZZPEAPEAVScriptFunction@2@@Z : PROC
+// Js::JavascriptMethod ScriptContext::ProfileModeDeferredParse(ScriptFunction **function)
+// extrn C_FUNC(_ZN2Js13ScriptContext31ProfileModeDeferredParsingThunkEPNS_16RecyclableObjectENS_8CallInfoEz)
 
 // Var ScriptContext::ProfileModeDeferredParsingThunk(RecyclableObject* function, CallInfo callInfo, ...)
-align 16
-?ProfileModeDeferredParsingThunk@ScriptContext@Js@@SAPEAXPEAVRecyclableObject@2@UCallInfo@2@ZZ PROC FRAME
-        // save volatile registers
-        mov qword ptr [rsp + 8h],  rcx
-        mov qword ptr [rsp + 10h], rdx
-        mov qword ptr [rsp + 18h], r8
-        mov qword ptr [rsp + 20h], r9
-
-        push rbp
-        .pushreg rbp
+.balign 16
+NESTED_ENTRY _ZN2Js13ScriptContext31ProfileModeDeferredParsingThunkEPNS_16RecyclableObjectENS_8CallInfoEz, _TEXT, NoHandler
+        push_nonvol_reg rbp
         lea  rbp, [rsp]
-        .setframe rbp, 0
-        .endprolog
 
-        sub rsp, 20h
-        lea rcx, [rsp + 30h]
-        call C_FUNC(?ProfileModeDeferredParse@ScriptContext@Js@@SAP6APEAXPEAVRecyclableObject@2@UCallInfo@2@ZZPEAPEAVScriptFunction@2@@Z)
+        // save argument registers used by custom calling convention
+        push_register rdi
+        push_register rsi
 
-        add rsp, 20h
+        call C_FUNC(_ZN2Js13ScriptContext24ProfileModeDeferredParseEPPNS_14ScriptFunctionE)
 
-        lea rsp, [rbp]
-        pop rbp
+        pop_register rsi
+        pop_register rdi
 
-        // restore volatile registers
-        mov rcx, qword ptr [rsp + 8h]
-        mov rdx, qword ptr [rsp + 10h]
-        mov r8,  qword ptr [rsp + 18h]
-        mov r9,  qword ptr [rsp + 20h]
-
-        rex_jmp_reg rax
-?ProfileModeDeferredParsingThunk@ScriptContext@Js@@SAPEAXPEAVRecyclableObject@2@UCallInfo@2@ZZ ENDP
+        pop_nonvol_reg rbp
+        jmp rax
+NESTED_END _ZN2Js13ScriptContext31ProfileModeDeferredParsingThunkEPNS_16RecyclableObjectENS_8CallInfoEz, _TEXT
 
 //============================================================================================================
 
@@ -168,41 +138,26 @@ align 16
 //============================================================================================================
 
 // Js::JavascriptMethod ScriptContext::ProfileModeDeferredDeserialize(ScriptFunction *function)
-extrn ?ProfileModeDeferredDeserialize@ScriptContext@Js@@SAP6APEAXPEAVRecyclableObject@2@UCallInfo@2@ZZPEAVScriptFunction@2@@Z : PROC
+// extrn ?ProfileModeDeferredDeserialize@ScriptContext@Js@@SAP6APEAXPEAVRecyclableObject@2@UCallInfo@2@ZZPEAVScriptFunction@2@@Z : PROC
 
 // Var ScriptContext::ProfileModeDeferredDeserializeThunk(RecyclableObject* function, CallInfo callInfo, ...)
-align 16
-?ProfileModeDeferredDeserializeThunk@ScriptContext@Js@@SAPEAXPEAVRecyclableObject@2@UCallInfo@2@ZZ PROC FRAME
-        // save volatile registers
-        mov qword ptr [rsp + 8h],  rcx
-        mov qword ptr [rsp + 10h], rdx
-        mov qword ptr [rsp + 18h], r8
-        mov qword ptr [rsp + 20h], r9
-
-        push rbp
-        .pushreg rbp
+.balign 16
+NESTED_ENTRY _ZN2Js13ScriptContext35ProfileModeDeferredDeserializeThunkEPNS_16RecyclableObjectENS_8CallInfoEz, _TEXT, NoHandler
+        push_nonvol_reg rbp
         lea  rbp, [rsp]
-        .setframe rbp, 0
-        .endprolog
 
-        sub rsp, 20h
-        call C_FUNC(?ProfileModeDeferredDeserialize@ScriptContext@Js@@SAP6APEAXPEAVRecyclableObject@2@UCallInfo@2@ZZPEAVScriptFunction@2@@Z)
+        // save argument registers used by custom calling convention
+        push_register rdi
+        push_register rsi
 
-        add rsp, 20h
+        call C_FUNC(_ZN2Js13ScriptContext30ProfileModeDeferredDeserializeEPNS_14ScriptFunctionE)
 
-        lea rsp, [rbp]
-        pop rbp
+        pop_register rsi
+        pop_register rdi
 
-        // restore volatile registers
-        mov rcx, qword ptr [rsp + 8h]
-        mov rdx, qword ptr [rsp + 10h]
-        mov r8,  qword ptr [rsp + 18h]
-        mov r9,  qword ptr [rsp + 20h]
-
-        rex_jmp_reg rax
-?ProfileModeDeferredDeserializeThunk@ScriptContext@Js@@SAPEAXPEAVRecyclableObject@2@UCallInfo@2@ZZ ENDP
-
-#endif // ENABLE_SCRIPT_PROFILING
+        pop_nonvol_reg rbp
+        jmp rax
+NESTED_END _ZN2Js13ScriptContext35ProfileModeDeferredDeserializeThunkEPNS_16RecyclableObjectENS_8CallInfoEz, _TEXT
 
 
 #ifdef _ENABLE_DYNAMIC_THUNKS
@@ -221,13 +176,6 @@ NESTED_ENTRY _ZN2Js21InterpreterStackFrame19InterpreterAsmThunkEPNS_20AsmJsCallS
 
         set_cfa_register rbp, (2*8)     // Set to compute CFA as: rbp + 16 (sizeof: [rbp] [ReturnAddress])
 
-        sub rsp, 40h
-
-        // spill potential floating point arguments to stack
-        movaps xmmword ptr [rsp + 00h], xmm0
-        movaps xmmword ptr [rsp + 10h], xmm1
-        movaps xmmword ptr [rsp + 20h], xmm2
-        movaps xmmword ptr [rsp + 30h], xmm3
 
         // save argument registers used by custom calling convention
         push rdi
@@ -241,7 +189,6 @@ NESTED_ENTRY _ZN2Js21InterpreterStackFrame19InterpreterAsmThunkEPNS_20AsmJsCallS
 
         call rax // call appropriate template
 
-        add rsp, 40h
         pop_nonvol_reg rbp
         ret
 NESTED_END _ZN2Js21InterpreterStackFrame19InterpreterAsmThunkEPNS_20AsmJsCallStackLayoutE, _TEXT
@@ -251,7 +198,7 @@ NESTED_END _ZN2Js21InterpreterStackFrame19InterpreterAsmThunkEPNS_20AsmJsCallSta
 //============================================================================================================
 
 //extrn ?GetStackSizeForAsmJsUnboxing@Js@@YAHPEAVScriptFunction@1@@Z: PROC
-//extrn ?UnboxAsmJsArguments@Js@@YAPEAXPEAVScriptFunction@1@PEAPEAXPEADUCallInfo@1@_N@Z : PROC
+//extrn ?UnboxAsmJsArguments@Js@@YAPEAXPEAVScriptFunction@1@PEAPEAXPEADUCallInfo@1@@Z : PROC
 //extrn ?BoxAsmJsReturnValue@Js@@YAPEAXPEAVScriptFunction@1@HNM@Z : PROC
 //extrn ?BoxAsmJsReturnValue@Js@@YAPEAXPEAVScriptFunction@1@HNMT__m128@@@Z : PROC
 
@@ -288,67 +235,11 @@ NESTED_ENTRY _ZN2Js23AsmJsExternalEntryPointEPNS_16RecyclableObjectENS_8CallInfo
         mov rdx, rsp // arg3: argDst
 
         // unboxing function also does stack probe
-        call C_FUNC(_ZN2Js19UnboxAsmJsArgumentsEPNS_14ScriptFunctionEPPvPcNS_8CallInfoEb)
+        call C_FUNC(_ZN2Js19UnboxAsmJsArgumentsEPNS_14ScriptFunctionEPPvPcNS_8CallInfoE)
         // rax = target function address
 
-        // move first 4 arguments into registers.
-        // don't know types other than arg0 (which is ScriptFunction *), so put in both xmm and general purpose registers
         mov rdi, r12 // arg0: func
 
-        // int GetArgsSizesArray(ScriptFunction* func)
-        // get args sizes of target asmjs function
-        // rdi has ScriptFunction*
-        push r13
-        push rax
-        push rdi
-        sub rsp, 8h
-        call C_FUNC(_ZN2Js17GetArgsSizesArrayEPNS_14ScriptFunctionE)
-        mov r13, rax                    // r13: arg size
-        add rsp, 8h
-        pop rdi
-        pop rax
-
-        // NOTE: Below xmm usage is non-standard.
-
-        // Move 3 args to regs per convention. rdi already has first arg: ScriptFunction*
-        push r12
-        // r12->unboxed args
-        lea r12, [rsp + 18h] // rsp + size of(r12 + r13 + ScriptFunction*)
-
-        // r13 is arg size
-        cmp dword ptr [r13], 10h
-        je SIMDArg2
-        mov rsi, [r12]                  // arg1
-        movq xmm1, qword ptr [r12]      // arg1
-        add r12, 8h
-        jmp Arg3
-    SIMDArg2:
-        movups xmm1, xmmword ptr[r12]
-        add r12, 10h
-    Arg3:
-        cmp dword ptr [r13 + 4h], 10h
-        je SIMDArg3
-        mov rdx, [r12]                  // arg2
-        movq xmm2, qword ptr [r12]      // arg2
-        add r12, 8h
-        jmp Arg4
-    SIMDArg3:
-        movups xmm2, xmmword ptr[r12]
-        add r12, 10h
-    Arg4:
-        cmp dword ptr [r13 + 8h], 10h
-        je SIMDArg4
-        mov rcx, [r12]                  // arg3
-        movq xmm3, qword ptr [r12]      // arg3
-        jmp ArgsDone
-   SIMDArg4:
-        movups xmm3, xmmword ptr [r12]
-
-   ArgsDone:
-        pop r12         // r12: func
-        pop r13         // r13: orig stack pointer
-
-        // "home" arg0. other args were read from stack and already homed.
         mov [rsp + 00h], rdi
 
         // call entry point
@@ -366,7 +257,7 @@ NESTED_ENTRY _ZN2Js23AsmJsExternalEntryPointEPNS_16RecyclableObjectENS_8CallInfo
         movups [rsp + 10h], xmm0
         lea r12, [rsp + 10h]
         mov qword ptr [rsp], r12
-        call C_FUNC(_ZN2Js19BoxAsmJsReturnValueEPNS_14ScriptFunctionEidfDv4_f)
+        call C_FUNC(_ZN2Js19BoxAsmJsReturnValueEPNS_14ScriptFunctionEldfDv4_f)
 
         mov rsp, r13 // restore stack pointer
     Epilogue:
@@ -378,5 +269,74 @@ NESTED_ENTRY _ZN2Js23AsmJsExternalEntryPointEPNS_16RecyclableObjectENS_8CallInfo
 
         ret
 NESTED_END _ZN2Js23AsmJsExternalEntryPointEPNS_16RecyclableObjectENS_8CallInfoEz, _TEXT
+
+
+//============================================================================================================
+// WasmLibrary::WasmDeferredParseExternalThunk
+//============================================================================================================
+
+// Var WasmLibrary::WasmDeferredParseExternalThunk(RecyclableObject* function, CallInfo callInfo, ...)
+.balign 16
+NESTED_ENTRY _ZN2Js11WasmLibrary30WasmDeferredParseExternalThunkEPNS_16RecyclableObjectENS_8CallInfoEz, _TEXT, NoHandler
+        push_nonvol_reg rbp             // push rbp and adjust CFA offset
+        lea  rbp, [rsp]
+
+        set_cfa_register rbp, (2*8)     // Set to compute CFA as: rbp + 16 (sizeof: [rbp] [ReturnAddress])
+
+        // save argument registers used by custom calling convention
+        push rdi
+        push rsi
+        push rdx
+        push rcx
+        push r8
+        push r9
+
+        mov rsi, 0
+        call C_FUNC(_ZN2Js11WasmLibrary27WasmDeferredParseEntryPointEPNS_19AsmJsScriptFunctionEi)
+
+        pop r9
+        pop r8
+        pop rcx
+        pop rdx
+        pop rsi
+        pop rdi
+
+        pop_nonvol_reg rbp
+        jmp rax
+NESTED_END _ZN2Js11WasmLibrary30WasmDeferredParseExternalThunkEPNS_16RecyclableObjectENS_8CallInfoEz, _TEXT
+
+//============================================================================================================
+// WasmLibrary::WasmDeferredParseInternalThunk
+//============================================================================================================
+
+// Var WasmLibrary::WasmDeferredParseInternalThunk(RecyclableObject* function, CallInfo callInfo, ...)
+.balign 16
+NESTED_ENTRY _ZN2Js11WasmLibrary30WasmDeferredParseInternalThunkEPNS_16RecyclableObjectENS_8CallInfoEz, _TEXT, NoHandler
+        push_nonvol_reg rbp             // push rbp and adjust CFA offset
+        lea  rbp, [rsp]
+
+        set_cfa_register rbp, (2*8)     // Set to compute CFA as: rbp + 16 (sizeof: [rbp] [ReturnAddress])
+
+        // save argument registers used by custom calling convention
+        push rdi
+        push rsi
+        push rdx
+        push rcx
+        push r8
+        push r9
+
+        mov rsi, 1
+        call C_FUNC(_ZN2Js11WasmLibrary27WasmDeferredParseEntryPointEPNS_19AsmJsScriptFunctionEi)
+
+        pop r9
+        pop r8
+        pop rcx
+        pop rdx
+        pop rsi
+        pop rdi
+
+        pop_nonvol_reg rbp
+        jmp rax
+NESTED_END _ZN2Js11WasmLibrary30WasmDeferredParseInternalThunkEPNS_16RecyclableObjectENS_8CallInfoEz, _TEXT
 
 #endif // _ENABLE_DYNAMIC_THUNKS

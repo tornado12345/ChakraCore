@@ -7,7 +7,6 @@
 namespace Memory
 {
 class HeapInfo;
-class RecyclerSweep;
 
 // CONSIDER: Templatizing this so that we can have separate leaf large allocations
 // and finalizable allocations
@@ -39,6 +38,8 @@ public:
     void Initialize(HeapInfo * heapInfo, DECLSPEC_GUARD_OVERFLOW uint sizeCat, bool supportFreeList = false);
 
     LargeHeapBlock* AddLargeHeapBlock(DECLSPEC_GUARD_OVERFLOW size_t size, bool nothrow);
+
+    bool SupportFreeList() { return supportFreeList; }
 
     template <ObjectInfoBits attributes, bool nothrow>
     char* Alloc(Recycler * recycler, size_t sizeCat);
@@ -90,6 +91,10 @@ public:
     template <typename TBlockType>
     size_t Check(bool expectFull, bool expectPending, TBlockType * list, TBlockType * tail = nullptr);
 #endif
+#endif
+
+#if ENABLE_MEM_STATS
+    void AggregateBucketStats();
 #endif
 
 private:

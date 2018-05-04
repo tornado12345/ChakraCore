@@ -4,9 +4,14 @@
 //-------------------------------------------------------------------------------------------------------
 #pragma once
 
+/*****************************************************************************************************
+ * This file contains defines that switch feature on or off, or configuration a feature at build time
+ *****************************************************************************************************/
+
 #include "TargetVer.h"
 #include "Warnings.h"
 #include "ChakraCoreVersion.h"
+
 
 //----------------------------------------------------------------------------------------------------
 // Default debug/fretest/release flags values
@@ -58,13 +63,26 @@
 #endif
 
 #if defined(_M_IX86) || defined(_M_ARM)
-#define _M_IX86_OR_ARM32 1
 #define TARGET_32 1
 #endif
 
 #if defined(_M_X64) || defined(_M_ARM64)
-#define _M_X64_OR_ARM64 1
 #define TARGET_64 1
+#endif
+
+#ifndef DECLSPEC_CHPE_GUEST
+// For CHPE build aka Arm64.x86
+// https://osgwiki.com/wiki/ARM64_CHPE
+// On ChakraCore alone we do not support this
+// so we define to nothing to avoid build breaks
+#define DECLSPEC_CHPE_GUEST
+#endif
+
+// Memory Protections
+#ifdef _CONTROL_FLOW_GUARD
+#define PAGE_EXECUTE_RO_TARGETS_INVALID   (PAGE_EXECUTE_READ | PAGE_TARGETS_INVALID)
+#else
+#define PAGE_EXECUTE_RO_TARGETS_INVALID   (PAGE_EXECUTE_READ)
 #endif
 
 //----------------------------------------------------------------------------------------------------
@@ -75,13 +93,13 @@
 // Even if it builds, it may not work properly. Disable at your own risk
 
 // Config options
+#define CONFIG_PARSE_CONFIG_FILE 1
+
 #ifdef _WIN32
 #define CONFIG_CONSOLE_AVAILABLE 1
-#define CONFIG_PARSE_CONFIG_FILE 1
 #define CONFIG_RICH_TRACE_FORMAT 1
 #else
 #define CONFIG_CONSOLE_AVAILABLE 0
-#define CONFIG_PARSE_CONFIG_FILE 0
 #define CONFIG_RICH_TRACE_FORMAT 0
 #endif
 
@@ -91,50 +109,146 @@
 #if defined(_WIN32) || defined(HAS_REAL_ICU)
 #define ENABLE_UNICODE_API 1                        // Enable use of Unicode-related APIs
 #endif
-// Language features
-// xplat-todo: revisit these features
-#ifdef _WIN32
-#define ENABLE_INTL_OBJECT                          // Intl support
+
+// Normalize ICU_VERSION for non-Kit ICU
+#if defined(HAS_ICU) && !defined(ICU_VERSION) && !defined(WINDOWS10_ICU)
+#include "unicode/uvernum.h"
+#define ICU_VERSION U_ICU_VERSION_MAJOR_NUM
 #endif
+
+// Make non-Windows Kit ICU look and act like Windows Kit ICU for better compat
+#if defined(HAS_ICU) && !defined(WINDOWS10_ICU)
+#define U_SHOW_CPLUSPLUS_API 0
+// ICU 55 (Ubuntu 16.04 system default) has uloc_toUnicodeLocale* marked as draft, which is required for Intl
+#if ICU_VERSION > 56
+#define U_DEFAULT_SHOW_DRAFT 0
+#define U_HIDE_DRAFT_API 1
+#endif
+#define U_HIDE_DEPRECATED_API 1
+#define U_HIDE_OBSOLETE_API 1
+#define U_HIDE_INTERNAL_API 1
+#endif
+
+// Language features
+#if !defined(CHAKRACORE_LITE) && (defined(_WIN32) || defined(INTL_ICU))
+#define ENABLE_INTL_OBJECT                          // Intl support
+#define ENABLE_JS_BUILTINS                          // Built In functions support
+#endif
+
+#if defined(_WIN32) && !defined(HAS_ICU)
+#define INTL_WINGLOB 1
+#endif
+
 #define ENABLE_ES6_CHAR_CLASSIFIER                  // ES6 Unicode character classifier support
 
 // Type system features
 #define PERSISTENT_INLINE_CACHES                    // *** TODO: Won't build if disabled currently
-#define SUPPORT_FIXED_FIELDS_ON_PATH_TYPES          // *** TODO: Won't build if disabled currently
+
+#if !DISABLE_JIT
+#define ENABLE_FIXED_FIELDS 1                       // Turn on fixed fields if JIT is enabled
+#endif
+
+#if ENABLE_FIXED_FIELDS
+#define SUPPORT_FIXED_FIELDS_ON_PATH_TYPES
+#endif
+
 
 // xplat-todo: revisit these features
 #ifdef _WIN32
 // dep: TIME_ZONE_INFORMATION, DaylightTimeHelper, Windows.Globalization
 #define ENABLE_GLOBALIZATION
-// dep: IDebugDocumentContext
-#define ENABLE_SCRIPT_DEBUGGING
-// dep: IActiveScriptProfilerCallback, IActiveScriptProfilerHeapEnum
-#define ENABLE_SCRIPT_PROFILING
-#ifndef __clang__
+// #ifndef __clang__
 // xplat-todo: change DISABLE_SEH to ENABLE_SEH and move here
-#define ENABLE_SIMDJS
-#endif
+// #endif
 
 #define ENABLE_CUSTOM_ENTROPY
 #endif
 
-// GC features
+// dep: IDebugDocumentContext
+#if !BUILD_WITHOUT_SCRIPT_DEBUG
+#define ENABLE_SCRIPT_DEBUGGING
+#endif
 
-// Concurrent and Partial GC are disabled on non-Windows builds
-// xplat-todo: re-enable this in the future
-// These are disabled because these GC features depend on hardware
-// write-watch support that the Windows Memory Manager provides.
+// GC features
+#define BUCKETIZE_MEDIUM_ALLOCATIONS 1              // *** TODO: Won't build if disabled currently
+#define SMALLBLOCK_MEDIUM_ALLOC 1                   // *** TODO: Won't build if disabled currently
+#define LARGEHEAPBLOCK_ENCODING 1                   // Large heap block metadata encoding
+#ifndef CHAKRACORE_LITE
+#define IDLE_DECOMMIT_ENABLED 1                     // Idle Decommit
+#endif
+
+#if defined(NTBUILD) || defined(ENABLE_DEBUG_CONFIG_OPTIONS)
+#define RECYCLER_PAGE_HEAP                          // PageHeap support, on by default, off in ChakraCore release build
+#endif
+
+#define USE_FEWER_PAGES_PER_BLOCK 1
+
+#ifndef ENABLE_VALGRIND
+#define ENABLE_CONCURRENT_GC 1
+#ifdef _WIN32
+#define ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP 1 // Needs ENABLE_CONCURRENT_GC to be enabled for this to be enabled.
+#else
+#define ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP 0 // Needs ENABLE_CONCURRENT_GC to be enabled for this to be enabled.
+#endif
+#else
+#define ENABLE_CONCURRENT_GC 0
+#define ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP 0 // Needs ENABLE_CONCURRENT_GC to be enabled for this to be enabled.
+#endif
+
 #ifdef _WIN32
 #define SYSINFO_IMAGE_BASE_AVAILABLE 1
-#define ENABLE_CONCURRENT_GC 1
+#define SUPPORT_WIN32_SLIST 1
+#ifndef CHAKRACORE_LITE
+#define ENABLE_JS_ETW                               // ETW support
+#endif
+#else
+#define SYSINFO_IMAGE_BASE_AVAILABLE 0
+#define SUPPORT_WIN32_SLIST 0
+#endif
+
+#ifdef CHAKRACORE_LITE
+#define USE_VPM_TABLE 0
+#else
+#define USE_VPM_TABLE 1
+#endif
+
+// xplat-todo: fix up vpm.64b.h generation to generate correctly
+// templatized code
+#if defined(_MSC_VER) && !defined(__clang__)
+#define USE_STATIC_VPM 1 // Disable to force generation at runtime
+#else
+#define USE_STATIC_VPM 0
+#endif
+
+
+#if ENABLE_CONCURRENT_GC
+// Write-barrier refers to a software write barrier implementation using a card table.
+// Write watch refers to a hardware backed write-watch feature supported by the Windows memory manager.
+// Both are used for detecting changes to memory for concurrent and partial GC.
+// RECYCLER_WRITE_BARRIER controls the former, RECYCLER_WRITE_WATCH controls the latter.
+// GLOBAL_ENABLE_WRITE_BARRIER controls the smart pointer wrapper at compile time, every Field annotation on the
+// recycler allocated class will take effect if GLOBAL_ENABLE_WRITE_BARRIER is 1, otherwise only the class declared
+// with FieldWithBarrier annotations use the WriteBarrierPtr<>, see WriteBarrierMacros.h and RecyclerPointers.h for detail
+#define RECYCLER_WRITE_BARRIER                      // Write Barrier support
+#ifdef _WIN32
+#define RECYCLER_WRITE_WATCH                        // Support hardware write watch
+#endif
+
+#ifdef RECYCLER_WRITE_BARRIER
+#if !GLOBAL_ENABLE_WRITE_BARRIER
+#ifdef _WIN32
+#define GLOBAL_ENABLE_WRITE_BARRIER 0
+#else
+#define GLOBAL_ENABLE_WRITE_BARRIER 1
+#endif
+#endif
+#endif
+
 #define ENABLE_PARTIAL_GC 1
 #define ENABLE_BACKGROUND_PAGE_ZEROING 1
 #define ENABLE_BACKGROUND_PAGE_FREEING 1
 #define ENABLE_RECYCLER_TYPE_TRACKING 1
-#define ENABLE_JS_ETW                               // ETW support
 #else
-#define SYSINFO_IMAGE_BASE_AVAILABLE 0
-#define ENABLE_CONCURRENT_GC 0
 #define ENABLE_PARTIAL_GC 0
 #define ENABLE_BACKGROUND_PAGE_ZEROING 0
 #define ENABLE_BACKGROUND_PAGE_FREEING 0
@@ -145,12 +259,9 @@
 #error "Background page zeroing can't be turned on if freeing pages in the background is disabled"
 #endif
 
-#define BUCKETIZE_MEDIUM_ALLOCATIONS 1              // *** TODO: Won't build if disabled currently
-#define SMALLBLOCK_MEDIUM_ALLOC 1                   // *** TODO: Won't build if disabled currently
-#define LARGEHEAPBLOCK_ENCODING 1                   // Large heap block metadata encoding
-#define RECYCLER_WRITE_BARRIER                      // Write Barrier support
-#define IDLE_DECOMMIT_ENABLED 1                     // Idle Decommit
-#define RECYCLER_PAGE_HEAP                          // PageHeap support
+#if defined(_WIN32) && !GLOBAL_ENABLE_WRITE_BARRIER
+#define RECYCLER_VISITED_HOST
+#endif
 
 // JIT features
 
@@ -170,39 +281,58 @@
 #define ENABLE_PROFILE_INFO 1
 
 #define ENABLE_BACKGROUND_JOB_PROCESSOR 1
-#define ENABLE_BACKGROUND_PARSING 1
 #define ENABLE_COPYONACCESS_ARRAY 1
 #ifndef DYNAMIC_INTERPRETER_THUNK
-#if defined(_M_IX86_OR_ARM32) || defined(_M_X64_OR_ARM64)
+#if defined(TARGET_32) || defined(TARGET_64)
 #define DYNAMIC_INTERPRETER_THUNK 1
 #else
 #define DYNAMIC_INTERPRETER_THUNK 0
 #endif
 #endif
+
+// Only enable background parser in debug build.
+#ifdef DBG
+#define ENABLE_BACKGROUND_PARSING 1
+#endif
+
+#if ENABLE_DEBUG_CONFIG_OPTIONS
+#define ALLOW_JIT_REPRO
+#endif
+
 #endif
 
 #if ENABLE_NATIVE_CODEGEN
 #ifdef _WIN32
 #define ENABLE_OOP_NATIVE_CODEGEN 1     // Out of process JIT
 #endif
+
+// ToDo (SaAgarwa): Disable VirtualTypedArray on ARM64 till we make sure it works correctly
+#if defined(_WIN32) && defined(TARGET_64) && !defined(_M_ARM64)
+#define ENABLE_FAST_ARRAYBUFFER 1
+#endif
 #endif
 
 // Other features
 // #define CHAKRA_CORE_DOWN_COMPAT 1
 
-// VS2015 RTM has bugs with constexpr, so require min of VS2015 Update 3 (known good version)
-#if !defined(_MSC_VER) || _MSC_FULL_VER >= 190024210
-#define HAS_CONSTEXPR 1
-#endif
-
-#ifdef HAS_CONSTEXPR
-#define OPT_CONSTEXPR constexpr
+// todo:: Enable vectorcall on NTBUILD. OS#13609380
+#if defined(_WIN32) && !defined(NTBUILD) && defined(_M_IX86)
+#define VECTORCALL __vectorcall
 #else
-#define OPT_CONSTEXPR
+#define VECTORCALL
 #endif
 
 #if defined(ENABLE_DEBUG_CONFIG_OPTIONS) || defined(CHAKRA_CORE_DOWN_COMPAT)
 #define DELAYLOAD_SET_CFG_TARGET 1
+#endif
+
+#ifndef PERFMAP_SIGNAL
+#define PERFMAP_SIGNAL SIGUSR2
+#endif
+
+#ifndef NTBUILD
+#define DELAYLOAD_SECTIONAPI 1
+#define DELAYLOAD_UNLOCKMEMORY 1
 #endif
 
 #ifdef NTBUILD
@@ -214,6 +344,7 @@
 #define ENABLE_DOM_FAST_PATH
 #define EDIT_AND_CONTINUE
 #define ENABLE_JIT_CLAMP
+#define ENABLE_SCRIPT_PROFILING
 #endif
 
 // Telemetry flags
@@ -224,42 +355,17 @@
 // Telemetry features (non-DEBUG related)
 #ifdef ENABLE_BASIC_TELEMETRY
 
-    // These defines can be "overridden" in other headers (e.g. ESBuiltInsTelemetryProvider.h) in case a specific telemetry provider wants to change an option for performance.
-    #define TELEMETRY_OPCODE_OFFSET_ENABLED true              // If the BytecodeOffset and FunctionId are logged.
-    #define TELEMETRY_PROPERTY_OPCODE_FILTER(propertyId) true // Any filter to apply on a per propertyId basis in the opcode handler for GetProperty/TypeofProperty/GetMethodProperty/etc.
-    #define TELEMETRY_OPCODE_GET_PROPERTY_VALUES true         // If no telemetry providers need the values of properties then this option skips getting the value in the TypeofProperty opcode handler.
-
 //    #define TELEMETRY_PROFILED    // If telemetry should capture "Profiled*" operations
-//    #define TELEMETRY_CACHEHIT    // If telemetry should capture data that was gotten with a Cache Hit
+
 //    #define TELEMETRY_JSO         // If telemetry should capture JavascriptOperators (expensive, as it happens during JITed code too, not just interpreted mode)
     #define TELEMETRY_AddToCache    // If telemetry should capture property-gets only when the propertyId is added to the cache (generally this means only the first usage of any feature is logged)
 //    #define TELEMETRY_INTERPRETER // If telemetry should capture more interpreter events compared to just TELEMETRY_AddToCache
 
+     #define TELEMETRY_PROPERTY_OPCODE_FILTER(propertyId) (propertyId < Js::PropertyIds::_countJSOnlyProperty)
 
-    #define TELEMETRY_TRACELOGGING   // Telemetry output using TraceLogging
-//    #define TELEMETRY_OUTPUTPRINT    // Telemetry output using Output::Print
-
-    // Enable/disable specific telemetry providers:
-    #define TELEMETRY_ESB  // Telemetry of ECMAScript Built-Ins usage or detection.
-//    #define TELEMETRY_ARRAY_USAGE // Telemetry of Array usage statistics
-    #define TELEMETRY_DateParse // Telemetry of `Date.parse`
-
-    #ifdef TELEMETRY_ESB
-        // Because ESB telemetry is in-production and has major performance implications, this redefines some of the #defines above to disable non-critical functionality to get more performance.
-        #undef TELEMETRY_OPCODE_OFFSET_ENABLED // Disable the FunctionId+Offset tracker.
-        #define TELEMETRY_OPCODE_OFFSET_ENABLED false
-        #undef TELEMETRY_PROPERTY_OPCODE_FILTER // Redefine the Property Opcode filter to ignore non-built-in properties.
-        #define TELEMETRY_PROPERTY_OPCODE_FILTER(propertyId) (propertyId < Js::PropertyIds::_countJSOnlyProperty)
-        #undef TELEMETRY_OPCODE_GET_PROPERTY_VALUES
-        #define TELEMETRY_OPCODE_GET_PROPERTY_VALUES false
-
-        //#define TELEMETRY_ESB_STRINGS    // Telemetry that uses strings (slow), used for constructor detection for ECMAScript Built-Ins polyfills and Constructor-properties of Chakra-built-ins.
-        //#define TELEMETRY_ESB_GetConstructorPropertyPolyfillDetection // Whether telemetry will inspect the `.constructor` property of every Object instance to determine if it's a polyfill of a known ES built-in.
-    #endif
-
+    #define REJIT_STATS
 #else
 
-    #define TELEMETRY_OPCODE_OFFSET_ENABLED false
     #define TELEMETRY_OPCODE_FILTER(propertyId) false
 
 #endif
@@ -327,36 +433,55 @@
 #ifndef ENABLE_TEST_HOOKS
 #define ENABLE_TEST_HOOKS
 #endif
+#endif // ENABLE_DEBUG_CONFIG_OPTIONS
 
 ////////
 //Time Travel flags
-#ifdef __APPLE__
-#define ENABLE_TTD 0
-#else
+//Include TTD code in the build when building for Chakra (except NT/Edge) or for debug/test builds
+#if defined(ENABLE_SCRIPT_DEBUGGING) && (!defined(NTBUILD) || defined(ENABLE_DEBUG_CONFIG_OPTIONS))
 #define ENABLE_TTD 1
+#else
+#define ENABLE_TTD 0
 #endif
 
 #if ENABLE_TTD
-//A workaround for some unimplemented code parse features (force debug mode) -- Need to set to enable debug attach on recorded traces
-#define TTD_DYNAMIC_DECOMPILATION_AND_JIT_WORK_AROUND 1
+#define TTDAssert(C, M) { if(!(C)) TTDAbort_unrecoverable_error(M); }
+#else
+#define TTDAssert(C, M)
+#endif
 
+#if ENABLE_TTD
 //A workaround for profile based creation of Native Arrays -- we may or may not want to allow since it differs in record/replay and (currently) asserts in our snap compare
 #define TTD_NATIVE_PROFILE_ARRAY_WORK_AROUND 1
 
-//Enable various sanity checking features and asserts
-#define ENABLE_TTD_INTERNAL_DIAGNOSTICS 1
+//See also -- Disabled fast path on property enumeration, random number generation, disabled new/eval code cache, and others.
+//            Disabled ActivationObjectEx and others.
 
-#define TTD_COMPRESSED_OUTPUT 0
+//Force debug or notjit mode
+#define TTD_FORCE_DEBUG_MODE 0
+#define TTD_FORCE_NOJIT_MODE 0
+
+//Enable various sanity checking features and asserts
+#if ENABLE_DEBUG_CONFIG_OPTIONS
+#define ENABLE_TTD_INTERNAL_DIAGNOSTICS 1
+#else
+#define ENABLE_TTD_INTERNAL_DIAGNOSTICS 0
+#endif
+
 #define TTD_LOG_READER TextFormatReader
 #define TTD_LOG_WRITER TextFormatWriter
 
-#if ENABLE_TTD_INTERNAL_DIAGNOSTICS
+//For now always use the (lower performance) text format for snapshots for easier debugging etc.
 #define TTD_SNAP_READER TextFormatReader
 #define TTD_SNAP_WRITER TextFormatWriter
-#else
-#define TTD_SNAP_READER BinaryFormatReader
-#define TTD_SNAP_WRITER BinaryFormatWriter
-#endif
+
+//#if ENABLE_TTD_INTERNAL_DIAGNOSTICS
+//#define TTD_SNAP_READER TextFormatReader
+//#define TTD_SNAP_WRITER TextFormatWriter
+//#else
+//#define TTD_SNAP_READER BinaryFormatReader
+//#define TTD_SNAP_WRITER BinaryFormatWriter
+//#endif
 
 #if ENABLE_TTD_INTERNAL_DIAGNOSTICS
 #define ENABLE_SNAPSHOT_COMPARE 1
@@ -375,11 +500,9 @@
 
 #define ENABLE_TTD_DIAGNOSTICS_TRACING (ENABLE_OBJECT_SOURCE_TRACKING || ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE)
 
-#endif
 //End Time Travel flags
 ////////
-
-#endif // ENABLE_DEBUG_CONFIG_OPTIONS
+#endif
 
 //----------------------------------------------------------------------------------------------------
 // Debug only features
@@ -433,15 +556,10 @@
 #define PROFILE_BAILOUT_RECORD_MEMORY
 #define MEMSPECT_TRACKING
 
-// xplat-todo: Depends on C++ type-info
-// enable later on non-VC++ compilers
-
-#ifdef _WIN32
 #define PROFILE_RECYCLER_ALLOC
 // Needs to compile in debug mode
 // Just needs strings converted
 #define PROFILE_DICTIONARY 1
-#endif
 
 #define PROFILE_STRINGS
 
@@ -465,15 +583,19 @@
 #define ARENA_MEMORY_VERIFY
 #define SEPARATE_ARENA
 
-// xplat-todo: This depends on C++ type-tracking
-// Need to re-enable on non-VC++ compilers
-#ifdef _WIN32
-#define HEAP_TRACK_ALLOC
+#ifndef _WIN32
+#ifdef _X64_OR_ARM64
+#define MAX_NATURAL_ALIGNMENT sizeof(ULONGLONG)
+#define MEMORY_ALLOCATION_ALIGNMENT 16
+#else
+#define MAX_NATURAL_ALIGNMENT sizeof(DWORD)
+#define MEMORY_ALLOCATION_ALIGNMENT 8
+#endif
 #endif
 
+#define HEAP_TRACK_ALLOC
 #define CHECK_MEMORY_LEAK
 #define LEAK_REPORT
-
 
 #define PROJECTION_METADATA_TRACE
 #define ERROR_TRACE
@@ -539,6 +661,20 @@
 // #define RECYCLER_MARK_TRACK
 // #define INTERNAL_MEM_PROTECT_HEAP_ALLOC
 
+#if defined(ENABLE_JS_ETW) || defined(DUMP_FRAGMENTATION_STATS)
+#define ENABLE_MEM_STATS 1
+#define POLY_INLINE_CACHE_SIZE_STATS
+#endif
+
+#define NO_SANITIZE_ADDRESS
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#undef NO_SANITIZE_ADDRESS
+#define NO_SANITIZE_ADDRESS __attribute__((no_sanitize("address")))
+#define NO_SANITIZE_ADDRESS_CHECK
+#endif
+#endif
+
 //----------------------------------------------------------------------------------------------------
 // Disabled features
 //----------------------------------------------------------------------------------------------------
@@ -549,7 +685,7 @@
 // Platform dependent flags
 //----------------------------------------------------------------------------------------------------
 #ifndef INT32VAR
-#if defined(_M_X64_OR_ARM64)
+#if defined(TARGET_64)
 #define INT32VAR 1
 #else
 #define INT32VAR 0
@@ -557,19 +693,33 @@
 #endif
 
 #ifndef FLOATVAR
-#if defined(_M_X64)
+#if defined(TARGET_64)
 #define FLOATVAR 1
 #else
 #define FLOATVAR 0
 #endif
 #endif
 
+
+#ifdef _M_IX86
+#define LOWER_SPLIT_INT64 1
+#else
+#define LOWER_SPLIT_INT64 0
+#endif
+
 #if (defined(_M_IX86) || defined(_M_X64)) && !defined(DISABLE_JIT)
 #define ASMJS_PLAT
 #endif
 
-#if defined(ASMJS_PLAT) && defined(_WIN32)
+#if defined(ASMJS_PLAT)
 #define ENABLE_WASM
+#define ENABLE_WASM_THREADS
+#define ENABLE_WASM_SIMD
+
+#ifdef CAN_BUILD_WABT
+#define ENABLE_WABT
+#endif
+
 #endif
 
 #if _M_IX86
@@ -608,8 +758,7 @@
 #define ENABLE_TRACE
 #endif
 
-// xplat-todo: Capture stack backtrace on non-win32 platforms
-#ifdef _WIN32
+#if !(defined(__clang__) && defined(_M_ARM32_OR_ARM64)) // xplat-todo: ARM
 #if DBG || defined(CHECK_MEMORY_LEAK) || defined(LEAK_REPORT) || defined(TRACK_DISPATCH) || defined(ENABLE_TRACE) || defined(RECYCLER_PAGE_HEAP)
 #define STACK_BACK_TRACE
 #endif
@@ -622,7 +771,9 @@
 #endif
 
 #if defined(STACK_BACK_TRACE) || defined(CONTROL_FLOW_GUARD_LOGGER)
+#ifdef _WIN32
 #define DBGHELP_SYMBOL_MANAGER
+#endif
 #endif
 
 #if defined(TRACK_DISPATCH) || defined(CHECK_MEMORY_LEAK) || defined(LEAK_REPORT)
@@ -633,9 +784,7 @@
 // HEAP_TRACK_ALLOC and RECYCLER_STATS
 #if defined(LEAK_REPORT) || defined(CHECK_MEMORY_LEAK)
 #define RECYCLER_DUMP_OBJECT_GRAPH
-#ifdef _WIN32
 #define HEAP_TRACK_ALLOC
-#endif
 #define RECYCLER_STATS
 #endif
 
@@ -651,9 +800,6 @@
 
 
 #if defined(HEAP_TRACK_ALLOC) || defined(PROFILE_RECYCLER_ALLOC)
-#ifndef _WIN32
-#error "Not yet supported on non-VC++ compiler"
-#endif
 
 #define TRACK_ALLOC
 #define TRACE_OBJECT_LIFETIME           // track a particular object's lifetime
@@ -701,22 +847,13 @@
 #define JS_PROFILE_DATA_INTERFACE 0
 #endif
 
+#define JS_REENTRANCY_FAILFAST 1
+#if DBG || JS_REENTRANCY_FAILFAST
+#define ENABLE_JS_REENTRANCY_CHECK 1
+#else
+#define ENABLE_JS_REENTRANCY_CHECK 0
+#endif
+
 #ifndef PROFILE_DICTIONARY
 #define PROFILE_DICTIONARY 0
 #endif
-
-#ifndef THREAD_LOCAL
-#ifndef __APPLE__
-    #if defined(_MSC_VER) && _MSC_VER <= 1800 // VS2013?
-        #define THREAD_LOCAL __declspec(thread)
-    #else // VS2015+, linux Clang etc.
-        #define THREAD_LOCAL thread_local
-    #endif // VS2013?
-#else // __APPLE__
-    #ifndef __IOS__
-        #define THREAD_LOCAL _Thread_local
-    #else
-        #define THREAD_LOCAL
-    #endif
-#endif // __APPLE__
-#endif // THREAD_LOCAL

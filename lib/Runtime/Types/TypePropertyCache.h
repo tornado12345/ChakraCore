@@ -14,15 +14,15 @@ namespace Js
     class TypePropertyCacheElement
     {
     private:
-        DynamicObject *prototypeObjectWithProperty;
+        Field(DynamicObject *) prototypeObjectWithProperty;
 
         // tag the bit fields to avoid false positive
-        bool tag : 1;
-        bool isInlineSlot : 1;
-        bool isSetPropertyAllowed : 1;
-        bool isMissing : 1;
-        PropertyIndex index;
-        PropertyId id;
+        Field(bool) tag : 1;
+        Field(bool) isInlineSlot : 1;
+        Field(bool) isSetPropertyAllowed : 1;
+        Field(bool) isMissing : 1;
+        Field(PropertyIndex) index;
+        Field(PropertyId) id;
 
     public:
         TypePropertyCacheElement();
@@ -50,7 +50,7 @@ namespace Js
     class TypePropertyCache
     {
     private:
-        TypePropertyCacheElement elements[TypePropertyCache_NumElements];
+        Field(TypePropertyCacheElement) elements[TypePropertyCache_NumElements];
 
     private:
         static size_t ElementIndex(const PropertyId id);
@@ -58,6 +58,7 @@ namespace Js
         bool TryGetIndexForStore(const PropertyId id, PropertyIndex *const index, bool *const isInlineSlot) const;
 
     public:
+        template <bool OutputExistence /*When set, propertyValue represents whether the property exists on the instance, not its actual value*/>
         bool TryGetProperty(const bool checkMissing, RecyclableObject *const propertyObject, const PropertyId propertyId, Var *const propertyValue, ScriptContext *const requestContext, PropertyCacheOperationInfo *const operationInfo, PropertyValueInfo *const propertyValueInfo);
         bool TrySetProperty(RecyclableObject *const object, const PropertyId propertyId, Var propertyValue, ScriptContext *const requestContext, PropertyCacheOperationInfo *const operationInfo, PropertyValueInfo *const propertyValueInfo);
 

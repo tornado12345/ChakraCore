@@ -39,7 +39,7 @@ namespace TTD
             const Js::PropertyRecord* newPropertyRecord = nullptr;
             if(pRecord->IsSymbol)
             {
-                AssertMsg(pRecord->PropertyId == threadContext->GetNextPropertyId(), "We need to do these in the appropriate order!!!");
+                TTDAssert(pRecord->PropertyId == threadContext->GetNextPropertyId(), "We need to do these in the appropriate order!!!");
 
                 newPropertyRecord = threadContext->UncheckedAddPropertyId(pname, plen, /*bind*/false, /*isSymbol*/true);
             }
@@ -49,19 +49,35 @@ namespace TTD
 
                 if(foundProperty != nullptr)
                 {
-                    AssertMsg(pRecord->PropertyId == foundProperty->GetPropertyId(), "Someone is adding property ids before me and not in the same order as during record!!!");
+                    TTDAssert(pRecord->PropertyId == foundProperty->GetPropertyId(), "Someone is adding property ids before me and not in the same order as during record!!!");
 
                     newPropertyRecord = foundProperty;
                 }
                 else
                 {
-                    AssertMsg(pRecord->PropertyId == threadContext->GetNextPropertyId(), "We need to do these in the appropriate order to ensure property ids all match!!!");
+                    TTDAssert(pRecord->PropertyId == threadContext->GetNextPropertyId(), "We need to do these in the appropriate order to ensure property ids all match!!!");
 
                     newPropertyRecord = threadContext->UncheckedAddPropertyId(pname, plen, /*bind*/pRecord->IsBound, /*isSymbol*/false);
                 }
             }
 
             return newPropertyRecord;
+        }
+
+        void EmitPropertyRecordAsSnapPropertyRecord(const Js::PropertyRecord* pRecord, FileWriter* writer, NSTokens::Separator separator)
+        {
+            writer->WriteRecordStart(separator);
+
+            writer->WriteUInt32(NSTokens::Key::propertyId, pRecord->GetPropertyId());
+
+            writer->WriteBool(NSTokens::Key::isNumeric, pRecord->IsNumeric(), NSTokens::Separator::CommaSeparator);
+            writer->WriteBool(NSTokens::Key::isBound, pRecord->IsBound(), NSTokens::Separator::CommaSeparator);
+            writer->WriteBool(NSTokens::Key::isSymbol, pRecord->IsSymbol(), NSTokens::Separator::CommaSeparator);
+
+            writer->WriteKey(NSTokens::Key::name, NSTokens::Separator::CommaSeparator);
+            writer->WriteInlinePropertyRecordName(pRecord->GetBuffer(), pRecord->GetLength());
+
+            writer->WriteRecordEnd();
         }
 
         void EmitSnapPropertyRecord(const SnapPropertyRecord* sRecord, FileWriter* writer, NSTokens::Separator separator)
@@ -79,9 +95,9 @@ namespace TTD
             writer->WriteRecordEnd();
         }
 
-        void ParseSnapPropertyRecord(SnapPropertyRecord* sRecord, bool readSeperator, FileReader* reader, SlabAllocator& alloc)
+        void ParseSnapPropertyRecord(SnapPropertyRecord* sRecord, bool readSeparator, FileReader* reader, SlabAllocator& alloc)
         {
-            reader->ReadRecordStart(readSeperator);
+            reader->ReadRecordStart(readSeparator);
 
             sRecord->PropertyId = reader->ReadUInt32(NSTokens::Key::propertyId);
 
@@ -143,9 +159,9 @@ namespace TTD
             writer->WriteRecordEnd();
         }
 
-        void ParseSnapHandler(SnapHandler* snapHandler, bool readSeperator, FileReader* reader, SlabAllocator& alloc)
+        void ParseSnapHandler(SnapHandler* snapHandler, bool readSeparator, FileReader* reader, SlabAllocator& alloc)
         {
-            reader->ReadRecordStart(readSeperator);
+            reader->ReadRecordStart(readSeparator);
 
             snapHandler->HandlerId = reader->ReadAddr(NSTokens::Key::handlerId);
 
@@ -248,9 +264,9 @@ namespace TTD
             writer->WriteRecordEnd();
         }
 
-        void ParseSnapType(SnapType* sType, bool readSeperator, FileReader* reader, SlabAllocator& alloc, const TTDIdentifierDictionary<TTD_PTR_ID, SnapHandler*>& typeHandlerMap)
+        void ParseSnapType(SnapType* sType, bool readSeparator, FileReader* reader, SlabAllocator& alloc, const TTDIdentifierDictionary<TTD_PTR_ID, SnapHandler*>& typeHandlerMap)
         {
-            reader->ReadRecordStart(readSeperator);
+            reader->ReadRecordStart(readSeparator);
 
             sType->TypePtrId = reader->ReadAddr(NSTokens::Key::typeId);
 

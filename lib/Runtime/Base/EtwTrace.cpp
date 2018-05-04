@@ -10,6 +10,7 @@
 
 using namespace Js;
 
+#ifndef ENABLE_JS_LTTNG
 //
 // This C style callback is invoked by ETW when a trace session is started/stopped
 // by an ETW controller for the Jscript and MSHTML providers.
@@ -47,6 +48,7 @@ void EtwCallbackApi::OnSessionChange(ULONG controlCode, PVOID callbackContext)
         }
     }
 }
+#endif
 
 //
 // Registers the ETW provider - this is usually done on Jscript DLL load
@@ -54,7 +56,9 @@ void EtwCallbackApi::OnSessionChange(ULONG controlCode, PVOID callbackContext)
 //
 void EtwTrace::Register()
 {
+#ifndef ENABLE_JS_LTTNG
     EtwTraceCore::Register();
+#endif
 
 #ifdef TEST_ETW_EVENTS
     TestEtwEventSink::Load();
@@ -66,8 +70,10 @@ void EtwTrace::Register()
 //
 void EtwTrace::UnRegister()
 {
+#ifndef ENABLE_JS_LTTNG
     EtwTraceCore::UnRegister();
-
+#endif
+    
 #ifdef TEST_ETW_EVENTS
     TestEtwEventSink::Unload();
 #endif
@@ -96,7 +102,7 @@ void EtwTrace::PerformRundown(bool start)
     while(threadContext != nullptr)
     {
         // Take etw rundown lock on this thread context
-        AutoCriticalSection autoEtwRundownCs(threadContext->GetEtwRundownCriticalSection());
+        AutoCriticalSection autoEtwRundownCs(threadContext->GetFunctionBodyLock());
 
         ScriptContext* scriptContext = threadContext->GetScriptContextList();
         while(scriptContext != NULL)
@@ -147,6 +153,7 @@ void EtwTrace::PerformRundown(bool start)
 
             scriptContext->MapFunction([&start] (FunctionBody* body)
             {
+#if DYNAMIC_INTERPRETER_THUNK
                 if(body->HasInterpreterThunkGenerated())
                 {
                     if(start)
@@ -158,7 +165,9 @@ void EtwTrace::PerformRundown(bool start)
                         LogMethodInterpretedThunkEvent(EventWriteMethodDCEnd, body);
                     }
                 }
+#endif
 
+#if ENABLE_NATIVE_CODEGEN
                 body->MapEntryPoints([&](int index, FunctionEntryPointInfo * entryPoint)
                 {
                     if(entryPoint->IsCodeGenDone())
@@ -174,23 +183,32 @@ void EtwTrace::PerformRundown(bool start)
                     }
                 });
 
-                body->MapLoopHeadersWithLock([&](uint loopNumber, LoopHeader* header)
+                // the functionBody may have not have bytecode generated yet before registering to utf8SourceInfo
+                // accessing MapLoopHeaders in background thread can causes the functionBody counters locked for updating
+                // and cause assertion when bytecode generation is done and updating bytecodeCount counter on functionBody
+                // so check if the functionBody has done loopbody codegen in advance to not call into Map function in case 
+                // loopbody codegen is not done yet
+                if (body->GetHasDoneLoopBodyCodeGen())
                 {
-                    header->MapEntryPoints([&](int index, LoopEntryPointInfo * entryPoint)
+                    body->MapLoopHeadersWithLock([&](uint loopNumber, LoopHeader* header)
                     {
-                        if(entryPoint->IsCodeGenDone())
+                        header->MapEntryPoints([&](int index, LoopEntryPointInfo * entryPoint)
                         {
-                            if(start)
+                            if (entryPoint->IsCodeGenDone())
                             {
-                                LogLoopBodyEventBG(EventWriteMethodDCStart, body, header, entryPoint, ((uint16)body->GetLoopNumberWithLock(header)));
+                                if (start)
+                                {
+                                    LogLoopBodyEvent(EventWriteMethodDCStart, body, entryPoint, ((uint16)body->GetLoopNumberWithLock(header)));
+                                }
+                                else
+                                {
+                                    LogLoopBodyEvent(EventWriteMethodDCEnd, body, entryPoint, ((uint16)body->GetLoopNumberWithLock(header)));
+                                }
                             }
-                            else
-                            {
-                                LogLoopBodyEventBG(EventWriteMethodDCEnd, body, header, entryPoint, ((uint16)body->GetLoopNumberWithLock(header)));
-                            }
-                        }
+                        });
                     });
-                });
+                }
+#endif
             });
 
             scriptContext = scriptContext->next;
@@ -260,33 +278,57 @@ void EtwTrace::LogSourceUnloadEvents(ScriptContext* scriptContext)
 
 void EtwTrace::LogMethodInterpreterThunkLoadEvent(FunctionBody* body)
 {
+#if DYNAMIC_INTERPRETER_THUNK
     LogMethodInterpretedThunkEvent(EventWriteMethodLoad, body);
+#else
+    Assert(false); // Caller should not be enabled if Dynamic Interpreter Thunks are disabled
+#endif
 }
 
 void EtwTrace::LogMethodNativeLoadEvent(FunctionBody* body, FunctionEntryPointInfo* entryPoint)
 {
+#if ENABLE_NATIVE_CODEGEN
     LogMethodNativeEvent(EventWriteMethodLoad, body, entryPoint);
+#else
+    Assert(false); // Caller should not be enabled if JIT is disabled
+#endif
 }
 
-void EtwTrace::LogLoopBodyLoadEvent(FunctionBody* body, LoopHeader* loopHeader, LoopEntryPointInfo* entryPoint, uint16 loopNumber)
+void EtwTrace::LogLoopBodyLoadEvent(FunctionBody* body, LoopEntryPointInfo* entryPoint, uint16 loopNumber)
 {
-    LogLoopBodyEventBG(EventWriteMethodLoad, body, loopHeader, entryPoint, loopNumber);
+#if ENABLE_NATIVE_CODEGEN
+    LogLoopBodyEvent(EventWriteMethodLoad, body, entryPoint, loopNumber);
+#else
+    Assert(false); // Caller should not be enabled if JIT is disabled
+#endif
 }
 
 void EtwTrace::LogMethodInterpreterThunkUnloadEvent(FunctionBody* body)
 {
+#if DYNAMIC_INTERPRETER_THUNK
     LogMethodInterpretedThunkEvent(EventWriteMethodUnload, body);
+#else
+Assert(false); // Caller should not be enabled if dynamic interpreter thunks are disabled
+#endif
 }
 
 
 void EtwTrace::LogMethodNativeUnloadEvent(FunctionBody* body, FunctionEntryPointInfo* entryPoint)
 {
+#if ENABLE_NATIVE_CODEGEN
     LogMethodNativeEvent(EventWriteMethodUnload, body, entryPoint);
+#else
+    Assert(false); // Caller should not be enabled if JIT is disabled
+#endif
 }
 
-void EtwTrace::LogLoopBodyUnloadEvent(FunctionBody* body, LoopHeader* loopHeader, LoopEntryPointInfo* entryPoint)
+void EtwTrace::LogLoopBodyUnloadEvent(FunctionBody* body, LoopEntryPointInfo* entryPoint, uint loopNumber)
 {
-    LogLoopBodyEvent(EventWriteMethodUnload, body, loopHeader, entryPoint);
+#if ENABLE_NATIVE_CODEGEN
+    LogLoopBodyEvent(EventWriteMethodUnload, body, entryPoint, loopNumber);
+#else
+Assert(false); // Caller should not be enabled if JIT is disabled
+#endif
 }
 
 

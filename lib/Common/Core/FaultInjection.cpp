@@ -370,14 +370,14 @@ namespace Js
     } FUNCTION_SIGNATURES, *PFUNCTION_SIGNATURES;
 
     // function address ranges of each signature
-    // use for faster address matching instead of symbol table lookup when reproing
+    // use for faster address matching instead of symbol table lookup when reproducing
     PFUNCTION_SIGNATURES baselineFuncSigs[FaultInjection::MAX_FRAME_COUNT] = { 0 };
     // record hit count of each frame when Faults are injected.
     unsigned int stackMatchRank[FaultInjection::MAX_FRAME_COUNT] = { 0 };
 
 #define FAULT_TYPE(x) _u(#x),\
 
-    char16 *FaultInjection::FaultTypeNames[] =
+    const char16 *FaultInjection::FaultTypeNames[] =
     {
 #include "FaultTypes.h"
     };
@@ -850,8 +850,22 @@ namespace Js
     }
 
     static bool faultInjectionDebug = false;
-    bool FaultInjection::InstallExceptionFilters()
+    static bool triedToInstallExceptionFilter = false;
+    static CriticalSection csFautInjection;
+    void FaultInjection::InstallExceptionFilters()
     {
+        if (triedToInstallExceptionFilter)
+        {
+            return;
+        }
+        
+        AutoCriticalSection autoCS(&csFautInjection);
+        if (triedToInstallExceptionFilter)
+        {
+            return;
+        }
+        triedToInstallExceptionFilter = true;
+
         if (GetEnvironmentVariable(_u("FAULTINJECTION_DEBUG"), nullptr, 0) != 0)
         {
             faultInjectionDebug = true;
@@ -863,7 +877,7 @@ namespace Js
             // when the exception filter is handling stack overflow exception
             if (!FaultInjection::Global.InitializeSym())
             {
-                return false;
+                return;
             }
             //C28725:    Use Watson instead of this SetUnhandledExceptionFilter.
 #pragma prefast(suppress: 28725)
@@ -892,9 +906,7 @@ namespace Js
                     return EXCEPTION_CONTINUE_SEARCH;
                 }
             });
-            return true;
         }
-        return false;
     }
 
     void FaultInjection::RemoveExceptionFilters()
@@ -1018,9 +1030,9 @@ namespace Js
         }
 
         // install exception filter to smart dump for faultinjection
-        // when reproing in debugger, only let debugger catch the exception
+        // when reproducing in debugger, only let debugger catch the exception
         // can't do this in ctor because the global flags are not initialized yet
-        static auto dummy = InstallExceptionFilters();
+        InstallExceptionFilters();
 
         bool validInjectionPoint = IsFaultEnabled(fType);
         if (!validInjectionPoint)
@@ -1095,7 +1107,7 @@ namespace Js
         // try to lookup stack hash, to see if it matches
         if (!shouldInjectionFault)
         {
-            const static UINT_PTR expectedHash = HexStrToAddress((LPCWSTR)globalFlags.FaultInjectionStackHash);
+            const UINT_PTR expectedHash = HexStrToAddress((LPCWSTR)globalFlags.FaultInjectionStackHash);
             if (expectedHash != 0)
             {
                 void* StackFrames[MAX_FRAME_COUNT];
@@ -1223,7 +1235,7 @@ namespace Js
         //analyze duplication
         uintptr_t savedOffset = 0;
         auto& mainModule = modulePath;
-        GetModuleFileName(NULL, mainModule, MAX_PATH);
+        PlatformAgnostic::SystemInfo::GetBinaryLocation(mainModule, MAX_PATH);
         // multiple session of Fault Injection run shares the single crash offset recording file
         _snwprintf_s(filename, _TRUNCATE, _u("%s.FICrashes.txt"), mainModule);
 
@@ -1286,6 +1298,10 @@ namespace Js
             fflush(stderr);
         }
 
+        if (globalFlags.FaultInjection == InstallExceptionHandlerOnly)
+        {
+            needDump = true;
+        }
 
         // create dump for this crash
         if (needDump)

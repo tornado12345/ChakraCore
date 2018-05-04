@@ -7,7 +7,7 @@
 extern "C"
 {
 #ifdef _M_IX86
-    void __cdecl _chkstk(int);
+    DECLSPEC_CHPE_GUEST void __cdecl _chkstk(int);
 #else
     void __cdecl __chkstk(int);
 #endif
@@ -16,6 +16,7 @@ extern "C"
 #ifdef _CONTROL_FLOW_GUARD
 extern "C" PVOID __guard_check_icall_fptr;
 #endif
+
 
 namespace IR
 {

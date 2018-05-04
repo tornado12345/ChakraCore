@@ -111,7 +111,7 @@ const MHR g_rgmhr[] =
     /*0x800401F5*/ MAPHR(CO_E_APPNOTFOUND, VBSERR_CantCreateObject),
     /*0x800401FE*/ MAPHR(CO_E_APPDIDNTREG, VBSERR_CantCreateObject),
 
-#if _WIN32 || _WIN64
+#if _WIN32
     // FACILITY_WIN32 errors
     /*0x80070005*/ MAPHR(E_ACCESSDENIED, VBSERR_PermissionDenied),
     /*0x8007000E*/ MAPHR(E_OUTOFMEMORY, VBSERR_OutOfMemory),
@@ -120,7 +120,7 @@ const MHR g_rgmhr[] =
 
     // FACILITY_WINDOWS
     /*0x80080005*/ MAPHR(CO_E_SERVER_EXEC_FAILURE, VBSERR_CantCreateObject),
-#endif // _WIN32 || _WIN64
+#endif // _WIN32
 };
 const int32 kcmhr = sizeof(g_rgmhr) / sizeof(g_rgmhr[0]);
 
@@ -198,8 +198,7 @@ void ScriptException::Free(void)
 
 void ScriptException::GetError(HRESULT *phr, EXCEPINFO *pei)
 {
-    AssertMem(phr);
-    AssertMemN(pei);
+    Assert(phr);
 
     if (HR(SCRIPT_E_RECORDED) == *phr)
     {
@@ -227,11 +226,6 @@ CompileScriptException::~CompileScriptException()
     SysFreeString(bstrLine);
 }
 
-void CompileScriptException::Clear()
-{
-    memset(this, 0, sizeof(*this));
-}
-
 void CompileScriptException::Free()
 {
     ScriptException::Free();
@@ -243,13 +237,24 @@ void CompileScriptException::Free()
     }
 }
 
+void CompileScriptException::CopyInto(CompileScriptException* pse)
+{
+    ScriptException::CopyInto(pse);
+
+    pse->line = this->line;
+    pse->ichMinLine = this->ichMinLine;
+    pse->hasLineNumberInfo = this->hasLineNumberInfo;
+
+    if (this->bstrLine)
+    {
+        pse->bstrLine = SysAllocStringLen(this->bstrLine, SysStringLen(this->bstrLine));
+    }
+}
+
 HRESULT  CompileScriptException::ProcessError(IScanner * pScan, HRESULT hr, ParseNode * pnodeBase)
 {
-    if (nullptr == this)
-        return hr;
-
     // fill in the ScriptException structure
-    Clear();
+    Free();
     ei.scode = GetScode(MapHr(hr));
 
     // get the error string
@@ -267,7 +272,7 @@ HRESULT  CompileScriptException::ProcessError(IScanner * pScan, HRESULT hr, Pars
     if (nullptr == pnodeBase && nullptr != pScan)
     {
         // parsing phase - get the line number from the scanner
-        AssertMem(pScan);
+        Assert(pScan);
         this->hasLineNumberInfo = true;
         pScan->GetErrorLineInfo(this->ichMin, this->ichLim, this->line, this->ichMinLine);
 
@@ -286,7 +291,7 @@ HRESULT  CompileScriptException::ProcessError(IScanner * pScan, HRESULT hr, Pars
         // Remove E_FAIL once we have this feature.
         // error during code gen - no line number info available
         // E_ABORT may result if compilation does stack probe while thread is in disabled state.
-        Assert(hr == JSERR_WasmCompileError || hr == JSERR_AsmJsCompileError || hr == ERRnoMemory || hr == VBSERR_OutOfStack || hr == E_OUTOFMEMORY || hr == E_FAIL || hr == E_ABORT);
+        Assert(hr == WASMERR_WasmCompileError || hr == JSERR_AsmJsCompileError || hr == ERRnoMemory || hr == VBSERR_OutOfStack || hr == E_OUTOFMEMORY || hr == E_FAIL || hr == E_ABORT);
     }
     return SCRIPT_E_RECORDED;
 }

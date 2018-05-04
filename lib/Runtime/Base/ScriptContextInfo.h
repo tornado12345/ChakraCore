@@ -17,6 +17,7 @@ public:
     virtual intptr_t GetNegativeZeroAddr() const = 0;
     virtual intptr_t GetNumberTypeStaticAddr() const = 0;
     virtual intptr_t GetStringTypeStaticAddr() const = 0;
+    virtual intptr_t GetSymbolTypeStaticAddr() const = 0;
     virtual intptr_t GetObjectTypeAddr() const = 0;
     virtual intptr_t GetObjectHeaderInlinedTypeAddr() const = 0;
     virtual intptr_t GetRegexTypeAddr() const = 0;
@@ -35,7 +36,6 @@ public:
     virtual intptr_t GetNumberAllocatorAddr() const = 0;
     virtual intptr_t GetRecyclerAddr() const = 0;
     virtual bool GetRecyclerAllowNativeCodeBumpAllocation() const = 0;
-    virtual bool IsSIMDEnabled() const = 0;
     virtual bool IsPRNGSeeded() const = 0;
     virtual intptr_t GetBuiltinFunctionsBaseAddr() const = 0;
 
@@ -48,12 +48,16 @@ public:
 
     virtual bool IsClosed() const = 0;
 
-    virtual Js::Var* GetModuleExportSlotArrayAddress(uint moduleIndex, uint slotIndex) = 0;
+    virtual Field(Js::Var)* GetModuleExportSlotArrayAddress(uint moduleIndex, uint slotIndex) = 0;
 
+#ifdef ENABLE_SCRIPT_DEBUGGING
     virtual intptr_t GetDebuggingFlagsAddr() const = 0;
     virtual intptr_t GetDebugStepTypeAddr() const = 0;
     virtual intptr_t GetDebugFrameAddressAddr() const = 0;
     virtual intptr_t GetDebugScriptIdWhenSetAddr() const = 0;
+#endif
+
+    virtual intptr_t GetChakraLibAddr() const = 0;
 
 #if ENABLE_NATIVE_CODEGEN
     virtual void AddToDOMFastPathHelperMap(intptr_t funcInfoAddr, IR::JnHelperMethod helper) = 0;

@@ -23,7 +23,13 @@ enum ErrorReason
     Fatal_Debugger_AttachDetach_Failure = 15,
     Fatal_EntryExitRecordCorruption = 16,
     Fatal_UnexpectedExceptionHandling = 17,
-    Fatal_RpcFailure = 18
+    Fatal_RpcFailure = 18,
+    Fatal_JsReentrancy_Error = 19,
+    Fatal_TTDAbort = 20,
+    Fatal_Failed_API_Result = 21,
+    Fatal_OutOfMemory = 22,
+    // Unused = 23,
+    Fatal_JsBuiltIn_Error = 24,
 };
 
 extern "C" void ReportFatalException(
@@ -37,36 +43,39 @@ extern "C" void ReportFatalException(
 void JavascriptDispatch_OOM_fatal_error(
     __in ULONG_PTR context);
 
-void CustomHeap_BadPageState_fatal_error(
+void CustomHeap_BadPageState_unrecoverable_error(
     __in ULONG_PTR context);
 
-void Amd64StackWalkerOutOfContexts_fatal_error(
+void Amd64StackWalkerOutOfContexts_unrecoverable_error(
     __in ULONG_PTR context);
 
-void FailedToBox_OOM_fatal_error(
+void FailedToBox_OOM_unrecoverable_error(
     __in ULONG_PTR context);
 
-#if defined(RECYCLER_WRITE_BARRIER) && defined(_M_X64_OR_ARM64)
-void X64WriteBarrier_OOM_fatal_error();
+#if defined(RECYCLER_WRITE_BARRIER) && defined(TARGET_64)
+void X64WriteBarrier_OOM_unrecoverable_error();
 #endif
 
 void DebugHeap_OOM_fatal_error();
 
-void MarkStack_OOM_fatal_error();
+void MarkStack_OOM_unrecoverable_error();
 
 void Binary_Inconsistency_fatal_error();
 void Version_Inconsistency_fatal_error();
-void EntryExitRecord_Corrupted_fatal_error();
-void UnexpectedExceptionHandling_fatal_error(EXCEPTION_POINTERS * originalException);
+void EntryExitRecord_Corrupted_unrecoverable_error();
+void UnexpectedExceptionHandling_fatal_error();
 
 #ifdef LARGEHEAPBLOCK_ENCODING
 void LargeHeapBlock_Metadata_Corrupted(
     __in ULONG_PTR context, __in unsigned char calculatedCheckSum);
 #endif
 
-void FromDOM_NoScriptScope_fatal_error();
-void Debugger_AttachDetach_fatal_error(HRESULT hr);
-void RpcFailure_fatal_error(HRESULT hr);
+void FromDOM_NoScriptScope_unrecoverable_error();
+void Debugger_AttachDetach_unrecoverable_error(HRESULT hr);
+void RpcFailure_unrecoverable_error(HRESULT hr);
+void OutOfMemory_unrecoverable_error();
+void RecyclerSingleAllocationLimit_unrecoverable_error();
+void MemGCSingleAllocationLimit_unrecoverable_error();
 
 #ifndef DISABLE_SEH
 // RtlReportException is available on Vista and up, but we cannot use it for OOB release.

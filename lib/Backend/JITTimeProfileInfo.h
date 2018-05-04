@@ -17,6 +17,7 @@ public:
         __out ProfileDataIDL * data,
         bool isForegroundJIT);
 
+    const Js::LdLenInfo * GetLdLenInfo(Js::ProfileId ldLenId) const;
     const Js::LdElemInfo * GetLdElemInfo(Js::ProfileId ldElemId) const;
     const Js::StElemInfo * GetStElemInfo(Js::ProfileId stElemId) const;
 
@@ -34,12 +35,9 @@ public:
     Js::ImplicitCallFlags GetImplicitCallFlags() const;
     Js::LoopFlags GetLoopFlags(uint loopNum) const;
 
-    uint16 GetConstantArgInfo(Js::ProfileId callSiteId) const;
+    uint GetLoopCount() const;
 
-    void DisableAggressiveIntTypeSpec(bool isLoopBody);
-    void DisableStackArgOpt();
-    void DisableSwitchOpt();
-    void DisableTrackCompoundedIntOverflow();
+    uint16 GetConstantArgInfo(Js::ProfileId callSiteId) const;
 
     bool IsModulusOpByPowerOf2(Js::ProfileId profileId) const;
     bool IsAggressiveIntTypeSpecDisabled(const bool isJitLoopBody) const;
@@ -68,6 +66,7 @@ public:
     bool IsLoopImplicitCallInfoDisabled() const;
     bool IsPowIntIntTypeSpecDisabled() const;
     bool IsTagCheckDisabled() const;
+    bool IsOptimizeTryFinallyDisabled() const;
 
 private:
     enum ProfileDataFlags : int64
@@ -108,7 +107,8 @@ private:
         Flags_disableStackArgOpt = 1ll << 32,
         Flags_disableLoopImplicitCallInfo = 1ll << 33,
         Flags_disablePowIntIntTypeSpec = 1ll << 34,
-        Flags_disableTagCheck = 1ll << 35
+        Flags_disableTagCheck = 1ll << 35,
+        Flags_disableOptimizeTryFinally = 1ll << 36
     };
 
     Js::ProfileId GetProfiledArrayCallSiteCount() const;
@@ -119,7 +119,6 @@ private:
     Js::ProfileId GetProfiledSlotCount() const;
     Js::ArgSlot GetProfiledInParamsCount() const;
     uint GetProfiledFldCount() const;
-    uint GetLoopCount() const;
     BVFixed * GetLoopFlags() const;
 
     bool TestFlag(ProfileDataFlags flag) const;

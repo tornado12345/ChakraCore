@@ -7,20 +7,14 @@
 #ifdef ENABLE_WASM
 namespace Wasm
 {
-    struct FunctionBodyReaderInfo
-    {
-        uint32 index;
-        uint32 size;
-        intptr_t startOffset;
-    };
-
     class WasmReaderBase
     {
     public:
-        virtual void SeekToFunctionBody(FunctionBodyReaderInfo readerInfo) = 0;
+        virtual void SeekToFunctionBody(class WasmFunctionInfo* funcInfo) = 0;
         virtual bool IsCurrentFunctionCompleted() const = 0;
         virtual WasmOp ReadExpr() = 0;
         virtual void FunctionEnd() = 0;
+        virtual const uint32 EstimateCurrentFunctionBytecodeSize() const = 0;
         WasmNode m_currentNode;
     };
 } // namespace Wasm

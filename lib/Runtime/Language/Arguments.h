@@ -13,9 +13,8 @@
     va_start(_vl, callInfo);                                        \
     Js::Var* va = (Js::Var*)_vl
 #else
-#if defined(_M_X64) || defined(_M_IX86)
 // We use a custom calling convention to invoke JavascriptMethod based on
-// System V AMD64 ABI. At entry of JavascriptMethod the stack layout is:
+// System ABI. At entry of JavascriptMethod the stack layout is:
 //      [Return Address] [function] [callInfo] [arg0] [arg1] ...
 //
 #define DECLARE_ARGS_VARARRAY_N(va, n)                              \
@@ -29,6 +28,9 @@ inline Js::Var* _get_va(void* addrOfReturnAddress, int n)
 {
     // All args are right after ReturnAddress by custom calling convention
     Js::Var* pArgs = reinterpret_cast<Js::Var*>(addrOfReturnAddress) + 1;
+#ifdef _ARM_
+    n += 2; // ip + fp
+#endif
     return pArgs + n;
 }
 
@@ -58,31 +60,89 @@ inline int _count_args(const T1&, const T2&, const T3&, const T4&, Js::CallInfo 
 {
     return 5;
 }
-
-#else
-#error Not yet implemented
-#endif
 #endif
 
 
 #ifdef _WIN32
-#define CALL_ENTRYPOINT(entryPoint, function, callInfo, ...) \
+#define CALL_ENTRYPOINT_NOASSERT(entryPoint, function, callInfo, ...) \
     entryPoint(function, callInfo, ##__VA_ARGS__)
 #elif defined(_M_X64) || defined(_M_IX86)
 // Call an entryPoint (JavascriptMethod) with custom calling convention.
 //  RDI == function, RSI == callInfo, (RDX/RCX/R8/R9==null/unused),
 //  all parameters on stack.
-#define CALL_ENTRYPOINT(entryPoint, function, callInfo, ...) \
+#define CALL_ENTRYPOINT_NOASSERT(entryPoint, function, callInfo, ...) \
     entryPoint(function, callInfo, nullptr, nullptr, nullptr, nullptr, \
                function, callInfo, ##__VA_ARGS__)
+#elif defined(_ARM_)
+// xplat-todo: fix me ARM
+#define CALL_ENTRYPOINT_NOASSERT(entryPoint, function, callInfo, ...) \
+    entryPoint(function, callInfo, ##__VA_ARGS__)
 #else
-#error CALL_ENTRYPOINT not yet implemented
+#error CALL_ENTRYPOINT_NOASSERT not yet implemented
 #endif
 
-#define CALL_FUNCTION(function, callInfo, ...) \
-    CALL_ENTRYPOINT(function->GetEntryPoint(), \
+#define CALL_FUNCTION_NOASSERT(function, callInfo, ...) \
+    CALL_ENTRYPOINT_NOASSERT(function->GetEntryPoint(), \
                     function, callInfo, ##__VA_ARGS__)
 
+#if DBG && ENABLE_JS_REENTRANCY_CHECK
+#define SETOBJECT_FOR_MUTATION(reentrancyLock, arrayObject) reentrancyLock.setObjectForMutation(arrayObject)
+#define SET_SECOND_OBJECT_FOR_MUTATION(reentrancyLock, arrayObject) reentrancyLock.setSecondObjectForMutation(arrayObject)
+#define MUTATE_ARRAY_OBJECT(reentrancyLock) reentrancyLock.MutateArrayObject()
+#else
+#define SETOBJECT_FOR_MUTATION(reentrancyLock, arrayObject) 
+#define SET_SECOND_OBJECT_FOR_MUTATION(reentrancyLock, arrayObject) 
+#define MUTATE_ARRAY_OBJECT(reentrancyLock) 
+#endif
+
+#if ENABLE_JS_REENTRANCY_CHECK && DBG && ENABLE_NATIVE_CODEGEN
+#define CALL_FUNCTION(threadContext, function, callInfo, ...) \
+    (threadContext->AssertJsReentrancy(), \
+    CheckIsExecutable(function, function->GetEntryPoint()), \
+    CALL_FUNCTION_NOASSERT(function, callInfo, ##__VA_ARGS__));
+#elif ENABLE_JS_REENTRANCY_CHECK
+#define CALL_FUNCTION(threadContext, function, callInfo, ...) \
+    (threadContext->AssertJsReentrancy(), \
+    CALL_FUNCTION_NOASSERT(function, callInfo, ##__VA_ARGS__));
+#else
+#define CALL_FUNCTION(threadContext, function, callInfo, ...) \
+    CALL_FUNCTION_NOASSERT(function, callInfo, ##__VA_ARGS__);
+#endif
+
+#if ENABLE_JS_REENTRANCY_CHECK
+#define JS_REENTRANCY_CHECK(threadContext, ...) \
+    (threadContext->AssertJsReentrancy(), \
+    __VA_ARGS__);
+#define CALL_ENTRYPOINT(threadContext, entryPoint, function, callInfo, ...) \
+    (threadContext->AssertJsReentrancy(), \
+    CALL_ENTRYPOINT_NOASSERT(entryPoint, function, callInfo, ##__VA_ARGS__));
+#define JS_REENTRANT(reentrancyLock, ...) \
+    reentrancyLock.unlock(); \
+    __VA_ARGS__; \
+    MUTATE_ARRAY_OBJECT(reentrancyLock); \
+    reentrancyLock.relock();
+#define JS_REENTRANT_NO_MUTATE(reentrancyLock, ...) \
+    reentrancyLock.unlock(); \
+    __VA_ARGS__; \
+    reentrancyLock.relock();
+#define JS_REENTRANT_UNLOCK(reentrancyLock, ...) \
+    reentrancyLock.unlock(); \
+    __VA_ARGS__;
+#define JS_REENTRANCY_LOCK(reentrancyLock, threadContext) \
+    JsReentLock reentrancyLock(threadContext);
+#else
+#define JS_REENTRANCY_CHECK(threadContext, ...) \
+    __VA_ARGS__;
+#define CALL_ENTRYPOINT(threadContext, entryPoint, function, callInfo, ...) \
+    CALL_ENTRYPOINT_NOASSERT(entryPoint, function, callInfo, ##__VA_ARGS__);
+#define JS_REENTRANT(reentrancyLock, ...) \
+    __VA_ARGS__;
+#define JS_REENTRANT_NO_MUTATE(reentrancyLock, ...) \
+    __VA_ARGS__;
+#define JS_REENTRANT_UNLOCK(reentrancyLock, ...) \
+    __VA_ARGS__;
+#define JS_REENTRANCY_LOCK(reentrancyLock, threadContext)
+#endif // ENABLE_JS_REENTRANCY_CHECK
 
 /*
  * RUNTIME_ARGUMENTS is a simple wrapper around the variadic calling convention
@@ -117,17 +177,82 @@ namespace Js
 
         Arguments(VirtualTableInfoCtorEnum v) : Info(v) {}
 
+        Arguments(const Arguments& other) : Info(other.Info), Values(other.Values) {}
+
         Var operator [](int idxArg) { return const_cast<Var>(static_cast<const Arguments&>(*this)[idxArg]); }
         const Var operator [](int idxArg) const
         {
             AssertMsg((idxArg < (int)Info.Count) && (idxArg >= 0), "Ensure a valid argument index");
             return Values[idxArg];
         }
-        CallInfo Info;
-        Var* Values;
+
+        bool IsDirectEvalCall() const
+        {
+            // This was recognized as an eval call at compile time. The last one or two args are internal to us.
+            // Argcount will be one of the following when called from global code
+            //  - eval("...")     : argcount 3 : this, evalString, frameDisplay
+            //  - eval.call("..."): argcount 2 : this(which is string) , frameDisplay
+
+            return (Info.Flags & (CallFlags_ExtraArg | CallFlags_NewTarget)) == CallFlags_ExtraArg;  // ExtraArg == 1 && NewTarget == 0
+        }
+
+        bool HasExtraArg() const
+        {
+            return Info.HasExtraArg();
+        }
+
+        bool HasArg() const
+        {
+            return Info.Count > 0;
+        }
+
+        ushort GetArgCountWithExtraArgs() const
+        {
+            return Info.GetArgCountWithExtraArgs();
+        }
+
+        uint GetLargeArgCountWithExtraArgs() const
+        {
+            return Info.GetLargeArgCountWithExtraArgs();
+        }
+
+        FrameDisplay* GetFrameDisplay() const
+        {
+            AssertOrFailFast(Info.Flags & CallFlags_ExtraArg);
+
+            // There is an extra arg, so values should have Count + 1 members
+            return (FrameDisplay*)(this->Values[Info.Count]);
+        }
+
+        bool IsNewCall() const
+        {
+            return (Info.Flags & CallFlags_New) == CallFlags_New;
+        }
+
+        bool HasNewTarget() const
+        {
+            return Info.HasNewTarget();
+        }
+
+        // New target value is passed as an extra argument which is nto included in the Info.Count
+        Var GetNewTarget() const
+        {
+            return CallInfo::GetNewTarget(Info.Flags, this->Values, Info.Count);
+        }
+
+        // swb: Arguments is mostly used on stack and does not need write barrier.
+        // It is recycler allocated with ES6 generators. We handle that specially.
+        FieldNoBarrier(CallInfo) Info;
+        FieldNoBarrier(Var*) Values;
 
         static uint32 GetCallInfoOffset() { return offsetof(Arguments, Info); }
         static uint32 GetValuesOffset() { return offsetof(Arguments, Values); }
+
+        // Prevent heap/recycler allocation, so we don't need write barrier for this
+        static void* operator new   (size_t)    = delete;
+        static void* operator new[] (size_t)    = delete;
+        static void  operator delete   (void*)  = delete;
+        static void  operator delete[] (void*)  = delete;
     };
 
     struct ArgumentReader : public Arguments
@@ -141,7 +266,7 @@ namespace Js
     private:
         void AdjustArguments(CallInfo *callInfo)
         {
-            AssertMsg(!(Info.Flags & Js::CallFlags_NewTarget) || (Info.Flags & Js::CallFlags_ExtraArg), "NewTarget flag must be used together with ExtraArg.");
+            AssertMsg(!this->HasNewTarget() || (Info.Flags & Js::CallFlags_ExtraArg), "NewTarget flag must be used together with ExtraArg.");
             if (Info.Flags & Js::CallFlags_ExtraArg)
             {
                 // If "calling eval" is set, then the last param is the frame display, which only
@@ -153,9 +278,7 @@ namespace Js
                 // the stack version. Both seem risky. It would be safer and more robust to just
                 // change the stack version.
                 Info.Flags = (CallFlags)(Info.Flags & ~Js::CallFlags_ExtraArg);
-                Info.Count--;
                 callInfo->Flags = (CallFlags)(callInfo->Flags & ~Js::CallFlags_ExtraArg);
-                callInfo->Count--;
             }
         }
     };

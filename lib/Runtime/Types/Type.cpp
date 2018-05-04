@@ -8,12 +8,12 @@ namespace Js
 {
     DEFINE_RECYCLER_TRACKER_WEAKREF_PERF_COUNTER(Type);
 
-    InternalString Type::ObjectTypeNameString    = InternalString(_u("object"), 6);
-    InternalString Type::UndefinedTypeNameString = InternalString(_u("undefined"), 9);
-    InternalString Type::BooleanTypeNameString   = InternalString(_u("boolean"), 7);
-    InternalString Type::StringTypeNameString    = InternalString(_u("string"), 6);
-    InternalString Type::NumberTypeNameString    = InternalString(_u("number"), 6);
-    InternalString Type::FunctionTypeNameString  = InternalString(_u("function"), 8);
+    InternalString Type::ObjectTypeNameString    = InternalString(NO_WRITE_BARRIER_TAG(_u("object")), 6);
+    InternalString Type::UndefinedTypeNameString = InternalString(NO_WRITE_BARRIER_TAG(_u("undefined")), 9);
+    InternalString Type::BooleanTypeNameString   = InternalString(NO_WRITE_BARRIER_TAG(_u("boolean")), 7);
+    InternalString Type::StringTypeNameString    = InternalString(NO_WRITE_BARRIER_TAG(_u("string")), 6);
+    InternalString Type::NumberTypeNameString    = InternalString(NO_WRITE_BARRIER_TAG(_u("number")), 6);
+    InternalString Type::FunctionTypeNameString  = InternalString(NO_WRITE_BARRIER_TAG(_u("function")), 8);
 
     Type::Type(ScriptContext* scriptContext, TypeId typeId, RecyclableObject* prototype, JavascriptMethod entryPoint) :
         javascriptLibrary(scriptContext->GetLibrary()),
@@ -58,9 +58,13 @@ namespace Js
         // for that property ID must be cleared on this new type after the type property cache is copied. Also, types are not
         // changed consistently to use this copy constructor, so those would need to be fixed as well.
 
-        if(type->AreThisAndPrototypesEnsuredToHaveOnlyWritableDataProperties())
+        if (type->AreThisAndPrototypesEnsuredToHaveOnlyWritableDataProperties())
         {
             SetAreThisAndPrototypesEnsuredToHaveOnlyWritableDataProperties(true);
+        }
+        if(type->ThisAndPrototypesHaveNoSpecialProperties())
+        {
+            SetThisAndPrototypesHaveNoSpecialProperties(true);
         }
         if(type->IsFalsy())
         {
@@ -105,7 +109,7 @@ namespace Js
             }
 
             flags |= TypeFlagMask_AreThisAndPrototypesEnsuredToHaveOnlyWritableDataProperties;
-            javascriptLibrary->TypeAndPrototypesAreEnsuredToHaveOnlyWritableDataProperties(this);
+            javascriptLibrary->GetTypesWithOnlyWritablePropertyProtoChainCache()->Register(this);
         }
         else
         {
@@ -116,6 +120,31 @@ namespace Js
     BOOL Type::AreThisAndPrototypesEnsuredToHaveOnlyWritableDataProperties() const
     {
         return flags & TypeFlagMask_AreThisAndPrototypesEnsuredToHaveOnlyWritableDataProperties;
+    }
+
+    void Type::SetThisAndPrototypesHaveNoSpecialProperties(const bool truth)
+    {
+        if (truth)
+        {
+            if (GetScriptContext()->IsClosed())
+            {
+                // The cache is disabled after the script context is closed, to avoid issues between being closed and being deleted,
+                // where the cache of these types in JavascriptLibrary may be reclaimed at any point
+                return;
+            }
+
+            flags |= TypeFlagMask_ThisAndPrototypesHaveNoSpecialProperties;
+            javascriptLibrary->GetTypesWithNoSpecialPropertyProtoChainCache()->Register(this);
+        }
+        else
+        {
+            flags &= ~TypeFlagMask_ThisAndPrototypesHaveNoSpecialProperties;
+        }
+    }
+
+    BOOL Type::ThisAndPrototypesHaveNoSpecialProperties() const
+    {
+        return flags & TypeFlagMask_ThisAndPrototypesHaveNoSpecialProperties;
     }
 
     void Type::SetIsFalsy(const bool truth)
@@ -189,7 +218,7 @@ namespace Js
         sType->TypeHandlerInfo = optHandler;
 
         sType->HasNoEnumerableProperties = false;
-        if(Js::DynamicType::Is(this->typeId))
+        if(Js::DynamicType::Is(this))
         {
             sType->HasNoEnumerableProperties = static_cast<const Js::DynamicType*>(this)->GetHasNoEnumerableProperties();
         }

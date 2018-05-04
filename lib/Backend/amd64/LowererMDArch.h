@@ -1,5 +1,5 @@
 //-------------------------------------------------------------------------------------------------------
-// Copyright (C) Microsoft. All rights reserved.
+// Copyright (C) Microsoft Corporation and contributors. All rights reserved.
 // Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.
 //-------------------------------------------------------------------------------------------------------
 #pragma once
@@ -29,7 +29,30 @@ private:
     int                 helperCallArgsCount;
     IR::Opnd *          helperCallArgs[MaxArgumentsToHelper];
 
+#ifndef _WIN32
+    class XPlatRegArgList
+    {
+    public:
+        XPlatRegArgList() { Reset(); }
+        inline void Reset()
+        {
+            for (int i = 0; i <= XmmArgRegsCount; i++) args[i] = TyMachPtr;
+        }
 
+        inline bool IsFloat(uint16 position) { return args[position] == TyFloat64; }
+
+        void SetFloat(uint16 regPosition)
+        {
+            Assert(regPosition != 0 && regPosition <= XmmArgRegsCount);
+            args[regPosition] = TyFloat64;
+        }
+
+        static_assert(static_cast<int>(XmmArgRegsCount) >= static_cast<int>(IntArgRegsCount),
+                      "Unexpected register count");
+        IRType args [XmmArgRegsCount + 1];
+    };
+    XPlatRegArgList     xplatCallArgs;
+#endif
 public:
 
     LowererMDArch(Func* function):
@@ -65,11 +88,12 @@ public:
     IR::Instr *         LowerCall(IR::Instr * callInstr, uint32 argCount);
     IR::Instr *         LowerCallI(IR::Instr * callInstr, ushort callFlags, bool isHelper = false, IR::Instr * insertBeforeInstrForCFG = nullptr);
     IR::Instr *         LowerCallIDynamic(IR::Instr * callInstr, IR::Instr* saveThis, IR::Opnd* argsLengthOpnd, ushort callFlags, IR::Instr * insertBeforeInstrForCFG = nullptr);
-    IR::Instr *         LowerCallPut(IR::Instr * callInstr);
     IR::Instr *         LowerStartCall(IR::Instr * instr);
     IR::Instr *         LowerAsmJsCallI(IR::Instr * callInstr);
     IR::Instr *         LowerAsmJsCallE(IR::Instr * callInstr);
-    IR::Instr *         LowerWasmMemOp(IR::Instr * instr, IR::Opnd *addrOpnd);
+    IR::Instr *         LowerWasmArrayBoundsCheck(IR::Instr * instr, IR::Opnd *addrOpnd);
+    void                LowerAtomicStore(IR::Opnd * dst, IR::Opnd * src1, IR::Instr * insertBeforeInstr);
+    void                LowerAtomicLoad(IR::Opnd* dst, IR::Opnd* src1, IR::Instr* insertBeforeInstr);
     IR::Instr *         LowerAsmJsLdElemHelper(IR::Instr * instr, bool isSimdLoad = false, bool checkEndOffset = false);
     IR::Instr *         LowerAsmJsStElemHelper(IR::Instr * instr, bool isSimdStore = false, bool checkEndOffset = false);
 
@@ -82,22 +106,18 @@ public:
     IR::Instr *         LoadStackArgPtr(IR::Instr * instr);
     IR::Instr *         LoadHeapArguments(IR::Instr * instr);
     IR::Instr *         LoadHeapArgsCached(IR::Instr * instr);
-    IR::Instr *         LoadFuncExpression(IR::Instr * instr);
     IR::Instr *         LowerEntryInstr(IR::EntryInstr * entryInstr);
     void                GeneratePrologueStackProbe(IR::Instr *entryInstr, IntConstType frameSize);
     IR::Instr *         LowerExitInstr(IR::ExitInstr * exitInstr);
-    IR::Instr *         LowerEntryInstrAsmJs(IR::EntryInstr * entryInstr);
     IR::Instr *         LowerExitInstrAsmJs(IR::ExitInstr * exitInstr);
-    IR::Instr *         LowerInt64Assign(IR::Instr * instr);
     static void         EmitInt4Instr(IR::Instr *instr, bool signExtend = false);
-    static void         EmitPtrInstr(IR::Instr *instr);
     void                EmitLoadVar(IR::Instr *instrLoad, bool isFromUint32 = false, bool isHelper = false);
     void                EmitIntToFloat(IR::Opnd *dst, IR::Opnd *src, IR::Instr *instrInsert);
     void                EmitUIntToFloat(IR::Opnd *dst, IR::Opnd *src, IR::Instr *instrInsert);
     void                EmitIntToLong(IR::Opnd *dst, IR::Opnd *src, IR::Instr *instrInsert);
     void                EmitUIntToLong(IR::Opnd *dst, IR::Opnd *src, IR::Instr *instrInsert);
     void                EmitLongToInt(IR::Opnd *dst, IR::Opnd *src, IR::Instr *instrInsert);
-    bool                EmitLoadInt32(IR::Instr *instrLoad, bool conversionFromObjectAllowed);
+    bool                EmitLoadInt32(IR::Instr *instrLoad, bool conversionFromObjectAllowed, bool bailOnHelperCall, IR::LabelInstr * labelBailOut);
 
     IR::Instr *         LoadCheckedFloat(IR::RegOpnd *opndOrig, IR::RegOpnd *opndFloat, IR::LabelInstr *labelInline, IR::LabelInstr *labelHelper, IR::Instr *instrInsert, const bool checkForNullInLoopBody = false);
 
@@ -121,6 +141,7 @@ public:
     bool                GenerateFastNot(IR::Instr * instrNot);
     bool                GenerateFastShiftLeft(IR::Instr * instrShift);
     bool                GenerateFastShiftRight(IR::Instr * instrShift);
+    bool                GenerateFastDivAndRem(IR::Instr * divInstr, IR::LabelInstr* bailoutLabel);
 
     IR::Opnd*           GenerateArgOutForStackArgs(IR::Instr* callInstr, IR::Instr* stackArgsInstr);
     void                GenerateFunctionObjectTest(IR::Instr * callInstr, IR::RegOpnd  *functionObjOpnd, bool isHelper, IR::LabelInstr* afterCallLabel = nullptr);
@@ -137,6 +158,9 @@ private:
     IR::LabelInstr *    GetBailOutStackRestoreLabel(BailOutInfo * bailOutInfo, IR::LabelInstr * exitTargetInstr);
     void                GeneratePreCall(IR::Instr * callInstr, IR::Opnd  *functionObjOpnd, IR::Instr* insertBeforeInstrForCFGCheck = nullptr);
     void                SetMaxArgSlots(Js::ArgSlot actualCount /*including this*/);
+    void                GenerateMemInit(IR::RegOpnd * opnd, int32 offset, size_t value, IR::Instr * insertBeforeInstr, bool isZeroed = false);
+    bool                GenerateFastDivAndRem_Signed(IR::Instr* instrDiv);
+    bool                GenerateFastDivAndRem_Unsigned(IR::Instr* instrDiv);
 };
 
 #define REG_EH_TARGET      RegArg0

@@ -812,6 +812,17 @@ var tests = [
         }
     },
     {
+        name: 'Issue# 2471: Symbol registration map should support symbol names with null characters.',
+        body: function() {
+            var sym1 = Symbol.for('A\0X');
+            var sym2 = Symbol.for('A\0Y');
+            var sym3 = Symbol.for('A\0X');
+
+            assert.isFalse(sym1 === sym2, "Symbols created via Symbol.for should NOT be same if they have different description after the Null character");
+            assert.isTrue(sym1 === sym3, "Symbols created via Symbol.for should be same if they have same description");
+        }
+    },
+    {
         name: 'Throwing TypeError when trying to add with a string or a number',
         body: function() {
             var x = Symbol();
@@ -970,6 +981,40 @@ var tests = [
             assert.throws(function () { o[Symbol()](); }, TypeError, "Calling non-existent symbol property with no description fails", "Object doesn't support property or method 'Symbol()'");
             assert.throws(function () { o[Symbol('foo')](); }, TypeError, "Calling non-existent symbol property with description fails", "Object doesn't support property or method 'Symbol(foo)'");
             assert.throws(function () { o[Symbol.iterator](); }, TypeError, "Calling non-existent built-in symbol property with description fails", "Object doesn't support property or method 'Symbol(Symbol.iterator)'");
+        }
+    },
+    {
+        name: "Symbol equality logic",
+        body() {
+            assert.isTrue(Symbol.toPrimitive != 1);
+            assert.isTrue(Symbol.toPrimitive != NaN);
+
+            var valueOfCalled = false;
+            var a = Symbol('f');
+            var b = {
+                valueOf : function() {
+                    valueOfCalled = true;
+                    return a;
+                }
+            };
+            assert.isTrue(a == b);
+            assert.isTrue(valueOfCalled);
+            valueOfCalled = false;
+            assert.isTrue(b == a);
+            assert.isTrue(valueOfCalled);
+            assert.isTrue(a == Object(a));
+        }
+    },
+    {
+        name: 'Getting or setting symbol properties on null or undefined should throw',
+        body: function () {
+            assert.throws(function () { null[Symbol()]; }, TypeError, "Getting symbol property from null fails", "Unable to get property 'Symbol()' of undefined or null reference");
+            assert.throws(function () { typeof null[Symbol()]; }, TypeError, "Getting symbol property from null fails", "Unable to get property 'Symbol()' of undefined or null reference");
+            assert.throws(function () { new null[Symbol()]; }, TypeError, "Getting symbol property from null fails", "Unable to get property 'Symbol()' of undefined or null reference");
+            assert.throws(function () { undefined[Symbol('foo')]; }, TypeError, "Getting symbol property from undefined fails", "Unable to get property 'Symbol(foo)' of undefined or null reference");
+            assert.throws(function () { null[Symbol.iterator](); }, TypeError, "Getting symbol method from null fails", "Unable to get property 'Symbol(Symbol.iterator)' of undefined or null reference");
+            assert.throws(function () { undefined[Symbol()] = 5; }, TypeError, "Setting symbol property on undefined fails", "Unable to set property 'Symbol()' of undefined or null reference");
+            assert.throws(function () { delete null[Symbol()]; }, TypeError, "Deleting symbol property on undefined fails", "Unable to delete property 'Symbol()' of undefined or null reference");
         }
     },
 ];

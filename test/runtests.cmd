@@ -43,6 +43,7 @@ goto :main
   echo   -x86           Build arch of binaries is x86
   echo   -x64           Build arch of binaries is x64
   echo   -arm           Build arch of binaries is ARM
+  echo   -arm64         Build arch of binaries is ARM64
   echo.
   echo   Specify type of ChakraCore:
   echo.
@@ -118,6 +119,14 @@ goto :main
     )
   )
 
+  if "%_HadFailures%" NEQ "0" (
+    echo -- runtests.cmd ^>^> Tests failed. See logs for details.
+  ) else (
+    echo -- runtests.cmd ^>^> All tests passed!
+  )
+
+  echo -- runtests.cmd ^>^> exiting with exit code %_HadFailures%
+
   exit /b %_HadFailures%
 
 :: ============================================================================
@@ -133,6 +142,7 @@ goto :main
   if /i "%1" == "-x86"              set _BuildArch=x86&                                         goto :ArgOk
   if /i "%1" == "-x64"              set _BuildArch=x64&                                         goto :ArgOk
   if /i "%1" == "-arm"              set _BuildArch=arm&                                         goto :ArgOk
+  if /i "%1" == "-arm64"            set _BuildArch=arm64&                                       goto :ArgOk
   if /i "%1" == "-debug"            set _BuildType=debug&                                       goto :ArgOk
   if /i "%1" == "-test"             set _BuildType=test&                                        goto :ArgOk
   if /i "%1" == "-codecoverage"     set _BuildType=codecoverage&                                goto :ArgOk
@@ -140,12 +150,15 @@ goto :main
   if /i "%1" == "-x86debug"         set _BuildArch=x86&set _BuildType=debug&                    goto :ArgOk
   if /i "%1" == "-x64debug"         set _BuildArch=x64&set _BuildType=debug&                    goto :ArgOk
   if /i "%1" == "-armdebug"         set _BuildArch=arm&set _BuildType=debug&                    goto :ArgOk
+  if /i "%1" == "-arm64debug"       set _BuildArch=arm64&set _BuildType=debug&                  goto :ArgOk
   if /i "%1" == "-x86test"          set _BuildArch=x86&set _BuildType=test&                     goto :ArgOk
   if /i "%1" == "-x64test"          set _BuildArch=x64&set _BuildType=test&                     goto :ArgOk
   if /i "%1" == "-armtest"          set _BuildArch=arm&set _BuildType=test&                     goto :ArgOk
+  if /i "%1" == "-arm64test"        set _BuildArch=arm64&set _BuildType=test&                   goto :ArgOk
   if /i "%1" == "-x86codecoverage"  set _BuildArch=x86&set _BuildType=codecoverage&             goto :ArgOk
   if /i "%1" == "-x64codecoverage"  set _BuildArch=x64&set _BuildType=codecoverage&             goto :ArgOk
   if /i "%1" == "-armcodecoverage"  set _BuildArch=arm&set _BuildType=codecoverage&             goto :ArgOk
+  if /i "%1" == "-arm64codecoverage" set _BuildArch=arm64&set _BuildType=codecoverage&          goto :ArgOk
 
   if /i "%1" == "-binary"           set _Binary=-binary:%2&                                     goto :ArgOkShift2
   if /i "%1" == "-bindir"           set _BinDir=%~f2&                                           goto :ArgOkShift2
@@ -172,11 +185,16 @@ goto :main
   if /i "%1" == "-binaryRoot"       set _binaryRoot=%~f2&                                       goto :ArgOkShift2
   if /i "%1" == "-variants"         set _Variants=%~2&                                          goto :ArgOkShift2
   if /i "%1" == "-cleanupall"       set _CleanUpAll=1&                                          goto :ArgOk
+  if /i "%1" == "-noprogramoutput"  set _NoProgramOutput=-noprogramoutput&                      goto :ArgOk
+  if /i "%1" == "-onlyassertoutput"  set _OnlyAssertOutput=-onlyassertoutput&                   goto :ArgOk
 
   ::Extra ch.exe command line flags
   if /i "%1" == "-ExtraHostFlags"   set _ExtraHostFlags=%~2&                                    goto :ArgOkShift2
   if /i "%1" == "-DumpOnCrash"      set _DumpOnCrash=1&                                         goto :ArgOk
   if /i "%1" == "-CrashOnException" set _CrashOnException=1&                                    goto :ArgOk
+
+  ::Timeout flag
+  if /i "%1" == "-timeout"          set _TestTimeout=%~2&                                       goto : ArgOkShift2
 
   if /i "%1" == "-extraVariants" (
     :: Extra variants are specified by the user but not run by default.
@@ -207,11 +225,14 @@ goto :main
     goto :ArgOk
   )
   if /i "%1" == "-disablejit" (
-    set _DisableJit=1
     set _Variants=disable_jit
     goto :ArgOk
   )
-  
+  if /i "%1" == "-lite" (
+    set _Variants=lite
+    goto :ArgOk
+  )
+
   if /i "%1" == "-nightly" (
     set _nightly=1
     if "%_ExtraVariants%" == "" (
@@ -264,6 +285,8 @@ goto :main
   set _ExtraHostFlags=
   set _DumpOnCrash=
   set _CrashOnException=
+  set _NoProgramOutput=
+  set _OnlyAssertOutput=
 
   goto :eof
 
@@ -304,13 +327,6 @@ goto :main
   :: If the user specified extra variants to run (i.e. in addition to the defaults), include them.
   if not "%_ExtraVariants%" == "" set _Variants=%_Variants%,%_ExtraVariants%
 
-  rem TODO: Move any apollo tests from core\test back into private unittests
-  set _ExcludeApolloTests=
-  if "%APOLLO%" == "1" (
-    set _ExcludeApolloTests=-nottags:exclude_apollo
-    set TARGET_OS=wp8
-  )
-
   if not "%_nightly%" == "1" (
     set _NOTTAGS=%_NOTTAGS% -nottags:nightly
   ) else (
@@ -332,15 +348,28 @@ goto :main
     set _DIRS=-all
   )
 
+  set _NOTTAGS=%_NOTTAGS% -nottags:exclude_windows
+
   set _BuildArchMapped=%_BuildArch%
   set _BuildTypeMapped=%_BuildType%
+  :: _NewBuildArchMapped and _NewBuildTypeMapped store new terms of the build and architecture
+  :: _NewBuildArchMapped: x86/x64 _BuildArchMapped:x86/amd64
+  :: _NewBuildTypeMapped: debug/test _BuildTypeMapped:chk/fre
+  set _NewBuildArchMapped=%_BuildArch%
+  set _NewBuildTypeMapped=%_BuildType%
 
   :: Map new build arch and type names to old names until rl test tags are
   :: updated to the new names
   if "%_BuildArchMapped%" == "x64" set _BuildArchMapped=amd64
   if "%_BuildTypeMapped%" == "debug" set _BuildTypeMapped=chk
   if "%_BuildTypeMapped%" == "test" set _BuildTypeMapped=fre
-  if "%_BuildTypeMapped%" == "codecoverage" set _BuildTypeMapped=fre
+  if "%_BuildTypeMapped%" == "codecoverage" (
+    set _BuildTypeMapped=fre
+    set _NewBuildTypeMapped=test
+  )
+
+  if "%_BuildArch%" == "arm"    set _NOTTAGS=%_NOTTAGS% -nottags:require_asmjs -nottags:require_wasm
+  if "%_BuildArch%" == "arm64"  set _NOTTAGS=%_NOTTAGS% -nottags:require_asmjs -nottags:require_wasm
 
   if "%Disable_JIT%" == "1" (
       set _dynamicprofilecache=
@@ -407,6 +436,12 @@ goto :main
   if "%_TESTCONFIG%"=="disable_jit" (
     set EXTRA_CC_FLAGS=%EXTRA_CC_FLAGS% -nonative
     set EXTRA_RL_FLAGS=-nottags:exclude_interpreted -nottags:fails_interpreted -nottags:require_backend
+  ) else (
+    set EXTRA_RL_FLAGS=%EXTRA_RL_FLAGS% -nottags:require_disable_jit
+  )
+  if "%_TESTCONFIG%"=="lite" (
+    set EXTRA_CC_FLAGS=%EXTRA_CC_FLAGS% -nonative
+    set EXTRA_RL_FLAGS=-nottags:exclude_interpreted -nottags:fails_interpreted -nottags:require_backend -nottags:require_debugger -nottags:Intl
   )
   if "%_TESTCONFIG%"=="dynapogo"    (
     set EXTRA_CC_FLAGS=%EXTRA_CC_FLAGS% -forceNative -off:simpleJit -bgJitDelay:0 %_dynamicprofileinput%
@@ -444,6 +479,9 @@ goto :main
     set EXTRA_RL_FLAGS=-nottags:exclude_bytecodelayout -nottags:exclude_forceserialized
     set _exclude_serialized=-nottags:exclude_serialized
   )
+  if not "%_TestTimeout%" == "" (
+    set EXTRA_RL_FLAGS=%EXTRA_RL_FLAGS% -timeout:%_TestTimeout%
+  )
 
   echo.
   echo ############# Starting %_TESTCONFIG% variant #############
@@ -465,12 +503,20 @@ goto :main
   set _rlArgs=%_rlArgs% -nottags:exclude_%_TESTCONFIG%
   set _rlArgs=%_rlArgs% -nottags:exclude_%TARGET_OS%
   set _rlArgs=%_rlArgs% -nottags:exclude_%_BuildArchMapped%
+  set _rlArgs=%_rlArgs% -nottags:exclude_%_NewBuildArchMapped%
   set _rlArgs=%_rlArgs% -nottags:exclude_%_BuildTypeMapped%
+  set _rlArgs=%_rlArgs% -nottags:exclude_%_NewBuildTypeMapped%
+
+  if [%_JSHOST%] NEQ [1] (
+    set _rlArgs=%_rlArgs% -nottags:exclude_ch
+  )
+
   set _rlArgs=%_rlArgs% %_exclude_serialized%
   set _rlArgs=%_rlArgs% %_exclude_forcedeferparse%
   set _rlArgs=%_rlArgs% %_exclude_nodeferparse%
   set _rlArgs=%_rlArgs% %_exclude_forceundodefer%
-  set _rlArgs=%_rlArgs% %_ExcludeApolloTests%
+  set _rlArgs=%_rlArgs% %_NoProgramOutput%
+  set _rlArgs=%_rlArgs% %_OnlyAssertOutput%
   set _rlArgs=%_rlArgs% %_quiet%
   set _rlArgs=%_rlArgs% -exe
   set _rlArgs=%_rlArgs% %EXTRA_RL_FLAGS%

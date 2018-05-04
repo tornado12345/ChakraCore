@@ -9,7 +9,7 @@ namespace Js
     class JavascriptBooleanObject : public DynamicObject
     {
     private:
-        JavascriptBoolean* value;
+        Field(JavascriptBoolean*) value;
 
         DEFINE_VTABLE_CTOR(JavascriptBooleanObject, DynamicObject);
         DEFINE_MARSHAL_OBJECT_TO_SCRIPT_CONTEXT(JavascriptBooleanObject);
@@ -17,6 +17,7 @@ namespace Js
         JavascriptBooleanObject(JavascriptBoolean* value, DynamicType * type);
         static bool Is(Var aValue);
         static JavascriptBooleanObject* FromVar(Js::Var aValue);
+        static JavascriptBooleanObject* UnsafeFromVar(Js::Var aValue);
 
         BOOL GetValue() const;
         void Initialize(JavascriptBoolean* value);

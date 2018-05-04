@@ -12,7 +12,8 @@
 #include "ByteCode/ByteCodeSerializer.h"
 #include "Common/ByteSwap.h"
 #include "Library/DataView.h"
-#include "Library/JavascriptSymbol.h"
+#include "Library/JavascriptExceptionMetadata.h"
+#include "Library/JavascriptPromise.h"
 #include "Base/ThreadContextTlsEntry.h"
 #include "Codex/Utf8Helper.h"
 
@@ -38,29 +39,28 @@ public:
     }
 };
 
-typedef utf8::NarrowWideConverter<CodexHeapAllocatorInterface, LPCSTR, LPWSTR> NarrowToWideChakraHeap;
-typedef utf8::NarrowWideConverter<CodexHeapAllocatorInterface, LPCWSTR, LPSTR> WideToNarrowChakraHeap;
-
-JsErrorCode CheckContext(JsrtContext *currentContext, bool verifyRuntimeState, bool allowInObjectBeforeCollectCallback)
+JsErrorCode CheckContext(JsrtContext *currentContext, bool verifyRuntimeState,
+    bool allowInObjectBeforeCollectCallback)
 {
     if (currentContext == nullptr)
     {
         return JsErrorNoCurrentContext;
     }
 
-    Js::ScriptContext *scriptContext = currentContext->GetScriptContext();
-    Assert(scriptContext != nullptr);
-    Recycler *recycler = scriptContext->GetRecycler();
-    ThreadContext *threadContext = scriptContext->GetThreadContext();
-
     // We don't need parameter check if it's checked in previous wrapper.
     if (verifyRuntimeState)
     {
+        Js::ScriptContext *scriptContext = currentContext->GetScriptContext();
+        Assert(scriptContext != nullptr);
+        Recycler *recycler = scriptContext->GetRecycler();
+        ThreadContext *threadContext = scriptContext->GetThreadContext();
+
         if (recycler && recycler->IsHeapEnumInProgress())
         {
             return JsErrorHeapEnumInProgress;
         }
-        else if (!allowInObjectBeforeCollectCallback && recycler && recycler->IsInObjectBeforeCollectCallback())
+        else if (!allowInObjectBeforeCollectCallback &&
+            recycler && recycler->IsInObjectBeforeCollectCallback())
         {
             return JsErrorInObjectBeforeCollectCallback;
         }
@@ -88,6 +88,28 @@ JsErrorCode CheckContext(JsrtContext *currentContext, bool verifyRuntimeState, b
 }
 
 /////////////////////
+
+#if ENABLE_TTD
+void CALLBACK OnScriptLoad_TTDCallback(FinalizableObject* jsrtCtx, Js::FunctionBody* body, Js::Utf8SourceInfo* utf8SourceInfo, CompileScriptException* compileException, bool notify)
+{
+    ((JsrtContext*)jsrtCtx)->OnScriptLoad_TTDCallback(body, utf8SourceInfo, compileException, notify);
+}
+
+uint32 CALLBACK OnBPRegister_TTDCallback(void* runtimeRcvr, int64 bpID, Js::ScriptContext* scriptContext, Js::Utf8SourceInfo* utf8SourceInfo, uint32 line, uint32 column, BOOL* isNewBP)
+{
+    return ((JsrtRuntime*)runtimeRcvr)->BPRegister_TTD(bpID, scriptContext, utf8SourceInfo, line, column, isNewBP);
+}
+
+void CALLBACK OnBPDelete_TTDCallback(void* runtimeRcvr, uint32 bpID)
+{
+    ((JsrtRuntime*)runtimeRcvr)->BPDelete_TTD(bpID);
+}
+
+void CALLBACK OnBPClearDocument_TTDCallback(void* runtimeRcvr)
+{
+    ((JsrtRuntime*)runtimeRcvr)->BPClearDocument_TTD();
+}
+#endif
 
 //A create context function that we can funnel to for regular and record or debug aware creation
 JsErrorCode CreateContextCore(_In_ JsRuntimeHandle runtimeHandle, _In_ TTDRecorder& _actionEntryPopper, _In_ bool inRecordMode, _In_ bool activelyRecording, _In_ bool inReplayMode, _Out_ JsContextRef *newContext)
@@ -125,44 +147,59 @@ JsErrorCode CreateContextCore(_In_ JsRuntimeHandle runtimeHandle, _In_ TTDRecord
     if(inRecordMode | inReplayMode)
     {
         Js::ScriptContext* scriptContext = context->GetScriptContext();
-        HostScriptContextCallbackFunctor callbackFunctor(context, &JsrtContext::OnScriptLoad_TTDCallback);
+        HostScriptContextCallbackFunctor callbackFunctor((FinalizableObject*)context, (void*)runtime, &OnScriptLoad_TTDCallback, &OnBPRegister_TTDCallback, &OnBPDelete_TTDCallback, &OnBPClearDocument_TTDCallback);
 
 #if ENABLE_TTD_DIAGNOSTICS_TRACING
         bool noNative = true;
+        bool doDebug = true;
 #else
-        bool noNative = threadContext->TTDLog->IsDebugModeFlagSet();
+        bool noNative = TTD_FORCE_NOJIT_MODE || threadContext->TTDLog->IsDebugModeFlagSet();
+        bool doDebug = TTD_FORCE_DEBUG_MODE || threadContext->TTDLog->IsDebugModeFlagSet();
 #endif
 
         threadContext->TTDLog->PushMode(TTD::TTDMode::ExcludedExecutionTTAction);
         if(inRecordMode)
         {
-            threadContext->TTDContext->AddNewScriptContextRecord(context, scriptContext, callbackFunctor, noNative);
+            threadContext->TTDContext->AddNewScriptContextRecord(context, scriptContext, callbackFunctor, noNative, doDebug);
         }
         else
         {
-            threadContext->TTDContext->AddNewScriptContextReplay(context, scriptContext, callbackFunctor, noNative);
+            threadContext->TTDContext->AddNewScriptContextReplay(context, scriptContext, callbackFunctor, noNative, doDebug);
         }
+
         threadContext->TTDLog->SetModeFlagsOnContext(scriptContext);
         threadContext->TTDLog->PopMode(TTD::TTDMode::ExcludedExecutionTTAction);
     }
 #endif
 
+#ifdef ENABLE_SCRIPT_DEBUGGING
     JsrtDebugManager* jsrtDebugManager = runtime->GetJsrtDebugManager();
 
     if(jsrtDebugManager != nullptr)
     {
+        // JsDiagStartDebugging was called
+        threadContext->GetDebugManager()->SetLocalsDisplayFlags(Js::DebugManager::LocalsDisplayFlags::LocalsDisplayFlags_NoGroupMethods);
+
         Js::ScriptContext* scriptContext = context->GetScriptContext();
-        scriptContext->InitializeDebugging();
 
         Js::DebugContext* debugContext = scriptContext->GetDebugContext();
         debugContext->SetHostDebugContext(jsrtDebugManager);
 
-        Js::ProbeContainer* probeContainer = debugContext->GetProbeContainer();
-        probeContainer->InitializeInlineBreakEngine(jsrtDebugManager);
-        probeContainer->InitializeDebuggerScriptOptionCallback(jsrtDebugManager);
-
-        threadContext->GetDebugManager()->SetLocalsDisplayFlags(Js::DebugManager::LocalsDisplayFlags::LocalsDisplayFlags_NoGroupMethods);
+        if (!jsrtDebugManager->IsDebugEventCallbackSet())
+        {
+            // JsDiagStopDebugging was called so we need to be in SourceRunDownMode
+            debugContext->SetDebuggerMode(Js::DebuggerMode::SourceRundown);
+        }
+        else
+        {
+            // Set Debugging mode
+            scriptContext->InitializeDebugging();
+            Js::ProbeContainer* probeContainer = debugContext->GetProbeContainer();
+            probeContainer->InitializeInlineBreakEngine(jsrtDebugManager);
+            probeContainer->InitializeDebuggerScriptOptionCallback(jsrtDebugManager);
+        }
     }
+#endif
 
 #if ENABLE_TTD
     if(activelyRecording)
@@ -176,16 +213,22 @@ JsErrorCode CreateContextCore(_In_ JsRuntimeHandle runtimeHandle, _In_ TTDRecord
 }
 
 #if ENABLE_TTD
-void CALLBACK CreateExternalObject_TTDCallback(Js::ScriptContext* ctx, Js::Var* object)
+void CALLBACK CreateExternalObject_TTDCallback(Js::ScriptContext* ctx, Js::Var prototype, Js::Var* object)
 {
-    AssertMsg(object != nullptr, "This should always be a valid location");
+    TTDAssert(object != nullptr, "This should always be a valid location");
 
-    *object = RecyclerNewFinalized(ctx->GetRecycler(), JsrtExternalObject, RecyclerNew(ctx->GetRecycler(), JsrtExternalType, ctx, nullptr), nullptr);
+    Js::RecyclableObject * prototypeObject = nullptr;
+    if (prototype != JS_INVALID_REFERENCE)
+    {
+        prototypeObject = Js::RecyclableObject::FromVar(prototype);
+    }
+
+    *object = JsrtExternalObject::Create(nullptr, nullptr, prototypeObject, ctx);
 }
 
-static void CALLBACK TTDDummyPromiseContinuationCallback(JsValueRef task, void *callbackState)
+void CALLBACK TTDDummyPromiseContinuationCallback(JsValueRef task, void *callbackState)
 {
-    AssertMsg(false, "This should never actually be invoked!!!");
+    TTDAssert(false, "This should never actually be invoked!!!");
 }
 
 void CALLBACK CreateJsRTContext_TTDCallback(void* runtimeHandle, Js::ScriptContext** result)
@@ -195,14 +238,19 @@ void CALLBACK CreateJsRTContext_TTDCallback(void* runtimeHandle, Js::ScriptConte
 
     TTDRecorder dummyActionEntryPopper;
     JsErrorCode err = CreateContextCore(static_cast<JsRuntimeHandle>(runtimeHandle), dummyActionEntryPopper, false /*inRecordMode*/, false /*activelyRecording*/, true /*inReplayMode*/, &newContext);
-    if(err != JsNoError)
-    {
-        AssertMsg(false, "Shouldn't fail on us!!!");
-        return exit(1);
-    }
+    TTDAssert(err == JsNoError, "Shouldn't fail on us!!!");
 
     *result = static_cast<JsrtContext*>(newContext)->GetScriptContext();
     (*result)->GetLibrary()->SetNativeHostPromiseContinuationFunction((Js::JavascriptLibrary::PromiseContinuationCallback)TTDDummyPromiseContinuationCallback, nullptr);
+
+    //To ensure we have a valid context active (when we next try and inflate into this context) set this as active by convention
+    JsrtContext::TrySetCurrent(static_cast<JsrtContext*>(newContext));
+}
+
+void CALLBACK ReleaseJsRTContext_TTDCallback(FinalizableObject* jsrtCtx)
+{
+    static_cast<JsrtContext*>(jsrtCtx)->GetScriptContext()->GetThreadContext()->GetRecycler()->RootRelease(jsrtCtx);
+    JsrtContext::OnReplayDisposeContext_TTDCallback(jsrtCtx);
 }
 
 void CALLBACK SetActiveJsRTContext_TTDCallback(void* runtimeHandle, Js::ScriptContext* ctx)
@@ -218,19 +266,18 @@ void CALLBACK SetActiveJsRTContext_TTDCallback(void* runtimeHandle, Js::ScriptCo
 
 //A create runtime function that we can funnel to for regular and record or debug aware creation
 JsErrorCode CreateRuntimeCore(_In_ JsRuntimeAttributes attributes,
-    _In_opt_ const byte* optTTUri, size_t optTTUriCount, bool isRecord, bool isReplay, bool isDebug,
+    _In_opt_ const char* optTTUri, size_t optTTUriCount, bool isRecord, bool isReplay, bool isDebug,
     _In_ UINT32 snapInterval, _In_ UINT32 snapHistoryLength,
-    _In_opt_ JsTTDInitializeForWriteLogStreamCallback writeInitializeFunction,
     _In_opt_ TTDOpenResourceStreamCallback openResourceStream, _In_opt_ JsTTDReadBytesFromStreamCallback readBytesFromStream,
     _In_opt_ JsTTDWriteBytesToStreamCallback writeBytesToStream, _In_opt_ JsTTDFlushAndCloseStreamCallback flushAndCloseStream,
     _In_opt_ JsThreadServiceCallback threadService, _Out_ JsRuntimeHandle *runtimeHandle)
 {
     VALIDATE_ENTER_CURRENT_THREAD();
 
-    JsErrorCode runtimeResult = GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode {
-        PARAM_NOT_NULL(runtimeHandle);
-        *runtimeHandle = nullptr;
+    PARAM_NOT_NULL(runtimeHandle);
+    *runtimeHandle = nullptr;
 
+    JsErrorCode runtimeResult = GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode {
         const JsRuntimeAttributes JsRuntimeAttributesAll =
             (JsRuntimeAttributes)(
             JsRuntimeAttributeDisableBackgroundWork |
@@ -238,8 +285,10 @@ JsErrorCode CreateRuntimeCore(_In_ JsRuntimeAttributes attributes,
             JsRuntimeAttributeEnableIdleProcessing |
             JsRuntimeAttributeDisableEval |
             JsRuntimeAttributeDisableNativeCodeGeneration |
+            JsRuntimeAttributeDisableExecutablePageAllocation |
             JsRuntimeAttributeEnableExperimentalFeatures |
-            JsRuntimeAttributeDispatchSetExceptionsToDebugger
+            JsRuntimeAttributeDispatchSetExceptionsToDebugger |
+            JsRuntimeAttributeDisableFatalOnOOM
 #ifdef ENABLE_DEBUG_CONFIG_OPTIONS
             | JsRuntimeAttributeSerializeLibraryByteCode
 #endif
@@ -291,6 +340,17 @@ JsErrorCode CreateRuntimeCore(_In_ JsRuntimeAttributes attributes,
             threadContext->SetThreadContextFlag(ThreadContextFlagNoJIT);
         }
 
+        if (attributes & JsRuntimeAttributeDisableExecutablePageAllocation)
+        {
+            threadContext->SetThreadContextFlag(ThreadContextFlagNoJIT);
+            threadContext->SetThreadContextFlag(ThreadContextFlagNoDynamicThunks);
+        }
+
+        if (attributes & JsRuntimeAttributeDisableFatalOnOOM)
+        {
+            threadContext->SetThreadContextFlag(ThreadContextFlagDisableFatalOnOOM);
+        }
+
 #ifdef ENABLE_DEBUG_CONFIG_OPTIONS
         if (Js::Configuration::Global.flags.PrimeRecycler)
         {
@@ -326,12 +386,7 @@ JsErrorCode CreateRuntimeCore(_In_ JsRuntimeAttributes attributes,
             return JsErrorInvalidArgument; //A runtime can only be in 1 mode
         }
 
-        if(isDebug && !isReplay)
-        {
-            return JsErrorInvalidArgument; //A debug runtime also needs to be in runtime mode (and we are going to be strict about it)
-        }
-
-        if(optTTUri == nullptr)
+        if(isReplay && optTTUri == nullptr)
         {
             return JsErrorInvalidArgument; //We must have a location to store data into
         }
@@ -341,10 +396,10 @@ JsErrorCode CreateRuntimeCore(_In_ JsRuntimeAttributes attributes,
             ThreadContextScope scope(threadContext);
             threadContext->EnsureRecycler();
 
-            threadContext->InitTimeTravel(threadContext, *runtimeHandle, optTTUriCount, optTTUri, snapInterval, max<uint32>(2, snapHistoryLength));
-            threadContext->InitHostFunctionsAndTTData(isRecord, isReplay, isDebug,
-                writeInitializeFunction, openResourceStream, readBytesFromStream, writeBytesToStream, flushAndCloseStream,
-                &CreateExternalObject_TTDCallback, &CreateJsRTContext_TTDCallback, &SetActiveJsRTContext_TTDCallback);
+            threadContext->InitTimeTravel(threadContext, *runtimeHandle, snapInterval, max<uint32>(2, snapHistoryLength));
+            threadContext->InitHostFunctionsAndTTData(isRecord, isReplay, isDebug, optTTUriCount, optTTUri,
+                openResourceStream, readBytesFromStream, writeBytesToStream, flushAndCloseStream,
+                &CreateExternalObject_TTDCallback, &CreateJsRTContext_TTDCallback, &ReleaseJsRTContext_TTDCallback, &SetActiveJsRTContext_TTDCallback);
 
             return JsNoError;
         });
@@ -361,7 +416,7 @@ CHAKRA_API JsCreateRuntime(_In_ JsRuntimeAttributes attributes, _In_opt_ JsThrea
     return CreateRuntimeCore(attributes,
         nullptr /*optRecordUri*/, 0 /*optRecordUriCount */, false /*isRecord*/, false /*isReplay*/, false /*isDebug*/,
         UINT_MAX /*optSnapInterval*/, UINT_MAX /*optLogLength*/,
-        nullptr, nullptr, nullptr, nullptr, nullptr, /*TTD IO handlers*/
+        nullptr, nullptr, nullptr, nullptr, /*TTD IO handlers*/
         threadService, runtimeHandle);
 }
 
@@ -446,17 +501,31 @@ CHAKRA_API JsDisposeRuntime(_In_ JsRuntimeHandle runtimeHandle)
                 recycler->ClearObjectBeforeCollectCallbacks();
             }
         }
-
+#ifdef ENABLE_SCRIPT_DEBUGGING
         if (runtime->GetJsrtDebugManager() != nullptr)
         {
             runtime->GetJsrtDebugManager()->ClearDebuggerObjects();
+        }
+#endif
+        Js::ScriptContext *scriptContext;
+        for (scriptContext = threadContext->GetScriptContextList(); scriptContext; scriptContext = scriptContext->next)
+        {
+#ifdef ENABLE_SCRIPT_DEBUGGING
+            if (runtime->GetJsrtDebugManager() != nullptr)
+            {
+                runtime->GetJsrtDebugManager()->ClearDebugDocument(scriptContext);
+            }
+#endif
+            scriptContext->MarkForClose();
         }
 
         // Close any open Contexts.
         // We need to do this before recycler shutdown, because ScriptEngine->Close won't work then.
         runtime->CloseContexts();
 
+#ifdef ENABLE_SCRIPT_DEBUGGING
         runtime->DeleteJsrtDebugManager();
+#endif
 
 #if defined(CHECK_MEMORY_LEAK) || defined(LEAK_REPORT)
         bool doFinalGC = false;
@@ -553,14 +622,14 @@ CHAKRA_API JsAddRef(_In_ JsRef ref, _Out_opt_ unsigned int *count)
             if((lCount == 1) && (threadContext->IsRuntimeInTTDMode()) && (!threadContext->TTDLog->IsPropertyRecordRef(ref)))
             {
                 Js::RecyclableObject* obj = Js::RecyclableObject::FromVar(ref);
-                if(obj->GetScriptContext()->IsTTDRecordModeEnabled() && !TTD::ThreadContextTTD::IsSpecialRootObject(obj))
+                if(obj->GetScriptContext()->IsTTDRecordModeEnabled())
                 {
                     if(obj->GetScriptContext()->ShouldPerformRecordAction())
                     {
                         threadContext->TTDLog->RecordJsRTAddRootRef(_actionEntryPopper, (Js::Var)ref);
                     }
 
-                    threadContext->TTDContext->AddTrackedRootGeneral(TTD_CONVERT_OBJ_TO_LOG_PTR_ID(obj), obj);
+                    threadContext->TTDContext->AddRootRef_Record(TTD_CONVERT_OBJ_TO_LOG_PTR_ID(obj), obj);
                 }
             }
 #else
@@ -615,30 +684,7 @@ CHAKRA_API JsRelease(_In_ JsRef ref, _Out_opt_ unsigned int *count)
                 return JsNoError;
             }
 
-#if ENABLE_TTD
-            unsigned int lCount = 0;
-            recycler->RootRelease(ref, &lCount);
-            if (count != nullptr)
-            {
-                *count = lCount;
-            }
-
-            if((lCount == 0) && (threadContext->IsRuntimeInTTDMode()) && (!threadContext->TTDLog->IsPropertyRecordRef(ref)))
-            {
-                Js::RecyclableObject* obj = Js::RecyclableObject::FromVar(ref);
-                if(obj->GetScriptContext()->IsTTDRecordModeEnabled() && !TTD::ThreadContextTTD::IsSpecialRootObject(obj))
-                {
-                    if(obj->GetScriptContext()->ShouldPerformRecordAction())
-                    {
-                        threadContext->TTDLog->RecordJsRTRemoveRootRef(_actionEntryPopper, (Js::Var)ref);
-                    }
-
-                    threadContext->TTDContext->RemoveTrackedRootGeneral(TTD_CONVERT_OBJ_TO_LOG_PTR_ID(obj), obj);
-                }
-            }
-#else
             recycler->RootRelease(ref, count);
-#endif
 
             return JsNoError;
         });
@@ -734,24 +780,33 @@ CHAKRA_API JsSetCurrentContext(_In_ JsContextRef newContext)
 
 #if ENABLE_TTD
         Js::ScriptContext* newScriptContext = newContext != nullptr ? static_cast<JsrtContext*>(newContext)->GetScriptContext() : nullptr;
+        Js::ScriptContext* oldScriptContext = currentContext != nullptr ? static_cast<JsrtContext*>(currentContext)->GetScriptContext() : nullptr;
+
         if(newScriptContext == nullptr)
         {
-            Js::ScriptContext* oldScriptContext = currentContext != nullptr ? static_cast<JsrtContext*>(currentContext)->GetScriptContext() : nullptr;
-            if(currentContext != nullptr && oldScriptContext->IsTTDRecordModeEnabled())
+            if(oldScriptContext == nullptr)
             {
-                if(oldScriptContext->ShouldPerformRecordAction())
+                ; //if newScriptContext and oldScriptContext are null then we don't worry about doing anything
+            }
+            else
+            {
+                if(oldScriptContext->IsTTDRecordModeEnabled())
                 {
-                    oldScriptContext->GetThreadContext()->TTDLog->RecordJsRTSetCurrentContext(_actionEntryPopper, nullptr);
-                }
+                    //already know newScriptContext != oldScriptContext so don't check again
+                    if(oldScriptContext->ShouldPerformRecordAction())
+                    {
+                        oldScriptContext->GetThreadContext()->TTDLog->RecordJsRTSetCurrentContext(_actionEntryPopper, nullptr);
+                    }
 
-                oldScriptContext->GetThreadContext()->TTDContext->SetActiveScriptContext(nullptr);
+                    oldScriptContext->GetThreadContext()->TTDContext->SetActiveScriptContext(nullptr);
+                }
             }
         }
         else
         {
             if(newScriptContext->IsTTDRecordModeEnabled())
             {
-                if(newScriptContext->ShouldPerformRecordAction())
+                if(newScriptContext != oldScriptContext && newScriptContext->ShouldPerformRecordAction())
                 {
                     newScriptContext->GetThreadContext()->TTDLog->RecordJsRTSetCurrentContext(_actionEntryPopper, newScriptContext->GetGlobalObject());
                 }
@@ -791,7 +846,7 @@ CHAKRA_API JsGetContextOfObject(_In_ JsValueRef object, _Out_ JsContextRef *cont
             RETURN_NO_EXCEPTION(JsErrorArgumentNotObject);
         }
         Js::RecyclableObject* obj = Js::RecyclableObject::FromVar(object);
-        *context = (JsContextRef)obj->GetScriptContext()->GetLibrary()->GetPinnedJsrtContextObject();
+        *context = (JsContextRef)obj->GetScriptContext()->GetLibrary()->GetJsrtContext();
     }
     END_JSRT_NO_EXCEPTION
 }
@@ -829,15 +884,19 @@ CHAKRA_API JsSetContextData(_In_ JsContextRef context, _In_ void *data)
     END_JSRT_NO_EXCEPTION
 }
 
-void HandleScriptCompileError(Js::ScriptContext * scriptContext, CompileScriptException * se)
+void HandleScriptCompileError(Js::ScriptContext * scriptContext, CompileScriptException * se, const WCHAR * sourceUrl)
 {
     HRESULT hr = se->ei.scode;
-    if (hr == E_OUTOFMEMORY || hr == VBSERR_OutOfMemory || hr == VBSERR_OutOfStack || hr == ERRnoMemory)
+    if (hr == E_OUTOFMEMORY || hr == VBSERR_OutOfMemory || hr == ERRnoMemory)
     {
         Js::Throw::OutOfMemory();
     }
+    else if (hr == E_ABORT)
+    {
+        Js::JavascriptOperators::ScriptAbort();
+    }
 
-    Js::JavascriptError* error = Js::JavascriptError::CreateFromCompileScriptException(scriptContext, se);
+    Js::JavascriptError* error = Js::JavascriptError::CreateFromCompileScriptException(scriptContext, se, sourceUrl);
 
     Js::JavascriptExceptionObject * exceptionObject = RecyclerNew(scriptContext->GetRecycler(),
         Js::JavascriptExceptionObject, error, scriptContext, nullptr);
@@ -928,7 +987,7 @@ CHAKRA_API JsBooleanToBool(_In_ JsValueRef value, _Out_ bool *boolValue)
 
 CHAKRA_API JsConvertValueToBoolean(_In_ JsValueRef value, _Out_ JsValueRef *result)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTVarToBooleanConversion, (Js::Var)value);
 
         VALIDATE_INCOMING_REFERENCE(value, scriptContext);
@@ -1110,7 +1169,7 @@ CHAKRA_API JsNumberToInt(_In_ JsValueRef value, _Out_ int *asInt)
 
 CHAKRA_API JsConvertValueToNumber(_In_ JsValueRef value, _Out_ JsValueRef *result)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTVarToNumberConversion, (Js::Var)value);
 
         VALIDATE_INCOMING_REFERENCE(value, scriptContext);
@@ -1141,7 +1200,7 @@ CHAKRA_API JsGetStringLength(_In_ JsValueRef value, _Out_ int *length)
     END_JSRT_NO_EXCEPTION
 }
 
-CHAKRA_API JsPointerToString(_In_reads_(stringLength) const wchar_t *stringValue, _In_ size_t stringLength, _Out_ JsValueRef *string)
+CHAKRA_API JsPointerToString(_In_reads_(stringLength) const WCHAR *stringValue, _In_ size_t stringLength, _Out_ JsValueRef *string)
 {
     return ContextAPINoScriptWrapper([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTCreateString, stringValue, stringLength);
@@ -1165,7 +1224,7 @@ CHAKRA_API JsPointerToString(_In_reads_(stringLength) const wchar_t *stringValue
 // TODO: The annotation of stringPtr is wrong.  Need to fix definition in chakrart.h
 // The warning is '*stringPtr' could be '0' : this does not adhere to the specification for the function 'JsStringToPointer'.
 #pragma warning(suppress:6387)
-CHAKRA_API JsStringToPointer(_In_ JsValueRef stringValue, _Outptr_result_buffer_(*stringLength) const wchar_t **stringPtr, _Out_ size_t *stringLength)
+CHAKRA_API JsStringToPointer(_In_ JsValueRef stringValue, _Outptr_result_buffer_(*stringLength) const WCHAR **stringPtr, _Out_ size_t *stringLength)
 {
     VALIDATE_JSREF(stringValue);
     PARAM_NOT_NULL(stringPtr);
@@ -1189,12 +1248,26 @@ CHAKRA_API JsStringToPointer(_In_ JsValueRef stringValue, _Outptr_result_buffer_
 
 CHAKRA_API JsConvertValueToString(_In_ JsValueRef value, _Out_ JsValueRef *result)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
-        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTVarToStringConversion, (Js::Var)value);
+    PARAM_NOT_NULL(result);
+    *result = nullptr;
 
+    if (value != nullptr && Js::JavascriptString::Is(value))
+    {
+        return ContextAPINoScriptWrapper([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+            PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTVarToStringConversion, (Js::Var)value);
+            VALIDATE_INCOMING_REFERENCE(value, scriptContext);
+
+            *result = value;
+
+            PERFORM_JSRT_TTD_RECORD_ACTION_RESULT(scriptContext, result);
+
+            return JsNoError;
+        });
+    }
+
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTVarToStringConversion, (Js::Var)value);
         VALIDATE_INCOMING_REFERENCE(value, scriptContext);
-        PARAM_NOT_NULL(result);
-        *result = nullptr;
 
         *result = (JsValueRef) Js::JavascriptConversion::ToString((Js::Var)value, scriptContext);
 
@@ -1230,14 +1303,24 @@ CHAKRA_API JsCreateObject(_Out_ JsValueRef *object)
     });
 }
 
-CHAKRA_API JsCreateExternalObject(_In_opt_ void *data, _In_opt_ JsFinalizeCallback finalizeCallback, _Out_ JsValueRef *object)
+CHAKRA_API JsCreateExternalObjectWithPrototype(_In_opt_ void *data,
+    _In_opt_ JsFinalizeCallback finalizeCallback,
+    _In_opt_ JsValueRef prototype,
+    _Out_ JsValueRef *object)
 {
     return ContextAPINoScriptWrapper([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
-        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTAllocateExternalObject);
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTAllocateExternalObject, prototype);
 
         PARAM_NOT_NULL(object);
 
-        *object = RecyclerNewFinalized(scriptContext->GetRecycler(), JsrtExternalObject, RecyclerNew(scriptContext->GetRecycler(), JsrtExternalType, scriptContext, finalizeCallback), data);
+        Js::RecyclableObject * prototypeObject = nullptr;
+        if (prototype != JS_INVALID_REFERENCE)
+        {
+            VALIDATE_INCOMING_OBJECT(prototype, scriptContext);
+            prototypeObject = Js::RecyclableObject::FromVar(prototype);
+        }
+
+        *object = JsrtExternalObject::Create(data, finalizeCallback, prototypeObject, scriptContext);
 
         PERFORM_JSRT_TTD_RECORD_ACTION_RESULT(scriptContext, object);
 
@@ -1245,9 +1328,14 @@ CHAKRA_API JsCreateExternalObject(_In_opt_ void *data, _In_opt_ JsFinalizeCallba
     });
 }
 
+CHAKRA_API JsCreateExternalObject(_In_opt_ void *data, _In_opt_ JsFinalizeCallback finalizeCallback, _Out_ JsValueRef *object)
+{
+    return JsCreateExternalObjectWithPrototype(data, finalizeCallback, JS_INVALID_REFERENCE, object);
+}
+
 CHAKRA_API JsConvertValueToObject(_In_ JsValueRef value, _Out_ JsValueRef *result)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTVarToObjectConversion, (Js::Var)value);
 
         VALIDATE_INCOMING_REFERENCE(value, scriptContext);
@@ -1264,7 +1352,7 @@ CHAKRA_API JsConvertValueToObject(_In_ JsValueRef value, _Out_ JsValueRef *resul
 
 CHAKRA_API JsGetPrototype(_In_ JsValueRef object, _Out_ JsValueRef *prototypeObject)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTGetPrototype, object);
 
         VALIDATE_INCOMING_OBJECT(object, scriptContext);
@@ -1281,7 +1369,7 @@ CHAKRA_API JsGetPrototype(_In_ JsValueRef object, _Out_ JsValueRef *prototypeObj
 
 CHAKRA_API JsSetPrototype(_In_ JsValueRef object, _In_ JsValueRef prototypeObject)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTSetPrototype, object, prototypeObject);
 
         VALIDATE_INCOMING_OBJECT(object, scriptContext);
@@ -1300,7 +1388,7 @@ CHAKRA_API JsSetPrototype(_In_ JsValueRef object, _In_ JsValueRef prototypeObjec
 }
 
 CHAKRA_API JsInstanceOf(_In_ JsValueRef object, _In_ JsValueRef constructor, _Out_ bool *result) {
-    return ContextAPIWrapper<true>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTInstanceOf, object, constructor);
 
         VALIDATE_INCOMING_REFERENCE(object, scriptContext);
@@ -1315,12 +1403,12 @@ CHAKRA_API JsInstanceOf(_In_ JsValueRef object, _In_ JsValueRef constructor, _Ou
 
 CHAKRA_API JsGetExtensionAllowed(_In_ JsValueRef object, _Out_ bool *value)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
 
         VALIDATE_INCOMING_OBJECT(object, scriptContext);
         PARAM_NOT_NULL(value);
-        *value = nullptr;
+        *value = false;
 
         *value = Js::RecyclableObject::FromVar(object)->IsExtensible() != 0;
 
@@ -1330,7 +1418,7 @@ CHAKRA_API JsGetExtensionAllowed(_In_ JsValueRef object, _Out_ bool *value)
 
 CHAKRA_API JsPreventExtension(_In_ JsValueRef object)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
 
         VALIDATE_INCOMING_OBJECT(object, scriptContext);
@@ -1341,55 +1429,479 @@ CHAKRA_API JsPreventExtension(_In_ JsValueRef object)
     });
 }
 
+CHAKRA_API JsHasOwnPropertyCommon(Js::ScriptContext * scriptContext, _In_ JsValueRef object,
+    _In_ const Js::PropertyRecord * propertyRecord, _Out_ bool *hasOwnProperty)
+{
+    *hasOwnProperty = Js::JavascriptOperators::OP_HasOwnProperty(object,
+        propertyRecord->GetPropertyId(), scriptContext) != 0;
+
+    return JsNoError;
+}
+
+CHAKRA_API JsHasOwnProperty(_In_ JsValueRef object, _In_ JsPropertyIdRef propertyId,
+    _Out_ bool *hasOwnProperty)
+{
+    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext,
+        TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTHasOwnProperty, (const Js::PropertyRecord *)propertyId, object);
+
+        VALIDATE_INCOMING_OBJECT(object, scriptContext);
+        VALIDATE_INCOMING_PROPERTYID(propertyId);
+        PARAM_NOT_NULL(hasOwnProperty);
+        *hasOwnProperty = false;
+
+        return JsHasOwnPropertyCommon(scriptContext, object,
+            (const Js::PropertyRecord *)propertyId, hasOwnProperty);
+    });
+}
+
+#ifdef _CHAKRACOREBUILD
+static JsErrorCode InternalGetPropertyRecord(Js::ScriptContext * scriptContext,
+    Js::RecyclableObject * key, _Out_ const Js::PropertyRecord ** propertyRecord)
+{
+    Assert(propertyRecord != nullptr);
+    *propertyRecord = nullptr;
+
+    switch(key->GetTypeId())
+    {
+    case Js::TypeIds_String:
+        scriptContext->GetOrAddPropertyRecord(Js::JavascriptString::FromVar(key),
+            (Js::PropertyRecord const **)propertyRecord);
+        break;
+    case Js::TypeIds_Symbol:
+        *propertyRecord = Js::JavascriptSymbol::FromVar(key)->GetValue();
+        break;
+    default:
+        return JsErrorInvalidArgument;
+    };
+
+    return JsNoError;
+}
+
+CHAKRA_API JsObjectHasOwnProperty(_In_ JsValueRef object, _In_ JsValueRef propertyId, _Out_ bool *hasOwnProperty)
+{
+    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext,
+        TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
+
+        VALIDATE_INCOMING_OBJECT(object, scriptContext);
+        VALIDATE_INCOMING_RECYCLABLE(propertyId, scriptContext);
+        PARAM_NOT_NULL(hasOwnProperty);
+        *hasOwnProperty = false;
+
+        const Js::PropertyRecord *propertyRecord = nullptr;
+        JsErrorCode errorValue = InternalGetPropertyRecord(scriptContext,
+            Js::RecyclableObject::FromVar(propertyId), &propertyRecord);
+
+        if (errorValue != JsNoError)
+        {
+            return errorValue;
+        }
+
+        return JsHasOwnPropertyCommon(scriptContext, object, propertyRecord, hasOwnProperty);
+    });
+}
+#endif
+
+static JsErrorCode JsGetPropertyCommon(Js::ScriptContext * scriptContext,
+    _In_ Js::RecyclableObject * object,
+    _In_ const Js::PropertyRecord * propertyRecord, _Out_ JsValueRef *value)
+{
+    AssertMsg(scriptContext->GetThreadContext()->IsScriptActive(), "Caller is expected to be under ContextAPIWrapper!");
+
+    *value = Js::JavascriptOperators::GetPropertyNoCache(object, propertyRecord->GetPropertyId(), scriptContext);
+    Assert(*value == nullptr || !Js::CrossSite::NeedMarshalVar(*value, scriptContext));
+
+    return JsNoError;
+}
+
 CHAKRA_API JsGetProperty(_In_ JsValueRef object, _In_ JsPropertyIdRef propertyId, _Out_ JsValueRef *value)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
-        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTGetProperty, (Js::PropertyRecord *)propertyId, object);
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext,
+        TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTGetProperty, (const Js::PropertyRecord *)propertyId, object);
 
         VALIDATE_INCOMING_OBJECT(object, scriptContext);
         VALIDATE_INCOMING_PROPERTYID(propertyId);
         PARAM_NOT_NULL(value);
         *value = nullptr;
 
-        *value = Js::JavascriptOperators::OP_GetProperty((Js::Var)object, ((Js::PropertyRecord *)propertyId)->GetPropertyId(), scriptContext);
-        Assert(*value == nullptr || !Js::CrossSite::NeedMarshalVar(*value, scriptContext));
+        Js::RecyclableObject * instance = Js::RecyclableObject::FromVar(object);
+        JsErrorCode err = JsGetPropertyCommon(scriptContext, instance, (const Js::PropertyRecord *)propertyId,
+             value);
 
         PERFORM_JSRT_TTD_RECORD_ACTION_RESULT(scriptContext, value);
 
-        return JsNoError;
+        return err;
     });
+}
+
+#ifdef _CHAKRACOREBUILD
+CHAKRA_API JsObjectGetProperty(_In_ JsValueRef object, _In_ JsValueRef propertyId, _Out_ JsValueRef *value)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext,
+        TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
+
+        VALIDATE_INCOMING_OBJECT(object, scriptContext);
+        VALIDATE_INCOMING_RECYCLABLE(propertyId, scriptContext);
+        PARAM_NOT_NULL(value);
+        *value = nullptr;
+
+        const Js::PropertyRecord *propertyRecord = nullptr;
+        JsErrorCode errorValue = InternalGetPropertyRecord(scriptContext,
+            Js::RecyclableObject::FromVar(propertyId), &propertyRecord);
+
+        if (errorValue != JsNoError)
+        {
+            return errorValue;
+        }
+
+        Assert(propertyRecord != nullptr);
+
+        Js::RecyclableObject * instance = Js::RecyclableObject::FromVar(object);
+        return JsGetPropertyCommon(scriptContext, instance, propertyRecord, value);
+    });
+}
+#endif
+
+static JsErrorCode JsGetOwnPropertyDescriptorCommon(Js::ScriptContext * scriptContext,
+    _In_ JsValueRef object, _In_ const Js::PropertyRecord * propertyRecord, _Out_ JsValueRef *propertyDescriptor)
+{
+    AssertMsg(scriptContext->GetThreadContext()->IsScriptActive(), "Caller is expected to be under ContextAPIWrapper!");
+
+    Js::PropertyDescriptor propertyDescriptorValue;
+    if (Js::JavascriptOperators::GetOwnPropertyDescriptor(Js::RecyclableObject::FromVar(object),
+        propertyRecord->GetPropertyId(), scriptContext, &propertyDescriptorValue))
+    {
+        *propertyDescriptor = Js::JavascriptOperators::FromPropertyDescriptor(propertyDescriptorValue, scriptContext);
+    }
+    else
+    {
+        *propertyDescriptor = scriptContext->GetLibrary()->GetUndefined();
+    }
+    Assert(*propertyDescriptor == nullptr || !Js::CrossSite::NeedMarshalVar(*propertyDescriptor, scriptContext));
+
+    return JsNoError;
 }
 
 CHAKRA_API JsGetOwnPropertyDescriptor(_In_ JsValueRef object, _In_ JsPropertyIdRef propertyId, _Out_ JsValueRef *propertyDescriptor)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
-        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTGetOwnPropertyInfo, (Js::PropertyRecord *)propertyId, object);
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTGetOwnPropertyInfo, (const Js::PropertyRecord *)propertyId, object);
 
         VALIDATE_INCOMING_OBJECT(object, scriptContext);
         VALIDATE_INCOMING_PROPERTYID(propertyId);
         PARAM_NOT_NULL(propertyDescriptor);
         *propertyDescriptor = nullptr;
 
-        Js::PropertyDescriptor propertyDescriptorValue;
-        if (Js::JavascriptOperators::GetOwnPropertyDescriptor(Js::RecyclableObject::FromVar(object), ((Js::PropertyRecord *)propertyId)->GetPropertyId(), scriptContext, &propertyDescriptorValue))
-        {
-            *propertyDescriptor = Js::JavascriptOperators::FromPropertyDescriptor(propertyDescriptorValue, scriptContext);
-        }
-        else
-        {
-            *propertyDescriptor = scriptContext->GetLibrary()->GetUndefined();
-        }
-        Assert(*propertyDescriptor == nullptr || !Js::CrossSite::NeedMarshalVar(*propertyDescriptor, scriptContext));
+        JsErrorCode err = JsGetOwnPropertyDescriptorCommon(scriptContext, object, (const Js::PropertyRecord *)propertyId,
+            propertyDescriptor);
 
         PERFORM_JSRT_TTD_RECORD_ACTION_RESULT(scriptContext, propertyDescriptor);
 
-        return JsNoError;
+        return err;
     });
 }
 
+#ifdef _CHAKRACOREBUILD
+CHAKRA_API JsObjectGetOwnPropertyDescriptor(_In_ JsValueRef object, _In_ JsValueRef propertyId, _Out_ JsValueRef *propertyDescriptor)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext,
+        TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
+
+        VALIDATE_INCOMING_OBJECT(object, scriptContext);
+        VALIDATE_INCOMING_RECYCLABLE(propertyId, scriptContext);
+        PARAM_NOT_NULL(propertyDescriptor);
+        *propertyDescriptor = nullptr;
+
+        const Js::PropertyRecord *propertyRecord = nullptr;
+        JsErrorCode errorValue = InternalGetPropertyRecord(scriptContext,
+            Js::RecyclableObject::FromVar(propertyId), &propertyRecord);
+
+        if (errorValue != JsNoError)
+        {
+            return errorValue;
+        }
+
+        Assert(propertyRecord != nullptr);
+
+        return JsGetOwnPropertyDescriptorCommon(scriptContext, object, propertyRecord, propertyDescriptor);
+    });
+}
+#endif
+
+static JsErrorCode JsSetPropertyCommon(Js::ScriptContext * scriptContext, _In_ JsValueRef object,
+    _In_ const Js::PropertyRecord * propertyRecord, _In_ JsValueRef value, _In_ bool useStrictRules)
+{
+    AssertMsg(scriptContext->GetThreadContext()->IsScriptActive(), "Caller is expected to be under ContextAPIWrapper!");
+
+    Js::JavascriptOperators::OP_SetProperty(object, propertyRecord->GetPropertyId(),
+        value, scriptContext, nullptr, useStrictRules ? Js::PropertyOperation_StrictMode : Js::PropertyOperation_None);
+
+    return JsNoError;
+}
+
+CHAKRA_API JsSetProperty(_In_ JsValueRef object, _In_ JsPropertyIdRef propertyId, _In_ JsValueRef value, _In_ bool useStrictRules)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext,
+        TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTSetProperty, object, (const Js::PropertyRecord *)propertyId, value, useStrictRules);
+
+        VALIDATE_INCOMING_OBJECT(object, scriptContext);
+        VALIDATE_INCOMING_PROPERTYID(propertyId);
+        VALIDATE_INCOMING_REFERENCE(value, scriptContext);
+
+        return JsSetPropertyCommon(scriptContext, object, (const Js::PropertyRecord *)propertyId,
+            value, useStrictRules);
+    });
+}
+
+#ifdef _CHAKRACOREBUILD
+CHAKRA_API JsObjectSetProperty(_In_ JsValueRef object, _In_ JsValueRef propertyId, _In_ JsValueRef value, _In_ bool useStrictRules)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext,
+        TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
+
+        VALIDATE_INCOMING_OBJECT(object, scriptContext);
+        VALIDATE_INCOMING_RECYCLABLE(propertyId, scriptContext);
+        VALIDATE_INCOMING_REFERENCE(value, scriptContext);
+
+        const Js::PropertyRecord *propertyRecord = nullptr;
+        JsErrorCode errorValue = InternalGetPropertyRecord(scriptContext,
+            Js::RecyclableObject::FromVar(propertyId), &propertyRecord);
+
+        if (errorValue != JsNoError)
+        {
+            return errorValue;
+        }
+
+        Assert(propertyRecord != nullptr);
+
+        return JsSetPropertyCommon(scriptContext, object, propertyRecord, value, useStrictRules);
+    });
+}
+#endif
+
+CHAKRA_API JsHasProperty(_In_ JsValueRef object, _In_ JsPropertyIdRef propertyId, _Out_ bool *hasProperty)
+{
+    VALIDATE_JSREF(object);
+    if (!Js::JavascriptOperators::IsObject(object)) return JsErrorArgumentNotObject;
+
+    auto internalHasProperty = [&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTHasProperty, (Js::PropertyRecord *)propertyId, object);
+
+        VALIDATE_INCOMING_OBJECT(object, scriptContext);
+        VALIDATE_INCOMING_PROPERTYID(propertyId);
+        PARAM_NOT_NULL(hasProperty);
+        *hasProperty = false;
+
+        Js::RecyclableObject * instance = Js::RecyclableObject::FromVar(object);
+        *hasProperty = Js::JavascriptOperators::HasProperty(instance, ((Js::PropertyRecord *)propertyId)->GetPropertyId()) != 0;
+
+        return JsNoError;
+    };
+
+    Js::RecyclableObject* robject = Js::RecyclableObject::FromVar(object);
+    Js::TypeId typeId = Js::JavascriptOperators::GetTypeId(robject);
+    while (typeId != Js::TypeIds_Null && typeId != Js::TypeIds_Proxy)
+    {
+        robject = robject->GetPrototype();
+        typeId = Js::JavascriptOperators::GetTypeId(robject);
+    }
+
+    if (typeId == Js::TypeIds_Proxy)
+    {
+        return ContextAPIWrapper<JSRT_MAYBE_TRUE>(internalHasProperty);
+    }
+    else
+    {
+        return ContextAPINoScriptWrapper(internalHasProperty);
+    }
+}
+
+#ifdef _CHAKRACOREBUILD
+CHAKRA_API JsObjectHasProperty(_In_ JsValueRef object, _In_ JsValueRef propertyId, _Out_ bool *hasProperty)
+{
+    VALIDATE_JSREF(object);
+    if (!Js::JavascriptOperators::IsObject(object)) return JsErrorArgumentNotObject;
+
+    auto internalHasProperty = [&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
+        VALIDATE_INCOMING_OBJECT(object, scriptContext);
+        VALIDATE_INCOMING_RECYCLABLE(propertyId, scriptContext);
+        PARAM_NOT_NULL(hasProperty);
+        *hasProperty = false;
+
+        const Js::PropertyRecord *propertyRecord = nullptr;
+        JsErrorCode errorValue = InternalGetPropertyRecord(scriptContext,
+            Js::RecyclableObject::FromVar(propertyId), &propertyRecord);
+
+        if (errorValue != JsNoError)
+        {
+            return errorValue;
+        }
+
+        Js::RecyclableObject * instance = Js::RecyclableObject::FromVar(object);
+        *hasProperty = Js::JavascriptOperators::HasProperty(instance, propertyRecord->GetPropertyId()) != 0;
+
+        return JsNoError;
+    };
+
+    Js::RecyclableObject* robject = Js::RecyclableObject::FromVar(object);
+    Js::TypeId typeId = Js::JavascriptOperators::GetTypeId(robject);
+    while (typeId != Js::TypeIds_Null && typeId != Js::TypeIds_Proxy)
+    {
+        robject = robject->GetPrototype();
+        typeId = Js::JavascriptOperators::GetTypeId(robject);
+    }
+
+    if (typeId == Js::TypeIds_Proxy)
+    {
+        return ContextAPIWrapper<JSRT_MAYBE_TRUE>(internalHasProperty);
+    }
+    else
+    {
+        return ContextAPINoScriptWrapper(internalHasProperty);
+    }
+}
+#endif
+
+static JsErrorCode JsDeletePropertyCommon(Js::ScriptContext * scriptContext, _In_ JsValueRef object,
+    _In_ const Js::PropertyRecord * propertyRecord, _In_ bool useStrictRules, _Out_ JsValueRef *result)
+{
+    AssertMsg(scriptContext->GetThreadContext()->IsScriptActive(), "Caller is expected to be under ContextAPIWrapper!");
+
+    *result = Js::JavascriptOperators::OP_DeleteProperty((Js::Var)object,
+        propertyRecord->GetPropertyId(),
+        scriptContext, useStrictRules ? Js::PropertyOperation_StrictMode : Js::PropertyOperation_None);
+
+    Assert(*result == nullptr || !Js::CrossSite::NeedMarshalVar(*result, scriptContext));
+
+    return JsNoError;
+}
+
+CHAKRA_API JsDeleteProperty(_In_ JsValueRef object, _In_ JsPropertyIdRef propertyId,
+    _In_ bool useStrictRules, _Out_ JsValueRef *result)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext,
+        TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTDeleteProperty, object, (const Js::PropertyRecord *)propertyId, useStrictRules);
+
+        VALIDATE_INCOMING_OBJECT(object, scriptContext);
+        VALIDATE_INCOMING_PROPERTYID(propertyId);
+        PARAM_NOT_NULL(result);
+        *result = nullptr;
+
+        JsErrorCode err = JsDeletePropertyCommon(scriptContext, object, (const Js::PropertyRecord *)propertyId,
+            useStrictRules, result);
+
+        PERFORM_JSRT_TTD_RECORD_ACTION_RESULT(scriptContext, result);
+
+        return err;
+    });
+}
+
+#ifdef _CHAKRACOREBUILD
+CHAKRA_API JsObjectDeleteProperty(_In_ JsValueRef object, _In_ JsValueRef propertyId,
+    _In_ bool useStrictRules, _Out_ JsValueRef *result)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext,
+        TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
+
+        VALIDATE_INCOMING_OBJECT(object, scriptContext);
+        VALIDATE_INCOMING_RECYCLABLE(propertyId, scriptContext);
+        PARAM_NOT_NULL(result);
+        *result = nullptr;
+
+        const Js::PropertyRecord *propertyRecord = nullptr;
+        JsErrorCode errorValue = InternalGetPropertyRecord(scriptContext,
+            Js::RecyclableObject::FromVar(propertyId), &propertyRecord);
+
+        if (errorValue != JsNoError)
+        {
+            return errorValue;
+        }
+
+        Assert(propertyRecord != nullptr);
+
+        return JsDeletePropertyCommon(scriptContext, object, propertyRecord,
+            useStrictRules, result);
+    });
+}
+#endif
+
+static JsErrorCode JsDefinePropertyCommon(Js::ScriptContext * scriptContext, _In_ JsValueRef object,
+    _In_ const Js::PropertyRecord *propertyRecord, _In_ JsValueRef propertyDescriptor,
+    _Out_ bool *result)
+{
+    AssertMsg(scriptContext->GetThreadContext()->IsScriptActive(), "Caller is expected to be under ContextAPIWrapper!");
+
+    Js::PropertyDescriptor propertyDescriptorValue;
+    if (!Js::JavascriptOperators::ToPropertyDescriptor(propertyDescriptor, &propertyDescriptorValue, scriptContext))
+    {
+        return JsErrorInvalidArgument;
+    }
+
+    *result = Js::JavascriptOperators::DefineOwnPropertyDescriptor(
+        Js::RecyclableObject::FromVar(object), propertyRecord->GetPropertyId(),
+        propertyDescriptorValue, true, scriptContext) != 0;
+
+    return JsNoError;
+}
+
+CHAKRA_API JsDefineProperty(_In_ JsValueRef object, _In_ JsPropertyIdRef propertyId,
+    _In_ JsValueRef propertyDescriptor, _Out_ bool *result)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext,
+        TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTDefineProperty, object, (const Js::PropertyRecord *)propertyId, propertyDescriptor);
+
+        VALIDATE_INCOMING_OBJECT(object, scriptContext);
+        VALIDATE_INCOMING_PROPERTYID(propertyId);
+        VALIDATE_INCOMING_OBJECT(propertyDescriptor, scriptContext);
+        PARAM_NOT_NULL(result);
+        *result = false;
+
+        return JsDefinePropertyCommon(scriptContext, object, (const Js::PropertyRecord *)propertyId,
+            propertyDescriptor, result);
+    });
+}
+
+#ifdef _CHAKRACOREBUILD
+CHAKRA_API JsObjectDefineProperty(_In_ JsValueRef object, _In_ JsValueRef propertyId,
+    _In_ JsValueRef propertyDescriptor, _Out_ bool *result)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext,
+        TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
+
+        VALIDATE_INCOMING_OBJECT(object, scriptContext);
+        VALIDATE_INCOMING_RECYCLABLE(propertyId, scriptContext);
+        VALIDATE_INCOMING_OBJECT(propertyDescriptor, scriptContext);
+        PARAM_NOT_NULL(result);
+        *result = false;
+
+        const Js::PropertyRecord *propertyRecord = nullptr;
+        JsErrorCode errorValue = InternalGetPropertyRecord(scriptContext,
+            Js::RecyclableObject::FromVar(propertyId), &propertyRecord);
+
+        if (errorValue != JsNoError)
+        {
+            return errorValue;
+        }
+
+        return JsDefinePropertyCommon(scriptContext, object, propertyRecord, propertyDescriptor, result);
+    });
+}
+#endif
+
 CHAKRA_API JsGetOwnPropertyNames(_In_ JsValueRef object, _Out_ JsValueRef *propertyNames)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTGetOwnPropertyNamesInfo, object);
 
         VALIDATE_INCOMING_OBJECT(object, scriptContext);
@@ -1407,7 +1919,7 @@ CHAKRA_API JsGetOwnPropertyNames(_In_ JsValueRef object, _Out_ JsValueRef *prope
 
 CHAKRA_API JsGetOwnPropertySymbols(_In_ JsValueRef object, _Out_ JsValueRef *propertySymbols)
 {
-    return ContextAPIWrapper<true>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTGetOwnPropertySymbolsInfo, object);
 
         VALIDATE_INCOMING_OBJECT(object, scriptContext);
@@ -1417,83 +1929,6 @@ CHAKRA_API JsGetOwnPropertySymbols(_In_ JsValueRef object, _Out_ JsValueRef *pro
         Assert(*propertySymbols == nullptr || !Js::CrossSite::NeedMarshalVar(*propertySymbols, scriptContext));
 
         PERFORM_JSRT_TTD_RECORD_ACTION_RESULT(scriptContext, propertySymbols);
-
-        return JsNoError;
-    });
-}
-
-CHAKRA_API JsSetProperty(_In_ JsValueRef object, _In_ JsPropertyIdRef propertyId, _In_ JsValueRef value, _In_ bool useStrictRules)
-{
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
-        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTSetProperty, object, (Js::PropertyRecord *)propertyId, value, useStrictRules);
-
-        VALIDATE_INCOMING_OBJECT(object, scriptContext);
-        VALIDATE_INCOMING_PROPERTYID(propertyId);
-        VALIDATE_INCOMING_REFERENCE(value, scriptContext);
-
-        Js::JavascriptOperators::OP_SetProperty(object, ((Js::PropertyRecord *)propertyId)->GetPropertyId(), value, scriptContext,
-            nullptr, useStrictRules ? Js::PropertyOperation_StrictMode : Js::PropertyOperation_None);
-
-        return JsNoError;
-    });
-}
-
-CHAKRA_API JsHasProperty(_In_ JsValueRef object, _In_ JsPropertyIdRef propertyId, _Out_ bool *hasProperty)
-{
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
-        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTHasProperty, (Js::PropertyRecord *)propertyId, object);
-
-        VALIDATE_INCOMING_OBJECT(object, scriptContext);
-        VALIDATE_INCOMING_PROPERTYID(propertyId);
-        PARAM_NOT_NULL(hasProperty);
-        *hasProperty = nullptr;
-
-        *hasProperty = Js::JavascriptOperators::OP_HasProperty(object, ((Js::PropertyRecord *)propertyId)->GetPropertyId(), scriptContext) != 0;
-
-        return JsNoError;
-    });
-}
-
-CHAKRA_API JsDeleteProperty(_In_ JsValueRef object, _In_ JsPropertyIdRef propertyId, _In_ bool useStrictRules, _Out_ JsValueRef *result)
-{
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
-        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTDeleteProperty, object, (Js::PropertyRecord *)propertyId, useStrictRules);
-
-        VALIDATE_INCOMING_OBJECT(object, scriptContext);
-        VALIDATE_INCOMING_PROPERTYID(propertyId);
-        PARAM_NOT_NULL(result);
-        *result = nullptr;
-
-        *result = Js::JavascriptOperators::OP_DeleteProperty((Js::Var)object, ((Js::PropertyRecord *)propertyId)->GetPropertyId(),
-            scriptContext, useStrictRules ? Js::PropertyOperation_StrictMode : Js::PropertyOperation_None);
-        Assert(*result == nullptr || !Js::CrossSite::NeedMarshalVar(*result, scriptContext));
-
-        PERFORM_JSRT_TTD_RECORD_ACTION_RESULT(scriptContext, result);
-
-        return JsNoError;
-    });
-}
-
-CHAKRA_API JsDefineProperty(_In_ JsValueRef object, _In_ JsPropertyIdRef propertyId, _In_ JsValueRef propertyDescriptor, _Out_ bool *result)
-{
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
-        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTDefineProperty, object, (Js::PropertyRecord *)propertyId, propertyDescriptor);
-
-        VALIDATE_INCOMING_OBJECT(object, scriptContext);
-        VALIDATE_INCOMING_PROPERTYID(propertyId);
-        VALIDATE_INCOMING_OBJECT(propertyDescriptor, scriptContext);
-        PARAM_NOT_NULL(result);
-        *result = nullptr;
-
-        Js::PropertyDescriptor propertyDescriptorValue;
-        if (!Js::JavascriptOperators::ToPropertyDescriptor(propertyDescriptor, &propertyDescriptorValue, scriptContext))
-        {
-            return JsErrorInvalidArgument;
-        }
-
-        *result = Js::JavascriptOperators::DefineOwnPropertyDescriptor(
-            Js::RecyclableObject::FromVar(object), ((Js::PropertyRecord *)propertyId)->GetPropertyId(), propertyDescriptorValue,
-            true, scriptContext) != 0;
 
         return JsNoError;
     });
@@ -1517,7 +1952,7 @@ CHAKRA_API JsCreateArray(_In_ unsigned int length, _Out_ JsValueRef *result)
 
 CHAKRA_API JsCreateArrayBuffer(_In_ unsigned int byteLength, _Out_ JsValueRef *result)
 {
-    return ContextAPIWrapper<true>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTAllocateArrayBuffer, byteLength);
 
         PARAM_NOT_NULL(result);
@@ -1531,6 +1966,57 @@ CHAKRA_API JsCreateArrayBuffer(_In_ unsigned int byteLength, _Out_ JsValueRef *r
         return JsNoError;
     });
 }
+
+#ifdef _CHAKRACOREBUILD
+CHAKRA_API JsCreateSharedArrayBufferWithSharedContent(_In_ JsSharedArrayBufferContentHandle sharedContents, _Out_ JsValueRef *result)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+
+        PARAM_NOT_NULL(result);
+
+        Js::JavascriptLibrary* library = scriptContext->GetLibrary();
+        *result = library->CreateSharedArrayBuffer((Js::SharedContents*)sharedContents);
+
+        PERFORM_JSRT_TTD_RECORD_ACTION_RESULT(scriptContext, result);
+
+        JS_ETW(EventWriteJSCRIPT_RECYCLER_ALLOCATE_OBJECT(*result));
+        return JsNoError;
+    });
+}
+
+CHAKRA_API JsGetSharedArrayBufferContent(_In_ JsValueRef sharedArrayBuffer, _Out_ JsSharedArrayBufferContentHandle *sharedContents)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+
+        PARAM_NOT_NULL(sharedContents);
+
+        if (!Js::SharedArrayBuffer::Is(sharedArrayBuffer))
+        {
+            return JsErrorInvalidArgument;
+        }
+
+        Js::SharedContents**& content = (Js::SharedContents**&)sharedContents;
+        *content = Js::SharedArrayBuffer::FromVar(sharedArrayBuffer)->GetSharedContents();
+
+        if (*content == nullptr)
+        {
+            return JsErrorFatal;
+        }
+
+        (*content)->AddRef();
+
+        return JsNoError;
+    });
+}
+
+CHAKRA_API JsReleaseSharedArrayBufferContentHandle(_In_ JsSharedArrayBufferContentHandle sharedContents)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        ((Js::SharedContents*)sharedContents)->Release();
+        return JsNoError;
+    });
+}
+#endif // _CHAKRACOREBUILD
 
 CHAKRA_API JsCreateExternalArrayBuffer(_Pre_maybenull_ _Pre_writable_byte_size_(byteLength) void *data, _In_ unsigned int byteLength,
     _In_opt_ JsFinalizeCallback finalizeCallback, _In_opt_ void *callbackState, _Out_ JsValueRef *result)
@@ -1563,7 +2049,7 @@ CHAKRA_API JsCreateExternalArrayBuffer(_Pre_maybenull_ _Pre_writable_byte_size_(
 CHAKRA_API JsCreateTypedArray(_In_ JsTypedArrayType arrayType, _In_ JsValueRef baseArray, _In_ unsigned int byteOffset,
     _In_ unsigned int elementLength, _Out_ JsValueRef *result)
 {
-    return ContextAPIWrapper<true>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
 
         if (baseArray != JS_INVALID_REFERENCE)
@@ -1643,7 +2129,7 @@ CHAKRA_API JsCreateTypedArray(_In_ JsTypedArrayType arrayType, _In_ JsValueRef b
 
 CHAKRA_API JsCreateDataView(_In_ JsValueRef arrayBuffer, _In_ unsigned int byteOffset, _In_ unsigned int byteLength, _Out_ JsValueRef *result)
 {
-    return ContextAPIWrapper<true>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
 
         VALIDATE_INCOMING_REFERENCE(arrayBuffer, scriptContext);
@@ -1830,7 +2316,7 @@ CHAKRA_API JsGetDataViewStorage(_In_ JsValueRef instance, _Outptr_result_bytebuf
 
 CHAKRA_API JsCreateSymbol(_In_ JsValueRef description, _Out_ JsValueRef *result)
 {
-    return ContextAPIWrapper<true>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTCreateSymbol, description);
 
         PARAM_NOT_NULL(result);
@@ -1858,7 +2344,7 @@ CHAKRA_API JsCreateSymbol(_In_ JsValueRef description, _Out_ JsValueRef *result)
 
 CHAKRA_API JsHasIndexedProperty(_In_ JsValueRef object, _In_ JsValueRef index, _Out_ bool *result)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
 
         VALIDATE_INCOMING_OBJECT(object, scriptContext);
@@ -1874,7 +2360,7 @@ CHAKRA_API JsHasIndexedProperty(_In_ JsValueRef object, _In_ JsValueRef index, _
 
 CHAKRA_API JsGetIndexedProperty(_In_ JsValueRef object, _In_ JsValueRef index, _Out_ JsValueRef *result)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTGetIndex, index, object);
 
         VALIDATE_INCOMING_OBJECT(object, scriptContext);
@@ -1892,7 +2378,7 @@ CHAKRA_API JsGetIndexedProperty(_In_ JsValueRef object, _In_ JsValueRef index, _
 
 CHAKRA_API JsSetIndexedProperty(_In_ JsValueRef object, _In_ JsValueRef index, _In_ JsValueRef value)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTSetIndex, object, index, value);
 
         VALIDATE_INCOMING_OBJECT(object, scriptContext);
@@ -1907,7 +2393,7 @@ CHAKRA_API JsSetIndexedProperty(_In_ JsValueRef object, _In_ JsValueRef index, _
 
 CHAKRA_API JsDeleteIndexedProperty(_In_ JsValueRef object, _In_ JsValueRef index)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
 
         VALIDATE_INCOMING_OBJECT(object, scriptContext);
@@ -1960,7 +2446,7 @@ CHAKRA_API JsSetIndexedPropertiesToExternalData(
     _In_ JsTypedArrayType arrayType,
     _In_ unsigned int elementLength)
 {
-    return ContextAPIWrapper<true>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
 
         VALIDATE_INCOMING_OBJECT(object, scriptContext);
@@ -2035,7 +2521,7 @@ CHAKRA_API JsHasIndexedPropertiesExternalData(_In_ JsValueRef object, _Out_ bool
 
         if (Js::DynamicType::Is(Js::JavascriptOperators::GetTypeId(object)))
         {
-            Js::DynamicObject* dynamicObject = Js::DynamicObject::FromVar(object);
+            Js::DynamicObject* dynamicObject = Js::DynamicObject::UnsafeFromVar(object);
             Js::ArrayObject* objectArray = dynamicObject->GetObjectArray();
             *value = (objectArray && !Js::DynamicObject::IsAnyArray(objectArray));
         }
@@ -2065,7 +2551,7 @@ CHAKRA_API JsGetIndexedPropertiesExternalData(
         *arrayType = JsTypedArrayType();
         *elementLength = 0;
 
-        Js::DynamicObject* dynamicObject = Js::DynamicObject::FromVar(object);
+        Js::DynamicObject* dynamicObject = Js::DynamicObject::UnsafeFromVar(object);
         Js::ArrayObject* objectArray = dynamicObject->GetObjectArray();
         if (!objectArray)
         {
@@ -2108,9 +2594,39 @@ CHAKRA_API JsGetIndexedPropertiesExternalData(
     END_JSRT_NO_EXCEPTION
 }
 
+CHAKRA_API JsLessThan(_In_ JsValueRef object1, _In_ JsValueRef object2, _Out_ bool *result)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTLessThan, object1, object2, false);
+
+        VALIDATE_INCOMING_REFERENCE(object1, scriptContext);
+        VALIDATE_INCOMING_REFERENCE(object2, scriptContext);
+        PARAM_NOT_NULL(result);
+
+        *result = Js::JavascriptOperators::Less((Js::Var)object1, (Js::Var)object2, scriptContext) != 0;
+
+        return JsNoError;
+    });
+}
+
+CHAKRA_API JsLessThanOrEqual(_In_ JsValueRef object1, _In_ JsValueRef object2, _Out_ bool *result)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTLessThan, object1, object2, true);
+
+        VALIDATE_INCOMING_REFERENCE(object1, scriptContext);
+        VALIDATE_INCOMING_REFERENCE(object2, scriptContext);
+        PARAM_NOT_NULL(result);
+
+        *result = Js::JavascriptOperators::LessEqual((Js::Var)object1, (Js::Var)object2, scriptContext) != 0;
+
+        return JsNoError;
+    });
+}
+
 CHAKRA_API JsEquals(_In_ JsValueRef object1, _In_ JsValueRef object2, _Out_ bool *result)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTEquals, object1, object2, false);
 
         VALIDATE_INCOMING_REFERENCE(object1, scriptContext);
@@ -2124,7 +2640,7 @@ CHAKRA_API JsEquals(_In_ JsValueRef object1, _In_ JsValueRef object2, _Out_ bool
 
 CHAKRA_API JsStrictEquals(_In_ JsValueRef object1, _In_ JsValueRef object2, _Out_ bool *result)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTEquals, object1, object2, true);
 
         VALIDATE_INCOMING_REFERENCE(object1, scriptContext);
@@ -2193,18 +2709,24 @@ CHAKRA_API JsCallFunction(_In_ JsValueRef function, _In_reads_(cargs) JsValueRef
         *result = nullptr;
     }
 
-    return ContextAPIWrapper<true>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
 #if ENABLE_TTD
         TTD::TTDJsRTFunctionCallActionPopperRecorder callInfoPopper;
         if(PERFORM_JSRT_TTD_RECORD_ACTION_CHECK(scriptContext))
         {
             TTD::NSLogEvents::EventLogEntry* callEvent = scriptContext->GetThreadContext()->TTDLog->RecordJsRTCallFunction(_actionEntryPopper, scriptContext->GetThreadContext()->TTDRootNestingCount, function, cargs, args);
-            callInfoPopper.InitializeForRecording(scriptContext, callEvent);
+            callInfoPopper.InitializeForRecording(scriptContext, scriptContext->GetThreadContext()->TTDLog->GetCurrentWallTime(), callEvent);
 
             if(scriptContext->GetThreadContext()->TTDRootNestingCount == 0)
             {
                 TTD::EventLog* elog = scriptContext->GetThreadContext()->TTDLog;
                 elog->ResetCallStackForTopLevelCall(elog->GetLastEventTime());
+
+                TTD::ExecutionInfoManager* emanager = scriptContext->GetThreadContext()->TTDExecutionInfo;
+                if(emanager != nullptr)
+                {
+                    emanager->ResetCallStackForTopLevelCall(elog->GetLastEventTime());
+                }
             }
         }
 #endif
@@ -2245,7 +2767,7 @@ CHAKRA_API JsCallFunction(_In_ JsValueRef function, _In_reads_(cargs) JsValueRef
 
 CHAKRA_API JsConstructObject(_In_ JsValueRef function, _In_reads_(cargs) JsValueRef *args, _In_ ushort cargs, _Out_ JsValueRef *result)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTConstructCall, function, cargs, args);
 
         VALIDATE_INCOMING_FUNCTION(function, scriptContext);
@@ -2268,7 +2790,7 @@ CHAKRA_API JsConstructObject(_In_ JsValueRef function, _In_reads_(cargs) JsValue
 
         //
         //TODO: we will want to look at this at some point -- either treat as "top-level" call or maybe constructors are fast so we can just jump back to previous "real" code
-        //AssertMsg(!Js::ScriptFunction::Is(jsFunction) || execContext->GetThreadContext()->TTDRootNestingCount != 0, "This will cause user code to execute and we need to add support for that as a top-level call source!!!!");
+        //TTDAssert(!Js::ScriptFunction::Is(jsFunction) || execContext->GetThreadContext()->TTDRootNestingCount != 0, "This will cause user code to execute and we need to add support for that as a top-level call source!!!!");
         //
 
         *result = Js::JavascriptFunction::CallAsConstructor(jsFunction, /* overridingNewTarget = */nullptr, jsArgs, scriptContext);
@@ -2280,67 +2802,122 @@ CHAKRA_API JsConstructObject(_In_ JsValueRef function, _In_reads_(cargs) JsValue
     });
 }
 
-CHAKRA_API JsCreateFunction(_In_ JsNativeFunction nativeFunction, _In_opt_ void *callbackState, _Out_ JsValueRef *function)
+#ifndef _CHAKRACOREBUILD
+typedef struct JsNativeFunctionInfo
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
-        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTAllocateFunction, false, nullptr);
+    JsValueRef thisArg;
+    JsValueRef newTargetArg;
+    bool isConstructCall;
+}JsNativeFunctionInfo;
 
+typedef _Ret_maybenull_ JsValueRef(CHAKRA_CALLBACK * JsEnhancedNativeFunction)(_In_ JsValueRef callee, _In_ JsValueRef *arguments, _In_ unsigned short argumentCount, _In_ JsNativeFunctionInfo *info, _In_opt_ void *callbackState);
+#endif
+
+typedef struct JsNativeFunctionWrapperHolder
+{
+    FieldNoBarrier(void *) callbackState;
+    FieldNoBarrier(JsNativeFunction) nativeFunction;
+}JsNativeFunctionWrapperHolder;
+
+JsValueRef CALLBACK JsNativeFunctionWrapper(JsValueRef callee, JsValueRef *arguments, unsigned short argumentCount, JsNativeFunctionInfo *info, void *wrapperData)
+{
+    JsNativeFunctionWrapperHolder *wrapperHolder = static_cast<JsNativeFunctionWrapperHolder*>(wrapperData);
+    JsValueRef result = wrapperHolder->nativeFunction(callee, info->isConstructCall, arguments, argumentCount, wrapperHolder->callbackState);
+    return result;
+}
+
+template <bool wrapNativeFunction, class T>
+JsErrorCode JsCreateEnhancedFunctionHelper(_In_ T nativeFunction, _In_opt_ JsValueRef metadata, _In_opt_ void *callbackState, _Out_ JsValueRef *function)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTAllocateFunction, metadata);
         PARAM_NOT_NULL(nativeFunction);
         PARAM_NOT_NULL(function);
         *function = nullptr;
 
-        Js::JavascriptExternalFunction *externalFunction = scriptContext->GetLibrary()->CreateStdCallExternalFunction((Js::StdCallJavascriptMethod)nativeFunction, 0, callbackState);
+        Js::StdCallJavascriptMethod method;
+
+        if (wrapNativeFunction)
+        {
+            JsNativeFunctionWrapperHolder *wrapperHolder = RecyclerNewStruct(scriptContext->GetRecycler(), JsNativeFunctionWrapperHolder);
+            wrapperHolder->callbackState = callbackState;
+            wrapperHolder->nativeFunction = (JsNativeFunction)nativeFunction;
+            callbackState = wrapperHolder;
+            method = (Js::StdCallJavascriptMethod)JsNativeFunctionWrapper;
+        }
+        else
+        {
+            method = (Js::StdCallJavascriptMethod)nativeFunction;
+        }
+
+        if (metadata != JS_INVALID_REFERENCE)
+        {
+            VALIDATE_INCOMING_REFERENCE(metadata, scriptContext);
+            metadata = Js::JavascriptConversion::ToString(metadata, scriptContext);
+        }
+        else
+        {
+            metadata = scriptContext->GetLibrary()->GetEmptyString();
+        }
+
+        Js::JavascriptExternalFunction *externalFunction = scriptContext->GetLibrary()->CreateStdCallExternalFunction(method, metadata, callbackState);
         *function = (JsValueRef)externalFunction;
 
         PERFORM_JSRT_TTD_RECORD_ACTION_RESULT(scriptContext, function);
 
         return JsNoError;
     });
+}
+
+CHAKRA_API JsCreateEnhancedFunction(_In_ JsEnhancedNativeFunction nativeFunction, _In_opt_ JsValueRef metadata, _In_opt_ void *callbackState, _Out_ JsValueRef *function)
+{
+    return JsCreateEnhancedFunctionHelper<false>(nativeFunction, metadata, callbackState, function);
+}
+
+CHAKRA_API JsCreateFunction(_In_ JsNativeFunction nativeFunction, _In_opt_ void *callbackState, _Out_ JsValueRef *function)
+{
+    return JsCreateEnhancedFunctionHelper<true>(nativeFunction, JS_INVALID_REFERENCE, callbackState, function);
 }
 
 CHAKRA_API JsCreateNamedFunction(_In_ JsValueRef name, _In_ JsNativeFunction nativeFunction, _In_opt_ void *callbackState, _Out_ JsValueRef *function)
 {
-    return ContextAPIWrapper<true>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
-        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTAllocateFunction, true, name);
+    return JsCreateEnhancedFunctionHelper<true>(nativeFunction, name, callbackState, function);
+}
 
-        VALIDATE_INCOMING_REFERENCE(name, scriptContext);
-        PARAM_NOT_NULL(nativeFunction);
-        PARAM_NOT_NULL(function);
-        *function = nullptr;
-
-        if (name != JS_INVALID_REFERENCE)
+void SetErrorMessage(Js::ScriptContext *scriptContext, Js::JavascriptError *newError, JsValueRef message)
+{
+    // ECMA262 #sec-error-message
+    if (!Js::JavascriptOperators::IsUndefined(message))
+    {
+        Js::JavascriptString *messageStr = nullptr;
+        if (Js::JavascriptString::Is(message))
         {
-            name = Js::JavascriptConversion::ToString(name, scriptContext);
+            messageStr = Js::JavascriptString::FromVar(message);
         }
         else
         {
-            name = scriptContext->GetLibrary()->GetEmptyString();
+            messageStr = Js::JavascriptConversion::ToString(message, scriptContext);
         }
 
-        Js::JavascriptExternalFunction *externalFunction = scriptContext->GetLibrary()->CreateStdCallExternalFunction((Js::StdCallJavascriptMethod)nativeFunction, Js::JavascriptString::FromVar(name), callbackState);
-        *function = (JsValueRef)externalFunction;
-
-        PERFORM_JSRT_TTD_RECORD_ACTION_RESULT(scriptContext, function);
-
-        return JsNoError;
-    });
-}
-
-void SetErrorMessage(Js::ScriptContext *scriptContext, JsValueRef newError, JsValueRef message)
-{
-    Js::JavascriptOperators::OP_SetProperty(newError, Js::PropertyIds::message, message, scriptContext);
+        Js::PropertyDescriptor desc;
+        desc.SetValue(messageStr);
+        desc.SetWritable(true);
+        desc.SetEnumerable(false);
+        desc.SetConfigurable(true);
+        Js::JavascriptOperators::SetPropertyDescriptor(newError, Js::PropertyIds::message, desc);
+    }
 }
 
 CHAKRA_API JsCreateError(_In_ JsValueRef message, _Out_ JsValueRef *error)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext * scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext * scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTCreateError, message);
 
         VALIDATE_INCOMING_REFERENCE(message, scriptContext);
         PARAM_NOT_NULL(error);
         *error = nullptr;
 
-        JsValueRef newError = scriptContext->GetLibrary()->CreateError();
+        Js::JavascriptError *newError = scriptContext->GetLibrary()->CreateError();
         SetErrorMessage(scriptContext, newError, message);
         *error = newError;
 
@@ -2352,14 +2929,14 @@ CHAKRA_API JsCreateError(_In_ JsValueRef message, _Out_ JsValueRef *error)
 
 CHAKRA_API JsCreateRangeError(_In_ JsValueRef message, _Out_ JsValueRef *error)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext * scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext * scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTCreateRangeError, message);
 
         VALIDATE_INCOMING_REFERENCE(message, scriptContext);
         PARAM_NOT_NULL(error);
         *error = nullptr;
 
-        JsValueRef newError = scriptContext->GetLibrary()->CreateRangeError();
+        Js::JavascriptError *newError = scriptContext->GetLibrary()->CreateRangeError();
         SetErrorMessage(scriptContext, newError, message);
         *error = newError;
 
@@ -2371,14 +2948,14 @@ CHAKRA_API JsCreateRangeError(_In_ JsValueRef message, _Out_ JsValueRef *error)
 
 CHAKRA_API JsCreateReferenceError(_In_ JsValueRef message, _Out_ JsValueRef *error)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext * scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext * scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTCreateReferenceError, message);
 
         VALIDATE_INCOMING_REFERENCE(message, scriptContext);
         PARAM_NOT_NULL(error);
         *error = nullptr;
 
-        JsValueRef newError = scriptContext->GetLibrary()->CreateReferenceError();
+        Js::JavascriptError *newError = scriptContext->GetLibrary()->CreateReferenceError();
         SetErrorMessage(scriptContext, newError, message);
         *error = newError;
 
@@ -2390,14 +2967,14 @@ CHAKRA_API JsCreateReferenceError(_In_ JsValueRef message, _Out_ JsValueRef *err
 
 CHAKRA_API JsCreateSyntaxError(_In_ JsValueRef message, _Out_ JsValueRef *error)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext * scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext * scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTCreateSyntaxError, message);
 
         VALIDATE_INCOMING_REFERENCE(message, scriptContext);
         PARAM_NOT_NULL(error);
         *error = nullptr;
 
-        JsValueRef newError = scriptContext->GetLibrary()->CreateSyntaxError();
+        Js::JavascriptError *newError = scriptContext->GetLibrary()->CreateSyntaxError();
         SetErrorMessage(scriptContext, newError, message);
         *error = newError;
 
@@ -2409,14 +2986,14 @@ CHAKRA_API JsCreateSyntaxError(_In_ JsValueRef message, _Out_ JsValueRef *error)
 
 CHAKRA_API JsCreateTypeError(_In_ JsValueRef message, _Out_ JsValueRef *error)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext * scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext * scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTCreateTypeError, message);
 
         VALIDATE_INCOMING_REFERENCE(message, scriptContext);
         PARAM_NOT_NULL(error);
         *error = nullptr;
 
-        JsValueRef newError = scriptContext->GetLibrary()->CreateTypeError();
+        Js::JavascriptError *newError = scriptContext->GetLibrary()->CreateTypeError();
         SetErrorMessage(scriptContext, newError, message);
         *error = newError;
 
@@ -2428,14 +3005,14 @@ CHAKRA_API JsCreateTypeError(_In_ JsValueRef message, _Out_ JsValueRef *error)
 
 CHAKRA_API JsCreateURIError(_In_ JsValueRef message, _Out_ JsValueRef *error)
 {
-    return ContextAPIWrapper<true>([&] (Js::ScriptContext * scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&] (Js::ScriptContext * scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTCreateURIError, message);
 
         VALIDATE_INCOMING_REFERENCE(message, scriptContext);
         PARAM_NOT_NULL(error);
         *error = nullptr;
 
-        JsValueRef newError = scriptContext->GetLibrary()->CreateURIError();
+        Js::JavascriptError *newError = scriptContext->GetLibrary()->CreateURIError();
         SetErrorMessage(scriptContext, newError, message);
         *error = newError;
 
@@ -2459,17 +3036,26 @@ CHAKRA_API JsHasException(_Out_ bool *hasException)
 
     Js::ScriptContext *scriptContext = currentContext->GetScriptContext();
     Assert(scriptContext != nullptr);
+    Recycler *recycler = scriptContext->GetRecycler();
+    ThreadContext *threadContext = scriptContext->GetThreadContext();
 
-    if (scriptContext->GetRecycler() && scriptContext->GetRecycler()->IsHeapEnumInProgress())
+#ifndef JSRT_VERIFY_RUNTIME_STATE
+    if (recycler && recycler->IsInObjectBeforeCollectCallback())
+    {
+        return JsErrorInObjectBeforeCollectCallback;
+    }
+#endif
+
+    if (recycler && recycler->IsHeapEnumInProgress())
     {
         return JsErrorHeapEnumInProgress;
     }
-    else if (scriptContext->GetThreadContext()->IsInThreadServiceCallback())
+    else if (threadContext->IsInThreadServiceCallback())
     {
         return JsErrorInThreadServiceCallback;
     }
 
-    if (scriptContext->GetThreadContext()->IsExecutionDisabled())
+    if (threadContext->IsExecutionDisabled())
     {
         return JsErrorInDisabledState;
     }
@@ -2512,21 +3098,11 @@ CHAKRA_API JsGetAndClearException(_Out_ JsValueRef *exception)
     Js::JavascriptExceptionObject *recordedException = nullptr;
 
     BEGIN_TRANSLATE_OOM_TO_HRESULT
-      recordedException = scriptContext->GetAndClearRecordedException();
+      if (scriptContext->HasRecordedException())
+      {
+          recordedException = scriptContext->GetAndClearRecordedException();
+      }
     END_TRANSLATE_OOM_TO_HRESULT(hr)
-
-#if ENABLE_TTD
-        if(PERFORM_JSRT_TTD_RECORD_ACTION_CHECK(scriptContext))
-        {
-            //
-            //TODO: We don't try to emulate OOM yet
-            //
-            if(hr != E_OUTOFMEMORY)
-            {
-                scriptContext->GetThreadContext()->TTDLog->RecordJsRTGetAndClearException();
-            }
-        }
-#endif
 
     if (hr == E_OUTOFMEMORY)
     {
@@ -2538,6 +3114,17 @@ CHAKRA_API JsGetAndClearException(_Out_ JsValueRef *exception)
     }
 
     *exception = recordedException->GetThrownObject(nullptr);
+
+#if ENABLE_TTD
+    if(hr != E_OUTOFMEMORY)
+    {
+        TTD::TTDJsRTActionResultAutoRecorder _actionEntryPopper;
+
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTGetAndClearException);
+        PERFORM_JSRT_TTD_RECORD_ACTION_RESULT(scriptContext, exception);
+    }
+#endif
+
     if (*exception == nullptr)
     {
         return JsErrorInvalidArgument;
@@ -2698,14 +3285,12 @@ CHAKRA_API JsIsRuntimeExecutionDisabled(_In_ JsRuntimeHandle runtimeHandle, _Out
     return JsNoError;
 }
 
-CHAKRA_API JsGetPropertyIdFromName(_In_z_ const wchar_t *name, _Out_ JsPropertyIdRef *propertyId)
+inline JsErrorCode JsGetPropertyIdFromNameInternal(_In_z_ const WCHAR *name, size_t cPropertyNameLength, _Out_ JsPropertyIdRef *propertyId)
 {
     return ContextAPINoScriptWrapper_NoRecord([&](Js::ScriptContext * scriptContext) -> JsErrorCode {
         PARAM_NOT_NULL(name);
         PARAM_NOT_NULL(propertyId);
         *propertyId = nullptr;
-
-        size_t cPropertyNameLength = wcslen(name);
 
         if (cPropertyNameLength <= INT_MAX)
         {
@@ -2718,6 +3303,11 @@ CHAKRA_API JsGetPropertyIdFromName(_In_z_ const wchar_t *name, _Out_ JsPropertyI
             return JsErrorOutOfMemory;
         }
     });
+}
+
+CHAKRA_API JsGetPropertyIdFromName(_In_z_ const WCHAR *name, _Out_ JsPropertyIdRef *propertyId)
+{
+    return JsGetPropertyIdFromNameInternal(name, wcslen(name), propertyId);
 }
 
 CHAKRA_API JsGetPropertyIdFromSymbol(_In_ JsValueRef symbol, _Out_ JsPropertyIdRef *propertyId)
@@ -2755,13 +3345,13 @@ CHAKRA_API JsGetSymbolFromPropertyId(_In_ JsPropertyIdRef propertyId, _Out_ JsVa
             return JsErrorPropertyNotSymbol;
         }
 
-        *symbol = scriptContext->GetLibrary()->CreateSymbol(propertyRecord);
+        *symbol = scriptContext->GetSymbol(propertyRecord);
         return JsNoError;
     });
 }
 
 #pragma prefast(suppress:6101, "Prefast doesn't see through the lambda")
-CHAKRA_API JsGetPropertyNameFromId(_In_ JsPropertyIdRef propertyId, _Outptr_result_z_ const wchar_t **name)
+CHAKRA_API JsGetPropertyNameFromId(_In_ JsPropertyIdRef propertyId, _Outptr_result_z_ const WCHAR **name)
 {
     return GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode {
         VALIDATE_INCOMING_PROPERTYID(propertyId);
@@ -2849,12 +3439,10 @@ CHAKRA_API JsIdle(_Out_opt_ unsigned int *nextIdleTick)
     });
 }
 
-CHAKRA_API JsSetPromiseContinuationCallback(_In_ JsPromiseContinuationCallback promiseContinuationCallback, _In_opt_ void *callbackState)
+CHAKRA_API JsSetPromiseContinuationCallback(_In_opt_ JsPromiseContinuationCallback promiseContinuationCallback, _In_opt_ void *callbackState)
 {
-    return ContextAPINoScriptWrapper_NoRecord([&](Js::ScriptContext * scriptContext) -> JsErrorCode {
-        PARAM_NOT_NULL(promiseContinuationCallback);
-
-        scriptContext->GetLibrary()->SetNativeHostPromiseContinuationFunction((Js::JavascriptLibrary::PromiseContinuationCallback)promiseContinuationCallback, callbackState);
+    return ContextAPINoScriptWrapper_NoRecord([&](Js::ScriptContext *scriptContext) -> JsErrorCode {
+        scriptContext->GetLibrary()->SetNativeHostPromiseContinuationFunction((Js::JavascriptLibrary::PromiseContinuationCallback) promiseContinuationCallback, callbackState);
         return JsNoError;
     },
     /*allowInObjectBeforeCollectCallback*/true);
@@ -2862,7 +3450,7 @@ CHAKRA_API JsSetPromiseContinuationCallback(_In_ JsPromiseContinuationCallback p
 
 JsErrorCode RunScriptCore(JsValueRef scriptSource, const byte *script, size_t cb,
     LoadScriptFlag loadScriptFlag, JsSourceContext sourceContext,
-    const wchar_t *sourceUrl, bool parseOnly, JsParseScriptAttributes parseAttributes,
+    const WCHAR *sourceUrl, bool parseOnly, JsParseScriptAttributes parseAttributes,
     bool isSourceModule, JsValueRef *result)
 {
     Js::JavascriptFunction *scriptFunction;
@@ -2880,7 +3468,7 @@ JsErrorCode RunScriptCore(JsValueRef scriptSource, const byte *script, size_t cb
         }
 
         const int chsize = (loadScriptFlag & LoadScriptFlag_Utf8Source) ?
-                            sizeof(utf8char_t) : sizeof(wchar_t);
+                            sizeof(utf8char_t) : sizeof(WCHAR);
 
         SRCINFO si = {
             /* sourceContextInfo   */ sourceContextInfo,
@@ -2932,12 +3520,12 @@ JsErrorCode RunScriptCore(JsValueRef scriptSource, const byte *script, size_t cb
         //
         //TODO: We may (probably?) want to use the debugger source rundown functionality here instead
         //
-        if (scriptContext->IsTTDRecordModeEnabled())
+        if (scriptFunction != nullptr && scriptContext->IsTTDRecordModeEnabled())
         {
             //Make sure we have the body and text information available
             Js::FunctionBody* globalBody = TTD::JsSupport::ForceAndGetFunctionBody(scriptFunction->GetParseableFunctionInfo());
 
-            const TTD::NSSnapValues::TopLevelScriptLoadFunctionBodyResolveInfo* tbfi = scriptContext->GetThreadContext()->TTDLog->AddScriptLoad(globalBody, kmodGlobal, globalBody->GetUtf8SourceInfo()->GetSourceInfoId(), script, (uint32)cb, loadScriptFlag);
+            const TTD::NSSnapValues::TopLevelScriptLoadFunctionBodyResolveInfo* tbfi = scriptContext->GetThreadContext()->TTDLog->AddScriptLoad(globalBody, kmodGlobal, sourceContext, script, (uint32)cb, loadScriptFlag);
             if(parseEvent != nullptr)
             {
                 TTD::NSLogEvents::JsRTCodeParseAction_SetBodyCtrId(parseEvent, tbfi->TopLevelBase.TopLevelBodyCtr);
@@ -2969,7 +3557,7 @@ JsErrorCode RunScriptCore(JsValueRef scriptSource, const byte *script, size_t cb
         {
             PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
 
-            HandleScriptCompileError(scriptContext, &se);
+            HandleScriptCompileError(scriptContext, &se, sourceUrl);
             return JsErrorScriptCompile;
         }
 
@@ -2997,12 +3585,18 @@ JsErrorCode RunScriptCore(JsValueRef scriptSource, const byte *script, size_t cb
             if(PERFORM_JSRT_TTD_RECORD_ACTION_CHECK(scriptContext))
             {
                 TTD::NSLogEvents::EventLogEntry* callEvent = scriptContext->GetThreadContext()->TTDLog->RecordJsRTCallFunction(_actionEntryPopper, scriptContext->GetThreadContext()->TTDRootNestingCount, scriptFunction, args.Info.Count, args.Values);
-                callInfoPopper.InitializeForRecording(scriptContext, callEvent);
+                callInfoPopper.InitializeForRecording(scriptContext, scriptContext->GetThreadContext()->TTDLog->GetCurrentWallTime(), callEvent);
 
                 if(scriptContext->GetThreadContext()->TTDRootNestingCount == 0)
                 {
                     TTD::EventLog* elog = scriptContext->GetThreadContext()->TTDLog;
                     elog->ResetCallStackForTopLevelCall(elog->GetLastEventTime());
+
+                    TTD::ExecutionInfoManager* emanager = scriptContext->GetThreadContext()->TTDExecutionInfo;
+                    if(emanager != nullptr)
+                    {
+                        emanager->ResetCallStackForTopLevelCall(elog->GetLastEventTime());
+                    }
                 }
             }
 #endif
@@ -3039,28 +3633,28 @@ JsErrorCode RunScriptCore(const char *script, JsSourceContext sourceContext,
         isSourceModule, result);
 }
 
-JsErrorCode RunScriptCore(const wchar_t *script, JsSourceContext sourceContext,
-    const wchar_t *sourceUrl, bool parseOnly, JsParseScriptAttributes parseAttributes,
+JsErrorCode RunScriptCore(const WCHAR *script, JsSourceContext sourceContext,
+    const WCHAR *sourceUrl, bool parseOnly, JsParseScriptAttributes parseAttributes,
     bool isSourceModule, JsValueRef *result)
 {
     return RunScriptCore(nullptr, reinterpret_cast<const byte*>(script),
-        wcslen(script) * sizeof(wchar_t),
+        wcslen(script) * sizeof(WCHAR),
         LoadScriptFlag_None, sourceContext, sourceUrl, parseOnly,
         parseAttributes, isSourceModule, result);
 }
 
 #ifdef _WIN32
-CHAKRA_API JsParseScript(_In_z_ const wchar_t * script, _In_ JsSourceContext sourceContext,
-    _In_z_ const wchar_t *sourceUrl, _Out_ JsValueRef * result)
+CHAKRA_API JsParseScript(_In_z_ const WCHAR * script, _In_ JsSourceContext sourceContext,
+    _In_z_ const WCHAR *sourceUrl, _Out_ JsValueRef * result)
 {
     return RunScriptCore(script, sourceContext, sourceUrl, true,
         JsParseScriptAttributeNone, false /*isModule*/, result);
 }
 
 CHAKRA_API JsParseScriptWithAttributes(
-    _In_z_ const wchar_t *script,
+    _In_z_ const WCHAR *script,
     _In_ JsSourceContext sourceContext,
-    _In_z_ const wchar_t *sourceUrl,
+    _In_z_ const WCHAR *sourceUrl,
     _In_ JsParseScriptAttributes parseAttributes,
     _Out_ JsValueRef *result)
 {
@@ -3068,15 +3662,15 @@ CHAKRA_API JsParseScriptWithAttributes(
         parseAttributes, false /*isModule*/, result);
 }
 
-CHAKRA_API JsRunScript(_In_z_ const wchar_t * script, _In_ JsSourceContext sourceContext,
-    _In_z_ const wchar_t *sourceUrl, _Out_ JsValueRef * result)
+CHAKRA_API JsRunScript(_In_z_ const WCHAR * script, _In_ JsSourceContext sourceContext,
+    _In_z_ const WCHAR *sourceUrl, _Out_ JsValueRef * result)
 {
     return RunScriptCore(script, sourceContext, sourceUrl, false,
         JsParseScriptAttributeNone, false /*isModule*/, result);
 }
 
-CHAKRA_API JsExperimentalApiRunModule(_In_z_ const wchar_t * script,
-    _In_ JsSourceContext sourceContext, _In_z_ const wchar_t *sourceUrl,
+CHAKRA_API JsExperimentalApiRunModule(_In_z_ const WCHAR * script,
+    _In_ JsSourceContext sourceContext, _In_z_ const WCHAR *sourceUrl,
     _Out_ JsValueRef * result)
 {
     return RunScriptCore(script, sourceContext, sourceUrl, false,
@@ -3109,7 +3703,7 @@ JsErrorCode JsSerializeScriptCore(const byte *script, size_t cb,
         SourceContextInfo * sourceContextInfo = scriptContext->GetSourceContextInfo(JS_SOURCE_CONTEXT_NONE, nullptr);
         Assert(sourceContextInfo != nullptr);
 
-        const int chsize = (loadScriptFlag & LoadScriptFlag_Utf8Source) ? sizeof(utf8char_t) : sizeof(wchar_t);
+        const int chsize = (loadScriptFlag & LoadScriptFlag_Utf8Source) ? sizeof(utf8char_t) : sizeof(WCHAR);
         SRCINFO si = {
             /* sourceContextInfo   */ sourceContextInfo,
             /* dlnHost             */ 0,
@@ -3194,11 +3788,11 @@ JsErrorCode JsSerializeScriptCore(const byte *script, size_t cb,
     });
 }
 
-CHAKRA_API JsSerializeScript(_In_z_ const wchar_t *script, _Out_writes_to_opt_(*bufferSize,
+CHAKRA_API JsSerializeScript(_In_z_ const WCHAR *script, _Out_writes_to_opt_(*bufferSize,
     *bufferSize) unsigned char *buffer,
     _Inout_ unsigned int *bufferSize)
 {
-    return JsSerializeScriptCore((const byte*)script, wcslen(script) * sizeof(wchar_t),
+    return JsSerializeScriptCore((const byte*)script, wcslen(script) * sizeof(WCHAR),
         LoadScriptFlag_None, nullptr, 0, buffer, bufferSize, nullptr);
 }
 
@@ -3206,8 +3800,8 @@ template <typename TLoadCallback, typename TUnloadCallback>
 JsErrorCode RunSerializedScriptCore(
     TLoadCallback scriptLoadCallback, TUnloadCallback scriptUnloadCallback,
     JsSourceContext scriptLoadSourceContext, // only used by scriptLoadCallback
-    unsigned char *buffer,
-    JsSourceContext sourceContext, const wchar_t *sourceUrl,
+    unsigned char *buffer, JsValueRef bufferVal,
+    JsSourceContext sourceContext, const WCHAR *sourceUrl,
     bool parseOnly, JsValueRef *result)
 {
     Js::JavascriptFunction *function;
@@ -3225,11 +3819,11 @@ JsErrorCode RunSerializedScriptCore(
         PARAM_NOT_NULL(scriptUnloadCallback);
         typedef Js::JsrtSourceHolder<TLoadCallback, TUnloadCallback> TSourceHolder;
         sourceHolder = RecyclerNewFinalized(scriptContext->GetRecycler(), TSourceHolder,
-            scriptLoadCallback, scriptUnloadCallback, scriptLoadSourceContext);
+            scriptLoadCallback, scriptUnloadCallback, scriptLoadSourceContext, bufferVal);
 
         SourceContextInfo *sourceContextInfo;
         SRCINFO *hsi;
-        Js::FunctionBody *functionBody = nullptr;
+        Field(Js::FunctionBody*) functionBody = nullptr;
 
         HRESULT hr;
 
@@ -3306,63 +3900,62 @@ static void CHAKRA_CALLBACK DummyScriptUnloadCallback(_In_ JsSourceContext sourc
 }
 
 #ifdef _WIN32
-static bool CHAKRA_CALLBACK DummyScriptLoadSourceCallback(_In_ JsSourceContext sourceContext, _Outptr_result_z_ const wchar_t** scriptBuffer)
+static bool CHAKRA_CALLBACK DummyScriptLoadSourceCallback(_In_ JsSourceContext sourceContext, _Outptr_result_z_ const WCHAR** scriptBuffer)
 {
     // sourceContext is actually the script source pointer
-    *scriptBuffer = reinterpret_cast<const wchar_t*>(sourceContext);
+    *scriptBuffer = reinterpret_cast<const WCHAR*>(sourceContext);
     return true;
 }
 
-CHAKRA_API JsParseSerializedScript(_In_z_ const wchar_t * script, _In_ unsigned char *buffer,
+CHAKRA_API JsParseSerializedScript(_In_z_ const WCHAR * script, _In_ unsigned char *buffer,
     _In_ JsSourceContext sourceContext,
-    _In_z_ const wchar_t *sourceUrl,
+    _In_z_ const WCHAR *sourceUrl,
     _Out_ JsValueRef * result)
 {
     return RunSerializedScriptCore(
         DummyScriptLoadSourceCallback, DummyScriptUnloadCallback,
         reinterpret_cast<JsSourceContext>(script), // use script source pointer as scriptLoadSourceContext
-        buffer, sourceContext, sourceUrl, true, result);
+        buffer, nullptr, sourceContext, sourceUrl, true, result);
 }
 
-CHAKRA_API JsRunSerializedScript(_In_z_ const wchar_t * script, _In_ unsigned char *buffer,
+CHAKRA_API JsRunSerializedScript(_In_z_ const WCHAR * script, _In_ unsigned char *buffer,
     _In_ JsSourceContext sourceContext,
-    _In_z_ const wchar_t *sourceUrl,
+    _In_z_ const WCHAR *sourceUrl,
     _Out_ JsValueRef * result)
 {
     return RunSerializedScriptCore(
         DummyScriptLoadSourceCallback, DummyScriptUnloadCallback,
         reinterpret_cast<JsSourceContext>(script), // use script source pointer as scriptLoadSourceContext
-        buffer, sourceContext, sourceUrl, false, result);
+        buffer, nullptr, sourceContext, sourceUrl, false, result);
 }
 
 CHAKRA_API JsParseSerializedScriptWithCallback(_In_ JsSerializedScriptLoadSourceCallback scriptLoadCallback,
     _In_ JsSerializedScriptUnloadCallback scriptUnloadCallback,
     _In_ unsigned char *buffer, _In_ JsSourceContext sourceContext,
-    _In_z_ const wchar_t *sourceUrl, _Out_ JsValueRef * result)
+    _In_z_ const WCHAR *sourceUrl, _Out_ JsValueRef * result)
 {
     return RunSerializedScriptCore(
         scriptLoadCallback, scriptUnloadCallback,
         sourceContext, // use the same user provided sourceContext as scriptLoadSourceContext
-        buffer, sourceContext, sourceUrl, true, result);
+        buffer, nullptr, sourceContext, sourceUrl, true, result);
 }
 
 CHAKRA_API JsRunSerializedScriptWithCallback(_In_ JsSerializedScriptLoadSourceCallback scriptLoadCallback,
     _In_ JsSerializedScriptUnloadCallback scriptUnloadCallback,
     _In_ unsigned char *buffer, _In_ JsSourceContext sourceContext,
-    _In_z_ const wchar_t *sourceUrl, _Out_opt_ JsValueRef * result)
+    _In_z_ const WCHAR *sourceUrl, _Out_opt_ JsValueRef * result)
 {
     return RunSerializedScriptCore(
         scriptLoadCallback, scriptUnloadCallback,
         sourceContext, // use the same user provided sourceContext as scriptLoadSourceContext
-        buffer, sourceContext, sourceUrl, false, result);
+        buffer, nullptr, sourceContext, sourceUrl, false, result);
 }
 #endif // _WIN32
 
 /////////////////////
 
-CHAKRA_API JsTTDCreateRecordRuntime(_In_ JsRuntimeAttributes attributes, _In_reads_(infoUriCount) const byte* infoUri, _In_ size_t infoUriCount, _In_ size_t snapInterval, _In_ size_t snapHistoryLength,
-    _In_ JsTTDInitializeForWriteLogStreamCallback writeInitializeFunction, _In_ TTDOpenResourceStreamCallback openResourceStream,
-    _In_ JsTTDReadBytesFromStreamCallback readBytesFromStream, _In_ JsTTDWriteBytesToStreamCallback writeBytesToStream, _In_ JsTTDFlushAndCloseStreamCallback flushAndCloseStream,
+CHAKRA_API JsTTDCreateRecordRuntime(_In_ JsRuntimeAttributes attributes, _In_ bool enableDebugging, _In_ size_t snapInterval, _In_ size_t snapHistoryLength,
+    _In_ TTDOpenResourceStreamCallback openResourceStream, _In_ JsTTDWriteBytesToStreamCallback writeBytesToStream, _In_ JsTTDFlushAndCloseStreamCallback flushAndCloseStream,
     _In_opt_ JsThreadServiceCallback threadService, _Out_ JsRuntimeHandle *runtime)
 {
 #if !ENABLE_TTD
@@ -3373,15 +3966,14 @@ CHAKRA_API JsTTDCreateRecordRuntime(_In_ JsRuntimeAttributes attributes, _In_rea
         return JsErrorInvalidArgument;
     }
 
-    return CreateRuntimeCore(attributes, infoUri, infoUriCount, true, false, false, (uint32)snapInterval, (uint32)snapHistoryLength,
-        writeInitializeFunction, openResourceStream, readBytesFromStream, writeBytesToStream, flushAndCloseStream,
+    return CreateRuntimeCore(attributes, nullptr, 0, true, false, enableDebugging, (uint32)snapInterval, (uint32)snapHistoryLength,
+        openResourceStream, nullptr, writeBytesToStream, flushAndCloseStream,
         threadService, runtime);
 #endif
 }
 
-CHAKRA_API JsTTDCreateReplayRuntime(_In_ JsRuntimeAttributes attributes, _In_reads_(infoUriCount) const byte* infoUri, _In_ size_t infoUriCount, _In_ bool enableDebugging,
-    _In_ JsTTDInitializeForWriteLogStreamCallback writeInitializeFunction, _In_ TTDOpenResourceStreamCallback openResourceStream,
-    _In_ JsTTDReadBytesFromStreamCallback readBytesFromStream, _In_ JsTTDWriteBytesToStreamCallback writeBytesToStream, _In_ JsTTDFlushAndCloseStreamCallback flushAndCloseStream,
+CHAKRA_API JsTTDCreateReplayRuntime(_In_ JsRuntimeAttributes attributes, _In_reads_(infoUriCount) const char* infoUri, _In_ size_t infoUriCount, _In_ bool enableDebugging,
+    _In_ TTDOpenResourceStreamCallback openResourceStream, _In_ JsTTDReadBytesFromStreamCallback readBytesFromStream, _In_ JsTTDFlushAndCloseStreamCallback flushAndCloseStream,
     _In_opt_ JsThreadServiceCallback threadService, _Out_ JsRuntimeHandle *runtime)
 {
 #if !ENABLE_TTD
@@ -3389,7 +3981,7 @@ CHAKRA_API JsTTDCreateReplayRuntime(_In_ JsRuntimeAttributes attributes, _In_rea
 #else
 
     return CreateRuntimeCore(attributes, infoUri, infoUriCount, false, true, enableDebugging, UINT_MAX, UINT_MAX,
-        writeInitializeFunction, openResourceStream, readBytesFromStream, writeBytesToStream, flushAndCloseStream,
+        openResourceStream, readBytesFromStream, nullptr, flushAndCloseStream,
         threadService, runtime);
 #endif
 }
@@ -3405,11 +3997,7 @@ CHAKRA_API JsTTDCreateContext(_In_ JsRuntimeHandle runtimeHandle, _In_ bool useR
 
         JsrtRuntime * runtime = JsrtRuntime::FromHandle(runtimeHandle);
         ThreadContext * threadContext = runtime->GetThreadContext();
-        if(!threadContext->IsRuntimeInTTDMode())
-        {
-            AssertMsg(false, "Need to create in TTD Mode.");
-            return JsErrorCategoryUsage;
-        }
+        TTDAssert(threadContext->IsRuntimeInTTDMode(), "Need to create in TTD Mode.");
 
         bool inRecord = false;
         bool activelyRecording = false;
@@ -3431,7 +4019,7 @@ CHAKRA_API JsTTDNotifyContextDestroy(_In_ JsContextRef context)
     return JsErrorCategoryUsage;
 #else
     ThreadContext* threadContext = ThreadContext::GetContextForCurrentThread();
-    if(threadContext->IsRuntimeInTTDMode())
+    if(threadContext && threadContext->IsRuntimeInTTDMode())
     {
         Js::ScriptContext* ctx = static_cast<JsrtContext*>(context)->GetScriptContext();
         threadContext->TTDContext->NotifyCtxDestroyInRecord(ctx);
@@ -3447,27 +4035,14 @@ CHAKRA_API JsTTDStart()
     return JsErrorCategoryUsage;
 #else
     JsrtContext *currentContext = JsrtContext::GetCurrent();
-    JsErrorCode cCheck = CheckContext(currentContext, true);
-    if(cCheck != JsNoError)
-    {
-        AssertMsg(false, "Must have valid context when starting TTD.");
-
-        return cCheck;
-    }
+    JsErrorCode cCheck = CheckContext(currentContext, JSRT_MAYBE_TRUE);
+    TTDAssert(cCheck == JsNoError, "Must have valid context when starting TTD.");
 
     Js::ScriptContext* scriptContext = currentContext->GetScriptContext();
-    if(!scriptContext->IsTTDRecordOrReplayModeEnabled())
-    {
-        AssertMsg(false, "Need to create in TTD Record Mode.");
-        return JsErrorCategoryUsage;
-    }
-
-    if(JITManager::GetJITManager()->IsOOPJITEnabled())
-    {
-        AssertMsg(false, "TTD cannot run with OOP JIT yet!!!");
-        return JsErrorCategoryUsage;
-    }
-
+    TTDAssert(scriptContext->IsTTDRecordOrReplayModeEnabled(), "Need to create in TTD Record Mode.");
+#if ENABLE_NATIVE_CODEGEN
+    TTDAssert(JITManager::GetJITManager() == nullptr || !JITManager::GetJITManager()->IsOOPJITEnabled(), "TTD cannot run with OOP JIT yet!!!");
+#endif
     return GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode
     {
         if(scriptContext->IsTTDRecordModeEnabled())
@@ -3489,20 +4064,11 @@ CHAKRA_API JsTTDStop()
     return JsErrorCategoryUsage;
 #else
     JsrtContext *currentContext = JsrtContext::GetCurrent();
-    JsErrorCode cCheck = CheckContext(currentContext, true);
-    if(cCheck != JsNoError)
-    {
-        AssertMsg(false, "Must have valid context when starting TTD.");
-
-        return cCheck;
-    }
+    JsErrorCode cCheck = CheckContext(currentContext, JSRT_MAYBE_TRUE);
+    TTDAssert(cCheck == JsNoError, "Must have valid context when starting TTD.");
 
     Js::ScriptContext* scriptContext = currentContext->GetScriptContext();
-    if(!scriptContext->IsTTDRecordOrReplayModeEnabled())
-    {
-        AssertMsg(false, "Need to create in TTD mode.");
-        return JsErrorCategoryUsage;
-    }
+    TTDAssert(scriptContext->IsTTDRecordOrReplayModeEnabled(), "Need to create in TTD mode.");
 
     return GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode
     {
@@ -3518,48 +4084,14 @@ CHAKRA_API JsTTDStop()
 #endif
 }
 
-CHAKRA_API JsTTDEmitRecording()
-{
-#if !ENABLE_TTD
-    return JsErrorCategoryUsage;
-#else
-    JsrtContext *currentContext = JsrtContext::GetCurrent();
-    JsErrorCode cCheck = CheckContext(currentContext, true);
-    if(cCheck != JsNoError)
-    {
-        AssertMsg(false, "Must have valid context when starting TTD.");
-
-        return cCheck;
-    }
-
-    Js::ScriptContext* scriptContext = currentContext->GetScriptContext();
-    if(!scriptContext->ShouldPerformRecordAction())
-    {
-        AssertMsg(false, "Need to be running in TTD mode.");
-        return JsErrorCategoryUsage;
-    }
-
-    return GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode
-    {
-        scriptContext->GetThreadContext()->TTDLog->EmitLog();
-
-        return JsNoError;
-    });
-#endif
-}
-
 CHAKRA_API JsTTDPauseTimeTravelBeforeRuntimeOperation()
 {
 #if !ENABLE_TTD
     return JsErrorCategoryUsage;
 #else
     JsrtContext *currentContext = JsrtContext::GetCurrent();
-    JsErrorCode cCheck = CheckContext(currentContext, true);
-    if(cCheck != JsNoError)
-    {
-        AssertMsg(false, "Must have valid context when changing debugger mode.");
-        return cCheck;
-    }
+    JsErrorCode cCheck = CheckContext(currentContext, JSRT_MAYBE_TRUE);
+    TTDAssert(cCheck == JsNoError, "Must have valid context when changing debugger mode.");
 
     Js::ScriptContext* scriptContext = currentContext->GetScriptContext();
     ThreadContext* threadContext = scriptContext->GetThreadContext();
@@ -3579,12 +4111,8 @@ CHAKRA_API JsTTDReStartTimeTravelAfterRuntimeOperation()
     return JsErrorCategoryUsage;
 #else
     JsrtContext *currentContext = JsrtContext::GetCurrent();
-    JsErrorCode cCheck = CheckContext(currentContext, true);
-    if(cCheck != JsNoError)
-    {
-        AssertMsg(false, "Must have valid context when changing debugger mode.");
-        return cCheck;
-    }
+    JsErrorCode cCheck = CheckContext(currentContext, JSRT_MAYBE_TRUE);
+    TTDAssert(cCheck == JsNoError, "Must have valid context when changing debugger mode.");
 
     Js::ScriptContext* scriptContext = currentContext->GetScriptContext();
     ThreadContext* threadContext = scriptContext->GetThreadContext();
@@ -3604,7 +4132,7 @@ CHAKRA_API JsTTDNotifyYield()
     return JsErrorCategoryUsage;
 #else
     JsrtContext *currentContext = JsrtContext::GetCurrent();
-    JsErrorCode cCheck = CheckContext(currentContext, true);
+    JsErrorCode cCheck = CheckContext(currentContext, JSRT_MAYBE_TRUE);
     if(cCheck != JsNoError)
     {
         return JsNoError; //we are ok just aren't going to do any TTD related work
@@ -3615,23 +4143,36 @@ CHAKRA_API JsTTDNotifyYield()
     {
         if(scriptContext->IsTTDRecordModeEnabled())
         {
-            JsUtil::List<TTD::DeadScriptLogTagInfo, HeapAllocator>& deadScripts = scriptContext->GetThreadContext()->TTDContext->GetTTDDeadContextsForRecord();
-
-            if(scriptContext->ShouldPerformRecordAction())
-            {
-                for(int32 i = 0; i < deadScripts.Count(); ++i)
-                {
-                    const TTD::DeadScriptLogTagInfo& deadCtx = deadScripts.Item(i);
-                    scriptContext->GetThreadContext()->TTDLog->RecordJsRTDeadScriptEvent(deadCtx);
-                }
-            }
-
-            deadScripts.Clear();
+            scriptContext->GetThreadContext()->TTDLog->RecordJsRTEventLoopYieldPoint();
         }
 
-        if(scriptContext->IsTTDRecordModeEnabled())
+        return JsNoError;
+    });
+#endif
+}
+
+CHAKRA_API JsTTDNotifyLongLivedReferenceAdd(_In_ JsValueRef value)
+{
+#if !ENABLE_TTD
+    return JsErrorCategoryUsage;
+#else
+    return GlobalAPIWrapper([&](TTDRecorder& _actionEntryPopper) -> JsErrorCode
+    {
+        ThreadContext* threadContext = ThreadContext::GetContextForCurrentThread();
+        if(threadContext == nullptr)
         {
-            scriptContext->GetThreadContext()->TTDLog->RecordJsRTEventLoopYieldPoint();
+            return JsErrorNoCurrentContext;
+        }
+
+        Js::RecyclableObject* obj = Js::RecyclableObject::FromVar(value);
+        if(obj->GetScriptContext()->IsTTDRecordModeEnabled())
+        {
+            if(obj->GetScriptContext()->ShouldPerformRecordAction())
+            {
+                threadContext->TTDLog->RecordJsRTAddWeakRootRef(_actionEntryPopper, (Js::Var)value);
+            }
+
+            threadContext->TTDContext->AddRootRef_Record(TTD_CONVERT_OBJ_TO_LOG_PTR_ID(obj), obj);
         }
 
         return JsNoError;
@@ -3644,7 +4185,7 @@ CHAKRA_API JsTTDHostExit(_In_ int statusCode)
 #if !ENABLE_TTD
     return JsErrorCategoryUsage;
 #else
-    return ContextAPIWrapper<true>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTHostExitProcess, statusCode);
 
         return JsNoError;
@@ -3662,7 +4203,7 @@ CHAKRA_API JsTTDRawBufferCopySyncIndirect(_In_ JsValueRef dst, _In_ size_t dstIn
         return JsErrorInvalidArgument;
     }
 
-    return ContextAPIWrapper<true>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTRawBufferCopySync, dst, (uint32)dstIndex, src, (uint32)srcIndex, (uint32)count);
 
         return JsNoError;
@@ -3680,7 +4221,7 @@ CHAKRA_API JsTTDRawBufferModifySyncIndirect(_In_ JsValueRef buffer, _In_ size_t 
         return JsErrorInvalidArgument;
     }
 
-    return ContextAPIWrapper<true>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTRawBufferModifySync, buffer, (uint32)index, (uint32)count);
 
         return JsNoError;
@@ -3694,15 +4235,15 @@ CHAKRA_API JsTTDRawBufferAsyncModificationRegister(_In_ JsValueRef instance, _In
     return JsErrorCategoryUsage;
 #else
     JsValueRef addRefObj = nullptr;
-    JsErrorCode addRefResult = ContextAPIWrapper<true>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    JsErrorCode addRefResult = ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         if (scriptContext->IsTTDRecordModeEnabled())
         {
-            AssertMsg(Js::ArrayBuffer::Is(instance), "Not array buffer object!!!");
+            TTDAssert(Js::ArrayBuffer::Is(instance), "Not array buffer object!!!");
             Js::ArrayBuffer* dstBuff = Js::ArrayBuffer::FromVar(instance);
             addRefObj = dstBuff;
 
-            AssertMsg(dstBuff->GetBuffer() <= initialModPos && initialModPos < dstBuff->GetBuffer() + dstBuff->GetByteLength(), "Not array buffer object!!!");
-            AssertMsg(initialModPos - dstBuff->GetBuffer() < UINT32_MAX, "This is really big!!!");
+            TTDAssert(dstBuff->GetBuffer() <= initialModPos && initialModPos < dstBuff->GetBuffer() + dstBuff->GetByteLength(), "Not array buffer object!!!");
+            TTDAssert(initialModPos - dstBuff->GetBuffer() < UINT32_MAX, "This is really big!!!");
             ptrdiff_t index = initialModPos - Js::ArrayBuffer::FromVar(instance)->GetBuffer();
 
             scriptContext->TTDContextInfo->AddToAsyncPendingList(dstBuff, (uint32)index);
@@ -3736,7 +4277,7 @@ CHAKRA_API JsTTDRawBufferAsyncModifyComplete(_In_ byte* finalModPos)
     return JsErrorCategoryUsage;
 #else
     JsValueRef releaseObj = nullptr;
-    JsErrorCode releaseStatus = ContextAPIWrapper<true>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+    JsErrorCode releaseStatus = ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
         if (scriptContext->IsTTDRecordModeEnabled())
         {
             TTD::TTDPendingAsyncBufferModification pendingAsyncInfo = { 0 };
@@ -3769,15 +4310,25 @@ CHAKRA_API JsTTDRawBufferAsyncModifyComplete(_In_ byte* finalModPos)
 #endif
 }
 
+CHAKRA_API JsTTDCheckAndAssertIfTTDRunning(_In_ const char* msg)
+{
+#if ENABLE_TTD
+    JsrtContext* context = JsrtContext::GetCurrent();
+    TTDAssert(context == nullptr || !context->GetScriptContext()->ShouldPerformRecordAction(), msg);
+#endif
+    return JsNoError;
+}
+
 CHAKRA_API JsTTDGetSnapTimeTopLevelEventMove(_In_ JsRuntimeHandle runtimeHandle,
-    _In_ JsTTDMoveMode moveMode, _Inout_ int64_t* targetEventTime,
-   _Out_ int64_t* targetStartSnapTime, _Out_opt_ int64_t* targetEndSnapTime)
+   _In_ JsTTDMoveMode moveMode, _In_opt_ uint32_t kthEvent,
+   _Inout_ int64_t* targetEventTime, _Out_ int64_t* targetStartSnapTime,
+   _Out_opt_ int64_t* targetEndSnapTime)
 {
 #if !ENABLE_TTD
     return JsErrorCategoryUsage;
 #else
-    JsrtRuntime * runtime = JsrtRuntime::FromHandle(runtimeHandle);
-    ThreadContext * threadContext = runtime->GetThreadContext();
+    JsrtRuntime* runtime = JsrtRuntime::FromHandle(runtimeHandle);
+    ThreadContext* threadContext = runtime->GetThreadContext();
 
     *targetStartSnapTime = -1;
     if(targetEndSnapTime != nullptr)
@@ -3785,18 +4336,12 @@ CHAKRA_API JsTTDGetSnapTimeTopLevelEventMove(_In_ JsRuntimeHandle runtimeHandle,
         *targetEndSnapTime = -1;
     }
 
-    if(!threadContext->IsRuntimeInTTDMode())
-    {
-        AssertMsg(false, "Should only happen in TT debugging mode.");
-        return JsErrorFatal;
-    }
+    TTDAssert(threadContext->IsRuntimeInTTDMode(), "Should only happen in TT debugging mode.");
 
     //If we requested a move to a specific event then extract the event count and try to find it
-    bool scanJMC = (moveMode & JsTTDMoveMode::JsTTDMoveScanIntervalBeforeDebugExecute) == JsTTDMoveMode::JsTTDMoveScanIntervalBeforeDebugExecute;
-
     if((moveMode & JsTTDMoveMode::JsTTDMoveFirstEvent) == JsTTDMoveMode::JsTTDMoveFirstEvent)
     {
-        *targetEventTime = threadContext->TTDLog->GetFirstEventTime(scanJMC);
+        *targetEventTime = threadContext->TTDLog->GetFirstEventTimeInLog();
         if(*targetEventTime == -1)
         {
             return JsErrorCategoryUsage;
@@ -3804,7 +4349,7 @@ CHAKRA_API JsTTDGetSnapTimeTopLevelEventMove(_In_ JsRuntimeHandle runtimeHandle,
     }
     else if((moveMode & JsTTDMoveMode::JsTTDMoveLastEvent) == JsTTDMoveMode::JsTTDMoveLastEvent)
     {
-        *targetEventTime = threadContext->TTDLog->GetLastEventTime(scanJMC);
+        *targetEventTime = threadContext->TTDLog->GetLastEventTimeInLog();
         if(*targetEventTime == -1)
         {
             return JsErrorCategoryUsage;
@@ -3812,8 +4357,7 @@ CHAKRA_API JsTTDGetSnapTimeTopLevelEventMove(_In_ JsRuntimeHandle runtimeHandle,
     }
     else if((moveMode & JsTTDMoveMode::JsTTDMoveKthEvent) == JsTTDMoveMode::JsTTDMoveKthEvent)
     {
-        uint32 kthEvent = (uint32)(((int64)moveMode) >> 32);
-        *targetEventTime = threadContext->TTDLog->GetKthEventTime(kthEvent);
+        *targetEventTime = threadContext->TTDLog->GetKthEventTimeInLog(kthEvent);
         if(*targetEventTime == -1)
         {
             return JsErrorCategoryUsage;
@@ -3824,53 +4368,111 @@ CHAKRA_API JsTTDGetSnapTimeTopLevelEventMove(_In_ JsRuntimeHandle runtimeHandle,
         ;
     }
 
-    bool rtrok = (moveMode & JsTTDMoveMode::JsTTDMoveScanIntervalBeforeDebugExecute) == JsTTDMoveMode::JsTTDMoveScanIntervalBeforeDebugExecute;
-    *targetStartSnapTime = threadContext->TTDLog->FindSnapTimeForEventTime(*targetEventTime, rtrok, targetEndSnapTime);
+#ifdef __APPLE__
+    //TODO: Explicit cast of ptr since compiler gets confused -- resolve in PAL later
+    static_assert(sizeof(int64_t) == sizeof(int64), "int64_t and int64 size mis-match");
+    *targetStartSnapTime = threadContext->TTDLog->FindSnapTimeForEventTime(*targetEventTime, (int64*)targetEndSnapTime);
+#else
+    *targetStartSnapTime = threadContext->TTDLog->FindSnapTimeForEventTime(*targetEventTime, targetEndSnapTime);
+#endif
 
     return JsNoError;
 #endif
 }
 
-CHAKRA_API JsTTDPreExecuteSnapShotInterval(_In_ int64_t startSnapTime, _In_ int64_t endSnapTime, _In_ JsTTDMoveMode moveMode)
+CHAKRA_API JsTTDGetSnapShotBoundInterval(_In_ JsRuntimeHandle runtimeHandle, _In_ int64_t targetEventTime, _Out_ int64_t* startSnapTime, _Out_ int64_t* endSnapTime)
+{
+#if !ENABLE_TTD
+    return JsErrorCategoryUsage;
+#else
+    JsrtRuntime* runtime = JsrtRuntime::FromHandle(runtimeHandle);
+    ThreadContext* threadContext = runtime->GetThreadContext();
+    TTDAssert(threadContext->IsRuntimeInTTDMode(), "Should only happen in TT debugging mode.");
+
+#ifdef __APPLE__
+    //TODO: Explicit cast of ptr since compiler gets confused -- resolve in PAL later
+    static_assert(sizeof(int64_t) == sizeof(int64), "int64_t and int64 size mis-match");
+    threadContext->TTDLog->GetSnapShotBoundInterval(targetEventTime, (int64*)startSnapTime, (int64*)endSnapTime);
+#else
+    threadContext->TTDLog->GetSnapShotBoundInterval(targetEventTime, startSnapTime, endSnapTime);
+#endif
+
+    return JsNoError;
+#endif
+}
+
+CHAKRA_API JsTTDGetPreviousSnapshotInterval(_In_ JsRuntimeHandle runtimeHandle, _In_ int64_t currentSnapStartTime, _Out_ int64_t* previousSnapTime)
+{
+#if !ENABLE_TTD
+    return JsErrorCategoryUsage;
+#else
+    JsrtRuntime * runtime = JsrtRuntime::FromHandle(runtimeHandle);
+    ThreadContext * threadContext = runtime->GetThreadContext();
+    TTDAssert(threadContext->IsRuntimeInTTDMode(), "Should only happen in TT debugging mode.");
+
+    *previousSnapTime = threadContext->TTDLog->GetPreviousSnapshotInterval(currentSnapStartTime);
+
+    return JsNoError;
+#endif
+}
+
+#if ENABLE_TTD
+//Helper method for resetting breakpoint info around snapshot inflate
+JsErrorCode TTDHandleBreakpointInfoAndInflate(int64_t snapTime, JsrtRuntime* runtime, ThreadContext* threadContext)
+{
+    return GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode
+    {
+        if(threadContext->TTDLog->IsDebugModeFlagSet())
+        {
+            threadContext->TTDExecutionInfo->LoadPreservedBPInfo(threadContext);
+        }
+
+        threadContext->TTDLog->DoSnapshotInflate(snapTime);
+
+        threadContext->TTDLog->ResetCallStackForTopLevelCall(-1);
+        if(threadContext->TTDExecutionInfo != nullptr)
+        {
+            threadContext->TTDExecutionInfo->ResetCallStackForTopLevelCall(-1);
+        }
+
+        return JsNoError;
+    });
+}
+#endif
+
+CHAKRA_API JsTTDPreExecuteSnapShotInterval(_In_ JsRuntimeHandle runtimeHandle, _In_ int64_t startSnapTime, _In_ int64_t endSnapTime, _In_ JsTTDMoveMode moveMode, _Out_ int64_t* newTargetEventTime)
 {
 #if !ENABLE_TTD
     return JsErrorCategoryUsage;
 #else
 
-    JsrtContext *currentContext = JsrtContext::GetCurrent();
-    JsErrorCode cCheck = CheckContext(currentContext, true);
-    if(cCheck != JsNoError)
-    {
-        AssertMsg(false, "This shouldn't happen!!!");
+    *newTargetEventTime = -1;
 
-        return cCheck;
-    }
-
-    Js::ScriptContext* scriptContext = currentContext->GetScriptContext();
-    ThreadContext * threadContext = scriptContext->GetThreadContext();
-
-    if(!threadContext->IsRuntimeInTTDMode())
-    {
-        AssertMsg(false, "Should only happen in TT debugging mode.");
-        return JsErrorFatal;
-    }
+    JsrtRuntime* runtime = JsrtRuntime::FromHandle(runtimeHandle);
+    ThreadContext* threadContext = runtime->GetThreadContext();
+    TTDAssert(threadContext->IsRuntimeInTTDMode(), "Should only happen in TT debugging mode.");
 
     TTD::EventLog* elog = threadContext->TTDLog;
+    TTD::ExecutionInfoManager* emanager = threadContext->TTDExecutionInfo;
     JsErrorCode res = JsNoError;
 
-    JsErrorCode inflateStatus = GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode
-    {
-        elog->DoSnapshotInflate(startSnapTime);
-
-        return JsNoError;
-    });
-
+    JsErrorCode inflateStatus = TTDHandleBreakpointInfoAndInflate(startSnapTime, runtime, threadContext);
     if(inflateStatus != JsNoError)
     {
         return inflateStatus;
     }
 
-    elog->ClearBPScanList();
+    //If we are in the "active" segment set the continue breakpoint
+    if((moveMode & JsTTDMoveMode::JsTTDMoveScanIntervalForContinueInActiveBreakpointSegment) == JsTTDMoveMode::JsTTDMoveScanIntervalForContinueInActiveBreakpointSegment)
+    {
+        GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode
+        {
+            emanager->SetBPInfoForActiveSegmentContinueScan(threadContext->TTDContext);
+
+            return JsNoError;
+        });
+    }
+
     elog->PushMode(TTD::TTDMode::DebuggerSuppressBreakpoints);
     elog->PushMode(TTD::TTDMode::DebuggerLogBreakpoints);
     try
@@ -3895,55 +4497,49 @@ CHAKRA_API JsTTDPreExecuteSnapShotInterval(_In_ int64_t startSnapTime, _In_ int6
     catch(...) //we are replaying something that should be known to execute successfully so encountering any error is very bad
     {
         res = JsErrorFatal;
-        AssertMsg(false, "Unexpected fatal Error");
+        TTDAssert(false, "Unexpected fatal Error");
     }
     elog->PopMode(TTD::TTDMode::DebuggerLogBreakpoints);
     elog->PopMode(TTD::TTDMode::DebuggerSuppressBreakpoints);
 
+    //If we are in the "active" segment un-set the continue breakpoint
+    if((moveMode & JsTTDMoveMode::JsTTDMoveScanIntervalForContinueInActiveBreakpointSegment) == JsTTDMoveMode::JsTTDMoveScanIntervalForContinueInActiveBreakpointSegment)
+    {
+        GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode
+        {
+            emanager->ClearBPInfoForActiveSegmentContinueScan(threadContext->TTDContext);
+
+            return JsNoError;
+        });
+    }
+
     if((moveMode & JsTTDMoveMode::JsTTDMoveScanIntervalForContinue) == JsTTDMoveMode::JsTTDMoveScanIntervalForContinue)
     {
-        elog->TryFindAndSetPreviousBP();
+        bool bpFound = emanager->TryFindAndSetPreviousBP();
+        if(bpFound)
+        {
+            *newTargetEventTime = emanager->GetPendingTTDBPTargetEventTime();
+        }
     }
-    elog->ClearBPScanList();
 
     return res;
 #endif
 }
 
-CHAKRA_API JsTTDMoveToTopLevelEvent(_In_ JsTTDMoveMode moveMode, _In_ int64_t snapshotTime, _In_ int64_t eventTime)
+CHAKRA_API JsTTDMoveToTopLevelEvent(_In_ JsRuntimeHandle runtimeHandle, _In_ JsTTDMoveMode moveMode, _In_ int64_t snapshotTime, _In_ int64_t eventTime)
 {
 #if !ENABLE_TTD
     return JsErrorCategoryUsage;
 #else
 
-    JsrtContext *currentContext = JsrtContext::GetCurrent();
-    JsErrorCode cCheck = CheckContext(currentContext, true);
-    if(cCheck != JsNoError)
-    {
-        AssertMsg(false, "This shouldn't happen!!!");
-
-        return cCheck;
-    }
-
-    Js::ScriptContext* scriptContext = currentContext->GetScriptContext();
-    ThreadContext * threadContext = scriptContext->GetThreadContext();
-
-    if (!threadContext->IsRuntimeInTTDMode())
-    {
-        AssertMsg(false, "Should only happen in TT debugging mode.");
-        return JsErrorFatal;
-    }
+    JsrtRuntime* runtime = JsrtRuntime::FromHandle(runtimeHandle);
+    ThreadContext* threadContext = runtime->GetThreadContext();
+    TTDAssert(threadContext->IsRuntimeInTTDMode(), "Should only happen in TT debugging mode.");
 
     TTD::EventLog* elog = threadContext->TTDLog;
     JsErrorCode res = JsNoError;
 
-    JsErrorCode inflateStatus = GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode
-    {
-        elog->DoSnapshotInflate(snapshotTime);
-
-        return JsNoError;
-    });
-
+    JsErrorCode inflateStatus = TTDHandleBreakpointInfoAndInflate(snapshotTime, runtime, threadContext);
     if(inflateStatus != JsNoError)
     {
         return inflateStatus;
@@ -3959,7 +4555,7 @@ CHAKRA_API JsTTDMoveToTopLevelEvent(_In_ JsTTDMoveMode moveMode, _In_ int64_t sn
     catch(...) //we are replaying something that should be known to execute successfully so encountering any error is very bad
     {
         res = JsErrorFatal;
-        AssertMsg(false, "Unexpected fatal Error");
+        TTDAssert(false, "Unexpected fatal Error");
     }
     elog->PopMode(TTD::TTDMode::DebuggerSuppressBreakpoints);
 
@@ -3967,80 +4563,45 @@ CHAKRA_API JsTTDMoveToTopLevelEvent(_In_ JsTTDMoveMode moveMode, _In_ int64_t sn
 #endif
 }
 
-CHAKRA_API JsTTDReplayExecution(_Inout_ JsTTDMoveMode* moveMode, _Inout_ int64_t* rootEventTime)
+CHAKRA_API JsTTDReplayExecution(_Inout_ JsTTDMoveMode* moveMode, _Out_ int64_t* rootEventTime)
 {
 #if !ENABLE_TTD
     return JsErrorCategoryUsage;
 #else
     JsrtContext *currentContext = JsrtContext::GetCurrent();
-    JsErrorCode cCheck = CheckContext(currentContext, true);
-    if(cCheck != JsNoError)
-    {
-        AssertMsg(false, "This shouldn't happen!!!");
-
-        return cCheck;
-    }
+    JsErrorCode cCheck = CheckContext(currentContext, JSRT_MAYBE_TRUE);
+    TTDAssert(cCheck == JsNoError, "This shouldn't happen!!!");
 
     Js::ScriptContext* scriptContext = currentContext->GetScriptContext();
     ThreadContext* threadContext = scriptContext->GetThreadContext();
-
-    if (!threadContext->IsRuntimeInTTDMode())
-    {
-        AssertMsg(false, "Should only happen in TT debugging mode.");
-        return JsErrorCategoryUsage;
-    }
+    TTDAssert(threadContext->IsRuntimeInTTDMode(), "Should only happen in TT debugging mode.");
 
     TTD::EventLog* elog = threadContext->TTDLog;
+    TTD::ExecutionInfoManager* emanager = threadContext->TTDExecutionInfo;
 
-    if((*moveMode & JsTTDMoveMode::JsTTDMoveBreakOnEntry) == JsTTDMoveMode::JsTTDMoveBreakOnEntry)
+    if(emanager != nullptr)
     {
-        elog->SetBreakOnFirstUserCode();
-    }
-
-    //reset any breakpoints that we preserved accross a TTD move
-    if(elog->HasPendingTTDBP() || elog->GetRestoreBPListAfterContextRecreate().Count() != 0)
-    {
-        GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode {
-            JsrtDebugManager* jsrtDebugManager = currentContext->GetRuntime()->GetJsrtDebugManager();
-
-            const JsUtil::List<TTD::TTDebuggerSourceLocation, HeapAllocator>& bplist = elog->GetRestoreBPListAfterContextRecreate();
-            for(int32 i = 0; i < bplist.Count(); ++i)
+        JsErrorCode bpstatus = GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode
+        {
+            if((*moveMode & JsTTDMoveMode::JsTTDMoveBreakOnEntry) == JsTTDMoveMode::JsTTDMoveBreakOnEntry)
             {
-                const TTD::TTDebuggerSourceLocation& bpLocation = bplist.Item(i);
-
-                Js::FunctionBody* body = bpLocation.ResolveAssociatedSourceInfo(scriptContext);
-                Js::Utf8SourceInfo* utf8SourceInfo = body->GetUtf8SourceInfo();
-
-                bool isNewBP = false;
-                jsrtDebugManager->SetBreakpointHelper_TTD(scriptContext, utf8SourceInfo, bpLocation.GetLine(), bpLocation.GetColumn(), &isNewBP);
+                emanager->SetBreakOnFirstUserCode();
             }
-            elog->UnLoadBPListAfterMoveForContextRecreate();
 
-            //If the log has a BP requested then we should set the actual bp here
-            if(elog->HasPendingTTDBP())
-            {
-                TTD::TTDebuggerSourceLocation bpLocation;
-                elog->GetPendingTTDBPInfo(bpLocation);
-
-                Js::FunctionBody* body = bpLocation.ResolveAssociatedSourceInfo(scriptContext);
-                Js::Utf8SourceInfo* utf8SourceInfo = body->GetUtf8SourceInfo();
-
-                bool isNewBP = false;
-                Js::BreakpointProbe* probe = jsrtDebugManager->SetBreakpointHelper_TTD(scriptContext, utf8SourceInfo, bpLocation.GetLine(), bpLocation.GetColumn(),  &isNewBP);
-
-                if(probe != nullptr)
-                {
-                    elog->SetActiveBP(probe->GetId(), isNewBP, bpLocation);
-                }
-
-                //Finally clear the pending BP info so we don't get confused later
-                elog->ClearPendingTTDBPInfo();
-            }
+            //Set the active BP info from the manager (so we will hit the BP in step back operations)
+            emanager->SetActiveBPInfoAsNeeded(threadContext->TTDContext);
 
             return JsNoError;
         });
+
+        if(bpstatus != JsNoError)
+        {
+            return bpstatus;
+        }
     }
 
+    *moveMode = JsTTDMoveMode::JsTTDMoveNone;
+    *rootEventTime = -1;
     JsErrorCode res = JsNoError;
     try
     {
@@ -4055,19 +4616,11 @@ CHAKRA_API JsTTDReplayExecution(_Inout_ JsTTDMoveMode* moveMode, _Inout_ int64_t
             *moveMode = (JsTTDMoveMode)abortException.GetMoveMode();
             *rootEventTime = abortException.GetTargetEventTime();
 
-            if(abortException.IsTopLevelException())
+            //Check if we are tracking execution and, if so, set the exception location so we can access it later
+            if(emanager != nullptr && abortException.IsTopLevelException())
             {
-                bool markedAsJustMyCode = false;
-                TTD::TTDebuggerSourceLocation throwLocation;
-                elog->GetLastExecutedTimeAndPositionForDebugger(&markedAsJustMyCode, throwLocation);
-
-                elog->SetPendingTTDBPInfo(throwLocation);
+                emanager->SetPendingTTDUnhandledException();
             }
-        }
-        else
-        {
-            *moveMode = JsTTDMoveMode::JsTTDMoveNone;
-            *rootEventTime = -1;
         }
 
         res = abortException.IsTopLevelException() ? JsErrorCategoryScript : JsNoError;
@@ -4075,14 +4628,14 @@ CHAKRA_API JsTTDReplayExecution(_Inout_ JsTTDMoveMode* moveMode, _Inout_ int64_t
     catch(...)
     {
         res = JsErrorFatal;
-        AssertMsg(false, "Unexpected fatal Error");
+        TTDAssert(false, "Unexpected fatal Error");
     }
 
     return res;
 #endif
 }
 
-#ifndef NTBUILD // ChakraCore Only
+#ifdef _CHAKRACOREBUILD
 
 template <class SrcChar, class DstChar>
 static void CastCopy(const SrcChar* src, DstChar* dst, size_t count)
@@ -4100,34 +4653,32 @@ CHAKRA_API JsCreateString(
     _Out_ JsValueRef *value)
 {
     PARAM_NOT_NULL(content);
+    PARAM_NOT_NULL(value);
+    *value = JS_INVALID_REFERENCE;
 
-    AutoArrayPtr<uint16_t> data(HeapNewNoThrowArray(uint16_t, length), length);
-    if (!data)
+    if (length == static_cast<size_t>(-1))
+    {
+        length = strlen(content);
+    }
+
+    if (length > MaxCharCount)
     {
         return JsErrorOutOfMemory;
     }
 
-    // Cast source char to "unsigned" for correct cast
-    CastCopy((unsigned char*)content, (uint16_t*)data, length);
+    return ContextAPINoScriptWrapper([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
 
-    return JsPointerToString(
-        reinterpret_cast<const char16*>((uint16_t*)data), length, value);
-}
+        Js::JavascriptString *stringValue = Js::LiteralStringWithPropertyStringPtr::
+            NewFromCString(content, (CharCount)length, scriptContext->GetLibrary());
 
-CHAKRA_API JsCreateStringUtf8(
-    _In_ const uint8_t *content,
-    _In_ size_t length,
-    _Out_ JsValueRef *value)
-{
-    PARAM_NOT_NULL(content);
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTCreateString, stringValue->GetSz(), stringValue->GetLength());
 
-    utf8::NarrowToWide wstr((LPCSTR)content, length);
-    if (!wstr)
-    {
-        return JsErrorOutOfMemory;
-    }
+        *value = stringValue;
 
-    return JsPointerToString(wstr, wstr.Length(), value);
+        PERFORM_JSRT_TTD_RECORD_ACTION_RESULT(scriptContext, value);
+
+        return JsNoError;
+    });
 }
 
 CHAKRA_API JsCreateStringUtf16(
@@ -4136,9 +4687,32 @@ CHAKRA_API JsCreateStringUtf16(
     _Out_ JsValueRef *value)
 {
     PARAM_NOT_NULL(content);
+    PARAM_NOT_NULL(value);
+    *value = JS_INVALID_REFERENCE;
 
-    return JsPointerToString(
-        reinterpret_cast<const char16*>(content), length, value);
+    if (length == static_cast<size_t>(-1))
+    {
+        length = wcslen((const char16 *)content);
+    }
+
+    if (length > static_cast<CharCount>(-1))
+    {
+        return JsErrorOutOfMemory;
+    }
+
+    return ContextAPINoScriptWrapper([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+
+        Js::JavascriptString *stringValue = Js::LiteralStringWithPropertyStringPtr::
+            NewFromWideString((const char16 *)content, (CharCount)length, scriptContext->GetLibrary());
+
+        PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTCreateString, stringValue->GetSz(), stringValue->GetLength());
+
+        *value = stringValue;
+
+        PERFORM_JSRT_TTD_RECORD_ACTION_RESULT(scriptContext, value);
+
+        return JsNoError;
+    });
 }
 
 
@@ -4188,31 +4762,6 @@ JsErrorCode WriteStringCopy(
     return JsNoError;
 }
 
-CHAKRA_API JsCopyString(
-    _In_ JsValueRef value,
-    _In_ int start,
-    _In_ int length,
-    _Out_opt_ char* buffer,
-    _Out_opt_ size_t* written)
-{
-    PARAM_NOT_NULL(value);
-    VALIDATE_JSREF(value);
-
-    return WriteStringCopy(value, start, length, written,
-        [buffer](const char16* src, size_t count, size_t *needed)
-        {
-            if (buffer)
-            {
-                CastCopy(src, buffer, count);
-            }
-            else
-            {
-                *needed = count;
-            }
-            return JsNoError;
-        });
-}
-
 CHAKRA_API JsCopyStringUtf16(
     _In_ JsValueRef value,
     _In_ int start,
@@ -4230,17 +4779,13 @@ CHAKRA_API JsCopyStringUtf16(
             {
                 memmove(buffer, src, sizeof(char16) * count);
             }
-            else
-            {
-                *needed = count;
-            }
             return JsNoError;
         });
 }
 
-CHAKRA_API JsCopyStringUtf8(
+CHAKRA_API JsCopyString(
     _In_ JsValueRef value,
-    _Out_opt_ uint8_t* buffer,
+    _Out_opt_ char* buffer,
     _In_ size_t bufferSize,
     _Out_opt_ size_t* length)
 {
@@ -4255,29 +4800,10 @@ CHAKRA_API JsCopyStringUtf8(
         return errorCode;
     }
 
-    utf8::WideToNarrow utf8Str(str, strLength);
-    if (!buffer)
+    utf8::WideToNarrow utf8Str(str, strLength, buffer, bufferSize);
+    if (length)
     {
-        if (length)
-        {
-            *length = utf8Str.Length();
-        }
-    }
-    else
-    {
-        size_t count = min(bufferSize, utf8Str.Length());
-        // Try to copy whole characters if buffer size insufficient
-        auto maxFitChars = utf8::ByteIndexIntoCharacterIndex(
-            (LPCUTF8)(const char*)utf8Str, count,
-            utf8::DecodeOptions::doChunkedEncoding);
-        count = utf8::CharacterIndexToByteIndex(
-            (LPCUTF8)(const char*)utf8Str, utf8Str.Length(), maxFitChars);
-
-        memmove(buffer, utf8Str, sizeof(uint8_t) * count);
-        if (length)
-        {
-            *length = count;
-        }
+        *length = utf8Str.Length();
     }
 
     return JsNoError;
@@ -4293,11 +4819,28 @@ _ALWAYSINLINE JsErrorCode CompileRun(
 {
     PARAM_NOT_NULL(scriptVal);
     VALIDATE_JSREF(scriptVal);
+    PARAM_NOT_NULL(sourceUrl);
 
     bool isExternalArray = Js::ExternalArrayBuffer::Is(scriptVal),
          isString = false;
     bool isUtf8   = !(parseAttributes & JsParseScriptAttributeArrayBufferIsUtf16Encoded);
-    if (!isExternalArray)
+
+    LoadScriptFlag scriptFlag = LoadScriptFlag_None;
+    const byte* script;
+    size_t cb;
+    const WCHAR *url;
+
+    if (isExternalArray)
+    {
+        script = ((Js::ExternalArrayBuffer*)(scriptVal))->GetBuffer();
+
+        cb = ((Js::ExternalArrayBuffer*)(scriptVal))->GetByteLength();
+
+        scriptFlag = (LoadScriptFlag)(isUtf8 ?
+            LoadScriptFlag_ExternalArrayBuffer | LoadScriptFlag_Utf8Source :
+            LoadScriptFlag_ExternalArrayBuffer);
+    }
+    else
     {
         isString = Js::JavascriptString::Is(scriptVal);
         if (!isString)
@@ -4306,36 +4849,30 @@ _ALWAYSINLINE JsErrorCode CompileRun(
         }
     }
 
-    LoadScriptFlag scriptFlag;
-    const byte* script = isExternalArray ?
-        ((Js::ExternalArrayBuffer*)(scriptVal))->GetBuffer() :
-        (const byte*)((Js::JavascriptString*)(scriptVal))->GetSz();
-    const size_t cb = isExternalArray ?
-        ((Js::ExternalArrayBuffer*)(scriptVal))->GetByteLength() :
-        ((Js::JavascriptString*)(scriptVal))->GetLength();
+    JsErrorCode error = GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode {
+        if (isString)
+        {
+            Js::JavascriptString* jsString = Js::JavascriptString::FromVar(scriptVal);
+            script = (const byte*)jsString->GetSz();
 
-    if (isExternalArray && isUtf8)
-    {
-        scriptFlag = (LoadScriptFlag) (LoadScriptFlag_ExternalArrayBuffer | LoadScriptFlag_Utf8Source);
-    }
-    else if (isUtf8)
-    {
-        scriptFlag = (LoadScriptFlag) (LoadScriptFlag_Utf8Source);
-    }
-    else
-    {
-        scriptFlag = LoadScriptFlag_None;
-    }
+            // JavascriptString is 2 bytes (WCHAR/char16)
+            cb = jsString->GetLength() * sizeof(WCHAR);
+        }
 
-    const wchar_t *url;
+        if (!Js::JavascriptString::Is(sourceUrl))
+        {
+            return JsErrorInvalidArgument;
+        }
 
-    if (sourceUrl && Js::JavascriptString::Is(sourceUrl))
+        url = Js::JavascriptString::FromVar(sourceUrl)->GetSz();
+
+        return JsNoError;
+
+    });
+
+    if (error != JsNoError)
     {
-        url = ((Js::JavascriptString*)(sourceUrl))->GetSz();
-    }
-    else
-    {
-        return JsErrorInvalidArgument;
+        return error;
     }
 
     return RunScriptCore(scriptVal, script, cb, scriptFlag,
@@ -4364,7 +4901,7 @@ CHAKRA_API JsRun(
         result, false);
 }
 
-CHAKRA_API JsCreatePropertyIdUtf8(
+CHAKRA_API JsCreatePropertyId(
     _In_z_ const char *name,
     _In_ size_t length,
     _Out_ JsPropertyIdRef *propertyId)
@@ -4376,12 +4913,12 @@ CHAKRA_API JsCreatePropertyIdUtf8(
         return JsErrorOutOfMemory;
     }
 
-    return JsGetPropertyIdFromName(wname, propertyId);
+    return JsGetPropertyIdFromNameInternal(wname, wname.Length(), propertyId);
 }
 
-CHAKRA_API JsCopyPropertyIdUtf8(
+CHAKRA_API JsCopyPropertyId(
     _In_ JsPropertyIdRef propertyId,
-    _Out_ uint8_t* buffer,
+    _Out_ char* buffer,
     _In_ size_t bufferSize,
     _Out_ size_t* length)
 {
@@ -4413,7 +4950,7 @@ CHAKRA_API JsCopyPropertyIdUtf8(
         count = utf8::CharacterIndexToByteIndex(
             (LPCUTF8)(const char*)utf8Str, utf8Str.Length(), maxFitChars);
 
-        memmove(buffer, utf8Str, sizeof(uint8_t) * count);
+        memmove(buffer, utf8Str, sizeof(char) * count);
         if (length)
         {
             *length = count;
@@ -4425,24 +4962,22 @@ CHAKRA_API JsCopyPropertyIdUtf8(
 
 CHAKRA_API JsSerialize(
     _In_ JsValueRef scriptVal,
-    _Out_ BYTE *buffer,
-    _Inout_ unsigned int *bufferSize,
+    _Out_ JsValueRef *bufferVal,
     _In_ JsParseScriptAttributes parseAttributes)
 {
     PARAM_NOT_NULL(scriptVal);
+    PARAM_NOT_NULL(bufferVal);
     VALIDATE_JSREF(scriptVal);
 
-    bool isExternalArray = Js::ExternalArrayBuffer::Is(scriptVal),
-         isString = false;
-    bool isUtf8   = !(parseAttributes & JsParseScriptAttributeArrayBufferIsUtf16Encoded);
-    if (!isExternalArray)
+    *bufferVal = nullptr;
+
+    const bool isExternalArray = Js::ExternalArrayBuffer::Is(scriptVal);
+    const bool isString = !isExternalArray && Js::JavascriptString::Is(scriptVal);
+    if (!isExternalArray && !isString)
     {
-        isString = Js::JavascriptString::Is(scriptVal);
-        if (!isString)
-        {
-            return JsErrorInvalidArgument;
-        }
+        return JsErrorInvalidArgument;
     }
+    const bool isUtf8 = !isString && !(parseAttributes & JsParseScriptAttributeArrayBufferIsUtf16Encoded);
 
     LoadScriptFlag scriptFlag;
     const byte* script = isExternalArray ?
@@ -4450,7 +4985,7 @@ CHAKRA_API JsSerialize(
         (const byte*)((Js::JavascriptString*)(scriptVal))->GetSz();
     const size_t cb = isExternalArray ?
         ((Js::ExternalArrayBuffer*)(scriptVal))->GetByteLength() :
-        ((Js::JavascriptString*)(scriptVal))->GetLength();
+        ((Js::JavascriptString*)(scriptVal))->GetSizeInBytes();
 
     if (isExternalArray && isUtf8)
     {
@@ -4465,20 +5000,41 @@ CHAKRA_API JsSerialize(
         scriptFlag = LoadScriptFlag_None;
     }
 
-    return JsSerializeScriptCore(script, cb, scriptFlag, nullptr,
-        0, buffer, bufferSize, scriptVal);
+    unsigned int bufferSize = 0;
+    JsErrorCode errorCode = JsSerializeScriptCore(script, cb, scriptFlag, nullptr,
+        0, nullptr, &bufferSize, scriptVal);
+
+    if (errorCode != JsNoError)
+    {
+        return errorCode;
+    }
+
+    if (bufferSize == 0)
+    {
+        return JsErrorScriptCompile;
+    }
+
+    if ((errorCode = JsCreateArrayBuffer(bufferSize, bufferVal)) == JsNoError)
+    {
+        byte* buffer = ((Js::ArrayBuffer*)(*bufferVal))->GetBuffer();
+        errorCode = JsSerializeScriptCore(script, cb, scriptFlag, nullptr,
+            0, buffer, &bufferSize, scriptVal);
+    }
+
+    return errorCode;
 }
 
 CHAKRA_API JsParseSerialized(
-    _In_ BYTE *buffer,
+    _In_ JsValueRef bufferVal,
     _In_ JsSerializedLoadScriptCallback scriptLoadCallback,
     _In_ JsSourceContext sourceContext,
     _In_ JsValueRef sourceUrl,
     _Out_ JsValueRef *result)
 {
-    PARAM_NOT_NULL(buffer);
+    PARAM_NOT_NULL(bufferVal);
     PARAM_NOT_NULL(sourceUrl);
-    const wchar_t *url;
+
+    const WCHAR *url;
 
     if (Js::JavascriptString::Is(sourceUrl))
     {
@@ -4489,21 +5045,29 @@ CHAKRA_API JsParseSerialized(
         return JsErrorInvalidArgument;
     }
 
+    // JsParseSerialized only accepts ArrayBuffer (incl. ExternalArrayBuffer)
+    if (!Js::ExternalArrayBuffer::Is(bufferVal))
+    {
+        return JsErrorInvalidArgument;
+    }
+
+    byte* buffer = Js::ArrayBuffer::FromVar(bufferVal)->GetBuffer();
+
     return RunSerializedScriptCore(
       scriptLoadCallback, DummyScriptUnloadCallback,
-      sourceContext, // use the same user provided sourceContext as scriptLoadSourceContext
-      buffer, sourceContext, url, true, result);
+      sourceContext,// use the same user provided sourceContext as scriptLoadSourceContext
+      buffer, bufferVal, sourceContext, url, true, result);
 }
 
 CHAKRA_API JsRunSerialized(
-    _In_ BYTE *buffer,
+    _In_ JsValueRef bufferVal,
     _In_ JsSerializedLoadScriptCallback scriptLoadCallback,
     _In_ JsSourceContext sourceContext,
     _In_ JsValueRef sourceUrl,
     _Out_ JsValueRef *result)
 {
-    PARAM_NOT_NULL(buffer);
-    const wchar_t *url;
+    PARAM_NOT_NULL(bufferVal);
+    const WCHAR *url;
 
     if (sourceUrl && Js::JavascriptString::Is(sourceUrl))
     {
@@ -4514,9 +5078,302 @@ CHAKRA_API JsRunSerialized(
         return JsErrorInvalidArgument;
     }
 
+    // JsParseSerialized only accepts ArrayBuffer (incl. ExternalArrayBuffer)
+    if (!Js::ExternalArrayBuffer::Is(bufferVal))
+    {
+        return JsErrorInvalidArgument;
+    }
+
+    byte* buffer = Js::ArrayBuffer::FromVar(bufferVal)->GetBuffer();
+
     return RunSerializedScriptCore(
         scriptLoadCallback, DummyScriptUnloadCallback,
         sourceContext, // use the same user provided sourceContext as scriptLoadSourceContext
-        buffer, sourceContext, url, false, result);
+        buffer, bufferVal, sourceContext, url, false, result);
 }
-#endif // NTBUILD
+
+CHAKRA_API JsCreatePromise(_Out_ JsValueRef *promise, _Out_ JsValueRef *resolve, _Out_ JsValueRef *reject)
+{
+    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
+
+        PARAM_NOT_NULL(promise);
+        PARAM_NOT_NULL(resolve);
+        PARAM_NOT_NULL(reject);
+
+        *promise = nullptr;
+        *resolve = nullptr;
+        *reject = nullptr;
+
+        Js::JavascriptPromiseResolveOrRejectFunction *jsResolve = nullptr;
+        Js::JavascriptPromiseResolveOrRejectFunction *jsReject = nullptr;
+        Js::JavascriptPromise *jsPromise = scriptContext->GetLibrary()->CreatePromise();
+        Js::JavascriptPromise::InitializePromise(jsPromise, &jsResolve, &jsReject, scriptContext);
+
+        *promise = (JsValueRef)jsPromise;
+        *resolve = (JsValueRef)jsResolve;
+        *reject = (JsValueRef)jsReject;
+
+        return JsNoError;
+    });
+}
+
+CHAKRA_API JsCreateWeakReference(
+    _In_ JsValueRef value,
+    _Out_ JsWeakRef* weakRef)
+{
+    VALIDATE_JSREF(value);
+    PARAM_NOT_NULL(weakRef);
+    *weakRef = nullptr;
+
+    if (Js::TaggedNumber::Is(value))
+    {
+        return JsNoWeakRefRequired;
+    }
+
+    return GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode {
+        ThreadContext* threadContext = ThreadContext::GetContextForCurrentThread();
+        if (threadContext == nullptr)
+        {
+            return JsErrorNoCurrentContext;
+        }
+
+        Recycler* recycler = threadContext->GetRecycler();
+        if (recycler->IsInObjectBeforeCollectCallback())
+        {
+            return JsErrorInObjectBeforeCollectCallback;
+        }
+
+        RecyclerHeapObjectInfo dummyObjectInfo;
+        if (!recycler->FindHeapObject(value, Memory::FindHeapObjectFlags::FindHeapObjectFlags_NoFlags, dummyObjectInfo))
+        {
+            // value is not recyler-allocated
+            return JsErrorInvalidArgument;
+        }
+
+        recycler->FindOrCreateWeakReferenceHandle<char>(
+            reinterpret_cast<char*>(value),
+            reinterpret_cast<Memory::RecyclerWeakReference<char>**>(weakRef));
+        return JsNoError;
+    });
+}
+
+CHAKRA_API JsGetWeakReferenceValue(
+    _In_ JsWeakRef weakRef,
+    _Out_ JsValueRef* value)
+{
+    VALIDATE_JSREF(weakRef);
+    PARAM_NOT_NULL(value);
+    *value = JS_INVALID_REFERENCE;
+
+    return GlobalAPIWrapper_NoRecord([&]() -> JsErrorCode {
+        Memory::RecyclerWeakReference<char>* recyclerWeakReference =
+            reinterpret_cast<Memory::RecyclerWeakReference<char>*>(weakRef);
+        *value = reinterpret_cast<JsValueRef>(recyclerWeakReference->Get());
+        return JsNoError;
+    });
+}
+
+CHAKRA_API JsGetAndClearExceptionWithMetadata(_Out_ JsValueRef *metadata)
+{
+    PARAM_NOT_NULL(metadata);
+    *metadata = nullptr;
+
+    JsrtContext *currentContext = JsrtContext::GetCurrent();
+
+    if (currentContext == nullptr)
+    {
+        return JsErrorNoCurrentContext;
+    }
+
+    Js::ScriptContext *scriptContext = currentContext->GetScriptContext();
+    Assert(scriptContext != nullptr);
+
+    if (scriptContext->GetRecycler() && scriptContext->GetRecycler()->IsHeapEnumInProgress())
+    {
+        return JsErrorHeapEnumInProgress;
+    }
+    else if (scriptContext->GetThreadContext()->IsInThreadServiceCallback())
+    {
+        return JsErrorInThreadServiceCallback;
+    }
+
+    if (scriptContext->GetThreadContext()->IsExecutionDisabled())
+    {
+        return JsErrorInDisabledState;
+    }
+
+    HRESULT hr = S_OK;
+    Js::JavascriptExceptionObject *recordedException = nullptr;
+
+    BEGIN_TRANSLATE_OOM_TO_HRESULT
+        if (scriptContext->HasRecordedException())
+        {
+            recordedException = scriptContext->GetAndClearRecordedException();
+        }
+    END_TRANSLATE_OOM_TO_HRESULT(hr)
+
+    if (hr == E_OUTOFMEMORY)
+    {
+        recordedException = scriptContext->GetThreadContext()->GetRecordedException();
+    }
+    if (recordedException == nullptr)
+    {
+        return JsErrorInvalidArgument;
+    }
+
+    Js::Var exception = recordedException->GetThrownObject(nullptr);
+
+    if (exception == nullptr)
+    {
+        // TODO: How does this early bailout impact TTD?
+        return JsErrorInvalidArgument;
+    }
+
+    return ContextAPIWrapper<false>([&](Js::ScriptContext* scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
+        Js::Var exceptionMetadata = Js::JavascriptExceptionMetadata::CreateMetadataVar(scriptContext);
+        Js::JavascriptOperators::OP_SetProperty(exceptionMetadata, Js::PropertyIds::exception, exception, scriptContext);
+
+        Js::FunctionBody *functionBody = recordedException->GetFunctionBody();
+        if (functionBody == nullptr)
+        {
+            // This is probably a parse error. We can get the error location metadata from the thrown object.
+            Js::JavascriptExceptionMetadata::PopulateMetadataFromCompileException(exceptionMetadata, exception, scriptContext);
+        }
+        else
+        {
+            if (!Js::JavascriptExceptionMetadata::PopulateMetadataFromException(exceptionMetadata, recordedException, scriptContext))
+            {
+                return JsErrorInvalidArgument;
+            }
+        }
+
+        *metadata = exceptionMetadata;
+
+#if ENABLE_TTD
+        if (hr != E_OUTOFMEMORY)
+        {
+            PERFORM_JSRT_TTD_RECORD_ACTION(scriptContext, RecordJsRTGetAndClearExceptionWithMetadata);
+            PERFORM_JSRT_TTD_RECORD_ACTION_RESULT(scriptContext, metadata);
+        }
+#endif
+
+
+        return JsNoError;
+    });
+}
+
+CHAKRA_API JsCopyStringOneByte(
+    _In_ JsValueRef value,
+    _In_ int start,
+    _In_ int length,
+    _Out_opt_ char* buffer,
+    _Out_opt_ size_t* written)
+{
+    PARAM_NOT_NULL(value);
+    VALIDATE_JSREF(value);
+    return WriteStringCopy(value, start, length, written,
+        [buffer](const char16* src, size_t count, size_t *needed)
+    {
+        if (buffer)
+        {
+            for (size_t i = 0; i < count; i++)
+            {
+                buffer[i] = (char)src[i];
+            }
+        }
+        return JsNoError;
+    });
+}
+
+CHAKRA_API JsGetDataViewInfo(
+    _In_ JsValueRef dataView,
+    _Out_opt_ JsValueRef *arrayBuffer,
+    _Out_opt_ unsigned int *byteOffset,
+    _Out_opt_ unsigned int *byteLength)
+{
+    VALIDATE_JSREF(dataView);
+
+    BEGIN_JSRT_NO_EXCEPTION
+    {
+        if (!Js::DataView::Is(dataView))
+        {
+            RETURN_NO_EXCEPTION(JsErrorInvalidArgument);
+        }
+
+        Js::DataView* dv = Js::DataView::FromVar(dataView);
+        if (arrayBuffer != nullptr) {
+            *arrayBuffer = dv->GetArrayBuffer();
+        }
+
+        if (byteOffset != nullptr) {
+            *byteOffset = dv->GetByteOffset();
+        }
+
+        if (byteLength != nullptr) {
+            *byteLength = dv->GetLength();
+        }
+    }
+
+#if ENABLE_TTD
+    Js::ScriptContext* scriptContext = Js::RecyclableObject::FromVar(dataView)->GetScriptContext();
+    if(PERFORM_JSRT_TTD_RECORD_ACTION_CHECK(scriptContext) && arrayBuffer != nullptr)
+    {
+        scriptContext->GetThreadContext()->TTDLog->RecordJsRTGetDataViewInfo(dataView, *arrayBuffer);
+    }
+#endif
+
+    END_JSRT_NO_EXCEPTION
+}
+
+CHAKRA_API JsSetHostPromiseRejectionTracker(_In_ JsHostPromiseRejectionTrackerCallback promiseRejectionTrackerCallback, _In_opt_ void *callbackState)
+{
+    return ContextAPINoScriptWrapper_NoRecord([&](Js::ScriptContext *scriptContext) -> JsErrorCode {
+        scriptContext->GetLibrary()->SetNativeHostPromiseRejectionTrackerCallback((Js::JavascriptLibrary::HostPromiseRejectionTrackerCallback) promiseRejectionTrackerCallback, callbackState);
+        return JsNoError;
+    },
+    /*allowInObjectBeforeCollectCallback*/true);
+}
+
+CHAKRA_API JsGetProxyProperties (_In_ JsValueRef object, _Out_ bool* isProxy, _Out_opt_ JsValueRef* target, _Out_opt_ JsValueRef* handler)
+{
+    return ContextAPINoScriptWrapper_NoRecord([&](Js::ScriptContext * scriptContext) -> JsErrorCode {
+        VALIDATE_INCOMING_REFERENCE(object, scriptContext);
+        PARAM_NOT_NULL(isProxy);
+
+        if (target != nullptr)
+        {
+            *target = JS_INVALID_REFERENCE;
+        }
+
+        if (handler != nullptr)
+        {
+            *handler = JS_INVALID_REFERENCE;
+        }
+
+        *isProxy = Js::JavascriptProxy::Is(object);
+
+        if (!*isProxy)
+        {
+            return JsNoError;
+        }
+
+        Js::JavascriptProxy* proxy = Js::JavascriptProxy::UnsafeFromVar(object);
+        bool revoked = proxy->IsRevoked();
+
+        if (target != nullptr && !revoked)
+        {
+            *target = static_cast<JsValueRef>(proxy->GetTarget());
+        }
+
+        if (handler != nullptr && !revoked)
+        {
+            *handler = static_cast<JsValueRef>(proxy->GetHandler());
+        }
+
+        return JsNoError;
+    },
+    /*allowInObjectBeforeCollectCallback*/true);
+}
+
+#endif // _CHAKRACOREBUILD

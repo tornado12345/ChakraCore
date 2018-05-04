@@ -37,7 +37,10 @@ namespace Js
         Assert(buffer);
         Assert(charLength <= charCapacity);
 
+        ArrayWriteBarrierVerifyBits(Block::Pointers(Chars()), Block::PointerLengthFromCharLength(charLength));
         js_wmemcpy_s(Chars(), charLength, Chars(buffer), charLength);
+        // SWB: buffer may contain chars or pointers. Trigger write barrier for the whole buffer.
+        ArrayWriteBarrier(Pointers(), PointerLengthFromCharLength(charLength));
     }
 
     CompoundString::Block::Block(const Block &other, const CharCount usedCharLength)
@@ -120,18 +123,14 @@ namespace Js
         return static_cast<char16 *>(buffer);
     }
 
-    #endif
-
-    inline void *const *CompoundString::Block::Pointers(const void *const buffer)
+    const Field(void*) *CompoundString::Block::Pointers(const void *const buffer)
     {
-        return static_cast<void *const *>(buffer);
+        return (const Field(void*)*)(buffer);
     }
 
-    #ifndef IsJsDiag
-
-    void **CompoundString::Block::Pointers(void *const buffer)
+    Field(void*) *CompoundString::Block::Pointers(void *const buffer)
     {
-        return static_cast<void **>(buffer);
+        return static_cast<Field(void*)*>(buffer);
     }
 
     CharCount CompoundString::Block::PointerCapacityFromCharCapacity(const CharCount charCapacity)
@@ -146,7 +145,7 @@ namespace Js
 
     #endif
 
-    // ChakraDiag includes CompoundString.cpp as a header file so this method needs to be marked as inline 
+    // ChakraDiag includes CompoundString.cpp as a header file so this method needs to be marked as inline
     // to handle that case
     JS_DIAG_INLINE CharCount CompoundString::Block::PointerLengthFromCharLength(const CharCount charLength)
     {
@@ -226,12 +225,12 @@ namespace Js
         return charCapacity;
     }
 
-    void *const *CompoundString::Block::Pointers() const
+    const Field(void*) *CompoundString::Block::Pointers() const
     {
         return Pointers(Buffer());
     }
 
-    void **CompoundString::Block::Pointers()
+    Field(void*) *CompoundString::Block::Pointers()
     {
         return Pointers(Buffer());
     }
@@ -306,7 +305,7 @@ namespace Js
         return charCapacity;
     }
 
-    void **CompoundString::BlockInfo::Pointers() const
+    Field(void*) *CompoundString::BlockInfo::Pointers() const
     {
         return Block::Pointers(buffer);
     }
@@ -384,7 +383,11 @@ namespace Js
         {
             AllocateBuffer(charCapacity, recycler);
             charLength = usedCharLength;
-            js_wmemcpy_s((char16*)(this->buffer), charCapacity, (char16*)(buffer), usedCharLength);
+            
+            ArrayWriteBarrierVerifyBits(Block::Pointers(Chars()), Block::PointerLengthFromCharLength(charCapacity));
+            js_wmemcpy_s(Chars(), charCapacity, (const char16*)(buffer), usedCharLength);
+            // SWB: buffer may contain chars or pointers. Trigger write barrier for the whole buffer.
+            ArrayWriteBarrier(Pointers(), PointerLength());
             return nullptr;
         }
 
@@ -403,8 +406,12 @@ namespace Js
             void *const newBuffer = RecyclerNewArray(recycler, char16, newCharCapacity);
             charCapacity = newCharCapacity;
             const CharCount charLength = CharLength();
-            js_wmemcpy_s((char16*)newBuffer, charCapacity, (char16*)buffer, charLength);
+
+            ArrayWriteBarrierVerifyBits(Block::Pointers(newBuffer), Block::PointerLengthFromCharLength(charCapacity));
+            js_wmemcpy_s((char16*)newBuffer, charCapacity, (char16*)PointerValue(buffer), charLength);
             buffer = newBuffer;
+            // SWB: buffer may contain chars or pointers. Trigger write barrier for the whole buffer.
+            ArrayWriteBarrier(Pointers(), PointerLength());
             return nullptr;
         }
 
@@ -598,6 +605,15 @@ namespace Js
 
     CompoundString *CompoundString::FromVar(RecyclableObject *const object)
     {
+        AssertOrFailFast(Is(object));
+
+        CompoundString *const cs = static_cast<CompoundString *>(object);
+        Assert(!cs->IsFinalized());
+        return cs;
+    }
+
+    CompoundString *CompoundString::UnsafeFromVar(RecyclableObject *const object)
+    {
         Assert(Is(object));
 
         CompoundString *const cs = static_cast<CompoundString *>(object);
@@ -610,6 +626,11 @@ namespace Js
         return FromVar(RecyclableObject::FromVar(var));
     }
 
+    CompoundString *CompoundString::UnsafeFromVar(const Var var)
+    {
+        return UnsafeFromVar(RecyclableObject::UnsafeFromVar(var));
+    }
+
     JavascriptString *CompoundString::GetImmutableOrScriptUnreferencedString(JavascriptString *const s)
     {
         Assert(s);
@@ -619,7 +640,7 @@ namespace Js
         // another CompoundString, for instance). If the provided string is a CompoundString, it must not be mutated by script
         // code after the concatenation operation. In that case, clone the string to ensure that it is not referenced by script
         // code. If the clone is never handed back to script code, it effectively behaves as an immutable string.
-        return Is(s) ? FromVar(s)->Clone(false) : s;
+        return Is(s) ? UnsafeFromVar(s)->Clone(false) : s;
     }
 
     bool CompoundString::ShouldAppendChars(const CharCount appendCharLength)
@@ -679,7 +700,7 @@ namespace Js
         return lastBlockInfo.CharCapacity();
     }
 
-    void **CompoundString::LastBlockPointers() const
+    Field(void*) *CompoundString::LastBlockPointers() const
     {
         return lastBlockInfo.Pointers();
     }
@@ -710,7 +731,7 @@ namespace Js
         Assert(packedSubstringInfoRef);
         Assert(packedSubstringInfo2Ref);
 
-    #if defined(_M_X64_OR_ARM64)
+    #if defined(TARGET_64)
         // On 64-bit architectures, two nonnegative 32-bit ints fit completely in a tagged pointer
         *packedSubstringInfoRef =
             reinterpret_cast<void *>(
@@ -769,7 +790,7 @@ namespace Js
         const uintptr_t packedSubstringInfo = reinterpret_cast<uintptr_t>(pointer);
         Assert(packedSubstringInfo & 1);
 
-    #if defined(_M_X64_OR_ARM64)
+    #if defined(TARGET_64)
         // On 64-bit architectures, two nonnegative 32-bit ints fit completely in a tagged pointer
         Assert(!pointer2);
         *startIndexRef = static_cast<CharCount>(packedSubstringInfo >> 32);
@@ -1006,7 +1027,7 @@ namespace Js
                 Unreference();
                 const char16 *const buffer = _u("");
                 SetBuffer(buffer);
-                VirtualTableInfo<LiteralString>::SetVirtualTable(this);
+                LiteralStringWithPropertyStringPtr::ConvertString(this);
                 return buffer;
             }
 
@@ -1018,7 +1039,7 @@ namespace Js
                 const char16 *const buffer = GetLibrary()->GetCharStringCache().GetStringForChar(LastBlockChars()[0])->UnsafeGetBuffer();
                 Unreference();
                 SetBuffer(buffer);
-                VirtualTableInfo<LiteralString>::SetVirtualTable(this);
+                LiteralStringWithPropertyStringPtr::ConvertString(this);
                 return buffer;
             }
         }
@@ -1032,7 +1053,7 @@ namespace Js
             const char16 *const buffer = LastBlockChars();
             Unreference();
             SetBuffer(buffer);
-            VirtualTableInfo<LiteralString>::SetVirtualTable(this);
+            LiteralStringWithPropertyStringPtr::ConvertString(this);
             return buffer;
         }
 
@@ -1042,7 +1063,7 @@ namespace Js
         Assert(buffer[totalCharLength] == _u('\0'));
         Unreference();
         SetBuffer(buffer);
-        VirtualTableInfo<LiteralString>::SetVirtualTable(this);
+        LiteralStringWithPropertyStringPtr::ConvertString(this);
         return buffer;
     }
 
@@ -1074,7 +1095,7 @@ namespace Js
         CharCount remainingCharLengthToCopy = totalCharLength;
         const Block *const lastBlock = this->lastBlock;
         const Block *block = lastBlock;
-        void *const *blockPointers = LastBlockPointers();
+        Field(void*) const *blockPointers = LastBlockPointers();
         CharCount pointerIndex = LastBlockPointerLength();
         while(remainingCharLengthToCopy > directCharLength)
         {
@@ -1083,7 +1104,7 @@ namespace Js
                 Assert(block);
                 block = block->Previous();
                 Assert(block);
-                blockPointers = block->Pointers();
+                blockPointers = (Field(void*) const *)block->Pointers();
                 pointerIndex = block->PointerLength();
             }
 
@@ -1093,7 +1114,7 @@ namespace Js
                 Assert(pointerIndex != 0);
                 void *pointer2 = blockPointers[--pointerIndex];
                 JavascriptString *s;
-    #if defined(_M_X64_OR_ARM64)
+    #if defined(TARGET_64)
                 Assert(!IsPackedInfo(pointer2));
     #else
                 if(IsPackedInfo(pointer2))
@@ -1184,6 +1205,7 @@ namespace Js
                 {
                     Assert(remainingCharLengthToCopy >= blockCharLength);
                     remainingCharLengthToCopy -= blockCharLength;
+                    // SWB: this is copying "direct chars" and there should be no pointers here. No write barrier needed.
                     js_wmemcpy_s(&buffer[remainingCharLengthToCopy], blockCharLength, blockChars, blockCharLength);
                     if(remainingCharLengthToCopy == 0)
                         break;

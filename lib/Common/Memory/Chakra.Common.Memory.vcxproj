@@ -31,6 +31,8 @@
       </AdditionalIncludeDirectories>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>CommonMemoryPch.h</PrecompiledHeaderFile>
+      <!-- # Check out https://osgwiki.com/wiki/Dev_14_Migration for more details about -Zc:implicitNoexcept- -->
+      <AdditionalOptions>-Zc:implicitNoexcept- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -84,10 +86,13 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)SmallNormalHeapBucket.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)StressTest.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)VirtualAllocWrapper.cpp" />
-    <ClCompile Include="$(MSBuildThisFileDirectory)MemUtils.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)CommonMemoryPch.cpp">
       <PrecompiledHeader>Create</PrecompiledHeader>
     </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)SectionAllocWrapper.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)HeapInfoManager.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)RecyclerSweepManager.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)DelayDeletingFunctionTable.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="AllocationPolicyManager.h" />
@@ -104,6 +109,7 @@
     </ClInclude>
     <ClInclude Include="AutoAllocatorObjectPtr.h" />
     <ClInclude Include="AutoPtr.h" />
+    <ClInclude Include="BucketStatsReporter.h" />
     <ClInclude Include="CollectionState.h" />
     <ClInclude Include="CommonMemoryPch.h" />
     <ClInclude Include="CustomHeap.h" />
@@ -115,12 +121,12 @@
     <ClInclude Include="HeapBucket.h" />
     <ClInclude Include="HeapConstants.h" />
     <ClInclude Include="HeapInfo.h" />
+    <ClInclude Include="HeapInfoManager.h" />
     <ClInclude Include="IdleDecommitPageAllocator.h" />
     <ClInclude Include="LargeHeapBlock.h" />
     <ClInclude Include="LeakReport.h" />
     <ClInclude Include="LargeHeapBucket.h" />
     <ClInclude Include="MarkContext.h" />
-    <ClInclude Include="MemUtils.h" />
     <ClInclude Include="MemoryTracking.h" />
     <ClInclude Include="PageAllocator.h" />
     <ClInclude Include="PageAllocatorDefines.h" />
@@ -135,8 +141,10 @@
     <ClInclude Include="RecyclerPointers.h" />
     <ClInclude Include="RecyclerRootPtr.h" />
     <ClInclude Include="RecyclerSweep.h" />
+    <ClInclude Include="RecyclerSweepManager.h" />
     <ClInclude Include="RecyclerWeakReference.h" />
     <ClInclude Include="RecyclerWriteBarrierManager.h" />
+    <ClInclude Include="SectionAllocWrapper.h" />
     <ClInclude Include="SmallFinalizableHeapBlock.h" />
     <ClInclude Include="SmallFinalizableHeapBucket.h" />
     <ClInclude Include="SmallHeapBlockAllocator.h" />
@@ -147,6 +155,7 @@
     <ClInclude Include="MemoryLogger.h" />
     <ClInclude Include="StressTest.h" />
     <ClInclude Include="VirtualAllocWrapper.h" />
+    <ClInclude Include="WriteBarrierMacros.h" />
     <ClInclude Include="XDataAllocator.h" />
   </ItemGroup>
   <ItemGroup>
@@ -154,6 +163,7 @@
       <ExcludedFromBuild>true</ExcludedFromBuild>
     </None>
     <None Include="HeapBlock.inl" />
+    <None Include="HeapBlockMap.inl" />
     <None Include="HeapBucket.inl" />
     <None Include="LargeHeapBucket.inl" />
     <None Include="MarkContext.inl" />

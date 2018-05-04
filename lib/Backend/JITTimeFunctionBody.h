@@ -75,6 +75,7 @@ public:
     bool IsLambda() const;
     bool IsAsmJsMode() const;
     bool IsWasmFunction() const;
+    bool UsesWAsmJsFastVirtualBuffer() const;
     bool IsStrictMode() const;
     bool IsEval() const;
     bool HasImplicitArgIns() const;
@@ -98,6 +99,7 @@ public:
     bool CanInlineRecursively(uint depth, bool tryAggressive = true) const;
     bool NeedScopeObjectForArguments(bool hasNonSimpleParams) const;
     bool GetDoScopeObjectCreation() const;
+    void EnsureConsistentConstCount() const;
 
     const byte * GetByteCodeBuffer() const;
     StatementMapIDL * GetFullStatementMap() const;
@@ -152,7 +154,6 @@ public:
     intptr_t GetIsInstInlineCache(uint index) const;
     Js::TypeId GetConstantType(Js::RegSlot location) const;
     void * GetConstTable() const;
-    bool IsConstRegPropertyString(Js::RegSlot reg, ScriptContextInfo * context) const;
 
     intptr_t GetRootObject() const;
     intptr_t GetLoopHeaderAddr(uint loopNum) const;
@@ -167,6 +168,7 @@ public:
     intptr_t GetFormalsPropIdArrayAddr() const;
     intptr_t GetObjectLiteralTypeRef(uint index) const;
     intptr_t GetLiteralRegexAddr(uint index) const;
+    uint GetNestedFuncIndexForSlotIdInCachedScope(uint index) const;
     const AsmJsJITInfo * GetAsmJsInfo() const;
     const JITTimeProfileInfo * GetReadOnlyProfileInfo() const;
     JITTimeProfileInfo * GetProfileInfo() const;
@@ -182,7 +184,7 @@ public:
     const Js::PropertyIdArray * ReadPropertyIdArrayFromAuxData(uint offset) const;
     Js::PropertyIdArray * GetFormalsPropIdArray() const;
 
-    Js::ForInCache * GetForInCache(uint profileId) const;
+    Js::EnumeratorCache * GetForInCache(uint profileId) const;
     bool InitializeStatementMap(Js::SmallSpanSequence * statementMap, ArenaAllocator* alloc) const;
 private:
     Js::FunctionInfo::Attributes GetAttributes() const;

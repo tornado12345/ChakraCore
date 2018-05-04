@@ -46,38 +46,6 @@ SCCLiveness::Build()
         IR::Opnd *dst, *src1, *src2;
         uint32 instrNum = instr->GetNumber();
 
-        // End of loop?
-        if (this->curLoop && instrNum >= this->curLoop->regAlloc.loopEnd)
-        {
-            AssertMsg(this->loopNest > 0, "Loop nest is messed up");
-            AssertMsg(instr->IsBranchInstr(), "Loop tail should be a branchInstr");
-            AssertMsg(instr->AsBranchInstr()->IsLoopTail(this->func), "Loop tail not marked correctly");
-
-            FOREACH_SLIST_ENTRY(Lifetime *, lifetime, this->curLoop->regAlloc.extendedLifetime)
-            {
-                if (this->curLoop->regAlloc.hasNonOpHelperCall)
-                {
-                    lifetime->isLiveAcrossUserCalls = true;
-                }
-                if (this->curLoop->regAlloc.hasCall)
-                {
-                    lifetime->isLiveAcrossCalls = true;
-                }
-                if(lifetime->end == this->curLoop->regAlloc.loopEnd)
-                {
-                    lifetime->totalOpHelperLengthByEnd = this->totalOpHelperFullVisitedLength + CurrentOpHelperVisitedLength(instr);
-                }
-            }
-            NEXT_SLIST_ENTRY;
-
-            this->curLoop->regAlloc.helperLength = this->totalOpHelperFullVisitedLength + CurrentOpHelperVisitedLength(instr);
-            while (this->curLoop && instrNum >= this->curLoop->regAlloc.loopEnd)
-            {
-                this->curLoop = this->curLoop->parent;
-                this->loopNest--;
-            }
-        }
-
         if (instr->HasBailOutInfo())
         {
             // At this point, the bailout should be lowered to a CALL to BailOut
@@ -116,6 +84,44 @@ SCCLiveness::Build()
             if (src2)
             {
                 this->ProcessSrc(src2, instr);
+            }
+        }
+
+        // End of loop?
+        if (this->curLoop && instrNum >= this->curLoop->regAlloc.loopEnd)
+        {
+            AssertMsg(this->loopNest > 0, "Loop nest is messed up");
+            AssertMsg(instr->IsBranchInstr(), "Loop tail should be a branchInstr");
+            AssertMsg(instr->AsBranchInstr()->IsLoopTail(this->func), "Loop tail not marked correctly");
+
+            Loop *loop = this->curLoop;
+            while (loop && loop->regAlloc.loopEnd == this->curLoop->regAlloc.loopEnd)
+            {
+                FOREACH_SLIST_ENTRY(Lifetime *, lifetime, loop->regAlloc.extendedLifetime)
+                {
+                    if (loop->regAlloc.hasNonOpHelperCall)
+                    {
+                        lifetime->isLiveAcrossUserCalls = true;
+                    }
+                    if (loop->regAlloc.hasCall)
+                    {
+                        lifetime->isLiveAcrossCalls = true;
+                    }
+                    if (lifetime->end == loop->regAlloc.loopEnd)
+                    {
+                        lifetime->totalOpHelperLengthByEnd = this->totalOpHelperFullVisitedLength + CurrentOpHelperVisitedLength(instr);
+                    }
+                }
+                NEXT_SLIST_ENTRY;
+
+                loop->regAlloc.helperLength = this->totalOpHelperFullVisitedLength + CurrentOpHelperVisitedLength(instr);
+                Assert(!loop->parent || loop->parent && loop->parent->regAlloc.loopEnd >= loop->regAlloc.loopEnd);
+                loop = loop->parent;
+            }
+            while (this->curLoop && instrNum >= this->curLoop->regAlloc.loopEnd)
+            {
+                this->curLoop = this->curLoop->parent;
+                this->loopNest--;
             }
         }
 
@@ -159,8 +165,6 @@ SCCLiveness::Build()
                 if (labelInstr->isOpHelper == (this->lastOpHelperLabel != nullptr)
                     && lastLabelInstr && labelInstr->isOpHelper == lastLabelInstr->isOpHelper)
                 {
-                    // No such transition. Remove the label.
-                    Assert(!labelInstr->GetRegion() || labelInstr->GetRegion() == this->curRegion);
                     labelInstr->Remove();
                     continue;
                 }
@@ -212,6 +216,10 @@ SCCLiveness::Build()
                 this->curLoop = loop;
                 loop->regAlloc.loopStart = instrNum;
                 loop->regAlloc.loopEnd = lastBranchNum;
+
+#if LOWER_SPLIT_INT64
+                func->Int64SplitExtendLoopLifetime(loop);
+#endif
 
                 // Tail duplication can result in cases in which an outer loop lexically ends before the inner loop.
                 // The register allocator could then thrash in the inner loop registers used for a live-on-back-edge
@@ -303,7 +311,7 @@ SCCLiveness::Build()
 
         // Check for lifetimes that have been extended such that they now span multiple regions.
         this->curRegion->SetEnd(this->func->m_exitInstr);
-        if (this->func->HasTry() && !this->func->DoOptimizeTryCatch())
+        if (this->func->HasTry() && !this->func->DoOptimizeTry())
         {
             FOREACH_SLIST_ENTRY(Lifetime *, lifetime, &this->lifetimeList)
             {
@@ -362,17 +370,22 @@ SCCLiveness::ProcessSrc(IR::Opnd *src, IR::Instr *instr)
     {
         IR::IndirOpnd *indirOpnd = src->AsIndirOpnd();
 
-        AssertMsg(indirOpnd->GetBaseOpnd(), "Indir should have a base...");
-
         if (!this->FoldIndir(instr, indirOpnd))
         {
-            this->ProcessRegUse(indirOpnd->GetBaseOpnd(), instr);
+            if (indirOpnd->GetBaseOpnd())
+            {
+                this->ProcessRegUse(indirOpnd->GetBaseOpnd(), instr);
+            }
 
             if (indirOpnd->GetIndexOpnd())
             {
                 this->ProcessRegUse(indirOpnd->GetIndexOpnd(), instr);
             }
         }
+    }
+    else if (src->IsListOpnd())
+    {
+        src->AsListOpnd()->Map([&](int i, IR::Opnd* opnd) { this->ProcessSrc(opnd, instr); });
     }
     else if (!this->lastCall && src->IsSymOpnd() && src->AsSymOpnd()->m_sym->AsStackSym()->IsParamSlotSym())
     {
@@ -388,18 +401,8 @@ SCCLiveness::ProcessSrc(IR::Opnd *src, IR::Instr *instr)
             {
                 lifetime = this->InsertLifetime(stackSym, reg, this->func->m_headInstr->m_next);
                 lifetime->region = this->curRegion;
-                lifetime->isFloat = symOpnd->IsFloat();
-                lifetime->isSimd128F4 = symOpnd->IsSimd128F4();
-                lifetime->isSimd128I4 = symOpnd->IsSimd128I4();
-                lifetime->isSimd128I8 = symOpnd->IsSimd128I8();
-                lifetime->isSimd128I16 = symOpnd->IsSimd128I16();
-                lifetime->isSimd128U4 = symOpnd->IsSimd128U4();
-                lifetime->isSimd128U8 = symOpnd->IsSimd128U8();
-                lifetime->isSimd128U16 = symOpnd->IsSimd128U16();
-                lifetime->isSimd128B4 = symOpnd->IsSimd128B4();
-                lifetime->isSimd128B8 = symOpnd->IsSimd128B8();
-                lifetime->isSimd128B16 = symOpnd->IsSimd128B16();
-                lifetime->isSimd128D2 = symOpnd->IsSimd128D2();
+                lifetime->isFloat = symOpnd->IsFloat() || symOpnd->IsSimd128();
+
             }
 
             IR::RegOpnd * newRegOpnd = IR::RegOpnd::New(stackSym, reg, symOpnd->GetType(), this->func);
@@ -419,12 +422,12 @@ SCCLiveness::ProcessDst(IR::Opnd *dst, IR::Instr *instr)
 
         IR::IndirOpnd *indirOpnd = dst->AsIndirOpnd();
 
-        AssertMsg(indirOpnd->GetBaseOpnd(), "Indir should have a base...");
-
         if (!this->FoldIndir(instr, indirOpnd))
         {
-            this->ProcessRegUse(indirOpnd->GetBaseOpnd(), instr);
-
+            if (indirOpnd->GetBaseOpnd())
+            {
+                this->ProcessRegUse(indirOpnd->GetBaseOpnd(), instr);
+            }
             if (indirOpnd->GetIndexOpnd())
             {
                 this->ProcessRegUse(indirOpnd->GetIndexOpnd(), instr);
@@ -441,6 +444,10 @@ SCCLiveness::ProcessDst(IR::Opnd *dst, IR::Instr *instr)
     else if (dst->IsRegOpnd())
     {
         this->ProcessRegDef(dst->AsRegOpnd(), instr);
+    }
+    else if (dst->IsListOpnd())
+    {
+        dst->AsListOpnd()->Map([&](int i, IR::Opnd* opnd) { this->ProcessDst(opnd, instr); });
     }
 }
 
@@ -479,7 +486,7 @@ SCCLiveness::ProcessBailOutUses(IR::Instr * instr)
     // lifetimes wouldn't have been extended beyond the bailout point (InlineeEnd extends the lifetimes)
     // Extend argument lifetimes up to the bail out point to allow LinearScan::SpillInlineeArgs to spill
     // inlinee args.
-    if ((instr->GetBailOutKind() == IR::BailOutOnNoProfile) && !instr->m_func->IsTopFunc())
+    if (instr->HasBailOnNoProfile() && !instr->m_func->IsTopFunc())
     {
         Func * inlinee = instr->m_func;
         while (!inlinee->IsTopFunc())
@@ -520,7 +527,7 @@ SCCLiveness::ProcessStackSymUse(StackSym * stackSym, IR::Instr * instr, int usag
     }
     else
     {
-        if (lifetime->region != this->curRegion && !this->func->DoOptimizeTryCatch())
+        if (lifetime->region != this->curRegion && !this->func->DoOptimizeTry())
         {
             lifetime->dontAllocate = true;
         }
@@ -602,18 +609,7 @@ SCCLiveness::ProcessRegDef(IR::RegOpnd *regDef, IR::Instr *instr)
     {
         lifetime = this->InsertLifetime(stackSym, regDef->GetReg(), instr);
         lifetime->region = this->curRegion;
-        lifetime->isFloat = regDef->IsFloat();
-        lifetime->isSimd128F4   = regDef->IsSimd128F4();
-        lifetime->isSimd128I4   = regDef->IsSimd128I4 ();
-        lifetime->isSimd128I8   = regDef->IsSimd128I8 ();
-        lifetime->isSimd128I16  = regDef->IsSimd128I16();
-        lifetime->isSimd128U4   = regDef->IsSimd128U4 ();
-        lifetime->isSimd128U8   = regDef->IsSimd128U8 ();
-        lifetime->isSimd128U16  = regDef->IsSimd128U16();
-        lifetime->isSimd128B4 = regDef->IsSimd128B4();
-        lifetime->isSimd128B8 = regDef->IsSimd128B8();
-        lifetime->isSimd128B16 = regDef->IsSimd128B16();
-        lifetime->isSimd128D2   = regDef->IsSimd128D2();
+        lifetime->isFloat = regDef->IsFloat() || regDef->IsSimd128();
     }
     else
     {
@@ -621,7 +617,7 @@ SCCLiveness::ProcessRegDef(IR::RegOpnd *regDef, IR::Instr *instr)
 
         ExtendLifetime(lifetime, instr);
 
-        if (lifetime->region != this->curRegion && !this->func->DoOptimizeTryCatch())
+        if (lifetime->region != this->curRegion && !this->func->DoOptimizeTry())
         {
             lifetime->dontAllocate = true;
         }
@@ -710,7 +706,12 @@ SCCLiveness::ExtendLifetime(Lifetime *lifetime, IR::Instr *instr)
             }
             NEXT_SLISTBASE_ENTRY
         }
+#if _M_ARM64
+        // The case of equality is valid on Arm64 where some branch instructions have sources.
+        AssertMsg(lifetime->end >= instr->GetNumber(), "Lifetime end not set correctly");
+#else
         AssertMsg(lifetime->end > instr->GetNumber(), "Lifetime end not set correctly");
+#endif
     }
     this->extendedLifetimesLoopList->Clear(this->tempAlloc);
 }
@@ -722,7 +723,7 @@ Lifetime *
 SCCLiveness::InsertLifetime(StackSym *stackSym, RegNum reg, IR::Instr *const currentInstr)
 {
     const uint start = currentInstr->GetNumber(), end = start;
-    Lifetime * newLlifetime = JitAnew(tempAlloc, Lifetime, tempAlloc, stackSym, reg, start, end, this->func);
+    Lifetime * newLlifetime = JitAnew(tempAlloc, Lifetime, tempAlloc, stackSym, reg, start, end);
     newLlifetime->totalOpHelperLengthByEnd = this->totalOpHelperFullVisitedLength + CurrentOpHelperVisitedLength(currentInstr);
 
     // Find insertion point
@@ -753,8 +754,8 @@ SCCLiveness::InsertLifetime(StackSym *stackSym, RegNum reg, IR::Instr *const cur
 bool
 SCCLiveness::FoldIndir(IR::Instr *instr, IR::Opnd *opnd)
 {
-#ifdef _M_ARM
-    // Can't be folded on ARM
+#ifdef _M_ARM32_OR_ARM64
+    // Can't be folded on ARM or ARM64
     return false;
 #else
     IR::IndirOpnd *indir = opnd->AsIndirOpnd();
@@ -779,25 +780,26 @@ SCCLiveness::FoldIndir(IR::Instr *instr, IR::Opnd *opnd)
     }
 
     IR::RegOpnd *base = indir->GetBaseOpnd();
-    if (!base->m_sym || !base->m_sym->IsConst() || base->m_sym->IsIntConst() || base->m_sym->IsFloatConst())
+    uint8 *constValue = nullptr;
+    if (base)
     {
-        return false;
-    }
-
-    uint8 *constValue = static_cast<uint8 *>(base->m_sym->GetConstAddress());
-    if(indir->GetOffset() != 0)
-    {
-        if(indir->GetOffset() < 0 ? constValue + indir->GetOffset() > constValue : constValue + indir->GetOffset() < constValue)
+        if (!base->m_sym || !base->m_sym->IsConst() || base->m_sym->IsIntConst() || base->m_sym->IsFloatConst())
         {
             return false;
         }
-        constValue += indir->GetOffset();
+        constValue = static_cast<uint8 *>(base->m_sym->GetConstAddress());
+        if (indir->GetOffset() < 0 ? constValue + indir->GetOffset() > constValue : constValue + indir->GetOffset() < constValue)
+        {
+            return false;
+        }
     }
+    constValue += indir->GetOffset();
 
 #ifdef _M_X64
     // Encoding only allows 32bits worth
     if(!Math::FitsInDWord((size_t)constValue))
     {
+        Assert(base != nullptr);
         return false;
     }
 #endif

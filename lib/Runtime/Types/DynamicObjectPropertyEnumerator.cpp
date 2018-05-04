@@ -6,17 +6,17 @@
 
 namespace Js
 {
-    bool DynamicObjectPropertyEnumerator::GetEnumNonEnumerable() const 
-    { 
-        return !!(flags & EnumeratorFlags::EnumNonEnumerable); 
+    bool DynamicObjectPropertyEnumerator::GetEnumNonEnumerable() const
+    {
+        return !!(flags & EnumeratorFlags::EnumNonEnumerable);
     }
-    bool DynamicObjectPropertyEnumerator::GetEnumSymbols() const 
-    { 
-        return !!(flags & EnumeratorFlags::EnumSymbols); 
+    bool DynamicObjectPropertyEnumerator::GetEnumSymbols() const
+    {
+        return !!(flags & EnumeratorFlags::EnumSymbols);
     }
-    bool DynamicObjectPropertyEnumerator::GetSnapShotSemantics() const 
-    { 
-        return !!(flags & EnumeratorFlags::SnapShotSemantics); 
+    bool DynamicObjectPropertyEnumerator::GetSnapShotSemantics() const
+    {
+        return !!(flags & EnumeratorFlags::SnapShotSemantics);
     }
 
     bool DynamicObjectPropertyEnumerator::GetUseCache() const
@@ -38,7 +38,7 @@ namespace Js
         this->initialPropertyCount = initialPropertyCount;
     }
 
-    bool DynamicObjectPropertyEnumerator::Initialize(DynamicObject * object, EnumeratorFlags flags, ScriptContext * requestContext, ForInCache * forInCache)
+    bool DynamicObjectPropertyEnumerator::Initialize(DynamicObject * object, EnumeratorFlags flags, ScriptContext * requestContext, EnumeratorCache * enumeratorCache)
     {
         this->scriptContext = requestContext;
         this->object = object;
@@ -58,7 +58,7 @@ namespace Js
             if (!object->GetDynamicType()->GetTypeHandler()->EnsureObjectReady(object))
             {
                 return false;
-            }            
+            }
             Initialize(object->GetDynamicType(), nullptr, GetSnapShotSemantics() ? this->object->GetPropertyCount() : Constants::NoBigSlot);
             return true;
         }
@@ -66,15 +66,12 @@ namespace Js
         DynamicType * type = object->GetDynamicType();
 
         CachedData * data;
-        if (forInCache && type == forInCache->type)
+        if (enumeratorCache && type == enumeratorCache->type)
         {
-            // We shouldn't have a for in cache when asking to enum symbols
-            Assert(!GetEnumSymbols());            
-            data = (CachedData *)forInCache->data;
+            data = (CachedData *)enumeratorCache->data;
 
             Assert(data != nullptr);
             Assert(data->scriptContext == this->scriptContext); // The cache data script context should be the same as request context
-            Assert(!data->enumSymbols);
 
             if (data->enumNonEnumerable == GetEnumNonEnumerable())
             {
@@ -82,17 +79,17 @@ namespace Js
                 return true;
             }
         }
-      
+
         data = (CachedData *)requestContext->GetThreadContext()->GetDynamicObjectEnumeratorCache(type);
 
         if (data != nullptr && data->scriptContext == this->scriptContext && data->enumNonEnumerable == GetEnumNonEnumerable() && data->enumSymbols == GetEnumSymbols())
         {
             Initialize(type, data, data->propertyCount);
 
-            if (forInCache)
+            if (enumeratorCache)
             {
-                forInCache->type = type;
-                forInCache->data = data;
+                enumeratorCache->type = type;
+                enumeratorCache->data = data;
             }
             return true;
         }
@@ -110,14 +107,14 @@ namespace Js
             return true;
         }
 
-        uint propertyCount = this->object->GetPropertyCount();
+        uint propertyCount = this->object->GetPropertyCountForEnum();
         data = RecyclerNewStructPlus(requestContext->GetRecycler(),
-            propertyCount * sizeof(PropertyString *) + propertyCount * sizeof(BigPropertyIndex) + propertyCount * sizeof(PropertyAttributes), CachedData);
+            propertyCount * sizeof(Field(PropertyString*)) + propertyCount * sizeof(BigPropertyIndex) + propertyCount * sizeof(PropertyAttributes), CachedData);
         data->scriptContext = requestContext;
         data->cachedCount = 0;
         data->propertyCount = propertyCount;
-        data->strings = (PropertyString **)(data + 1);
-        data->indexes = (BigPropertyIndex *)(data->strings + propertyCount);
+        data->strings = reinterpret_cast<Field(PropertyString*)*>(data + 1);
+        data->indexes = unsafe_write_barrier_cast<BigPropertyIndex *>(data->strings + propertyCount);
         data->attributes = (PropertyAttributes*)(data->indexes + propertyCount);
         data->completed = false;
         data->enumNonEnumerable = GetEnumNonEnumerable();
@@ -125,10 +122,10 @@ namespace Js
         requestContext->GetThreadContext()->AddDynamicObjectEnumeratorCache(type, data);
         Initialize(type, data, propertyCount);
 
-        if (forInCache)
+        if (enumeratorCache)
         {
-            forInCache->type = type;
-            forInCache->data = data;
+            enumeratorCache->type = type;
+            enumeratorCache->data = data;
         }
         return true;
     }
@@ -141,7 +138,7 @@ namespace Js
     bool DynamicObjectPropertyEnumerator::CanUseJITFastPath() const
     {
 #if ENABLE_TTD
-        AssertMsg(this->cachedData == nullptr || !this->scriptContext->GetThreadContext()->IsRuntimeInTTDMode(), "We should always have cachedData null if we are in record or replay mode");
+        TTDAssert(this->cachedData == nullptr || !this->scriptContext->GetThreadContext()->IsRuntimeInTTDMode(), "We should always have cachedData null if we are in record or replay mode");
 #endif
 
         return !this->IsNullEnumerator() && !GetEnumNonEnumerable() && this->cachedData != nullptr;
@@ -163,7 +160,7 @@ namespace Js
             GetSnapShotSemantics() &&
             initialType->GetIsLocked() &&
             CONFIG_FLAG(TypeSnapshotEnumeration)
-            ? initialType
+            ? PointerValue(initialType)
             : object->GetDynamicType();
     }
 
@@ -180,7 +177,7 @@ namespace Js
         {
             PropertyString * propertyString = cachedData->strings[enumeratedCount];
             propertyStringName = propertyString;
-            propertyId = propertyString->GetPropertyRecord()->GetPropertyId();
+            propertyId = propertyString->GetPropertyId();
 
 #if DBG
             PropertyId tempPropertyId;
@@ -199,13 +196,17 @@ namespace Js
         {
             propertyStringName = this->MoveAndGetNextNoCache(propertyId, &propertyAttributes);
 
-            if (propertyStringName && VirtualTableInfo<PropertyString>::HasVirtualTable(propertyStringName))
+            if (propertyStringName)
             {
-                Assert(enumeratedCount < this->initialPropertyCount);
-                cachedData->strings[enumeratedCount] = (PropertyString*)propertyStringName;
-                cachedData->indexes[enumeratedCount] = this->objectIndex;
-                cachedData->attributes[enumeratedCount] = propertyAttributes;
-                cachedData->cachedCount = ++enumeratedCount;
+                PropertyString* propertyString = PropertyString::TryFromVar(propertyStringName);
+                if (propertyString != nullptr)
+                {
+                    Assert(enumeratedCount < this->initialPropertyCount);
+                    cachedData->strings[enumeratedCount] = propertyString;
+                    cachedData->indexes[enumeratedCount] = this->objectIndex;
+                    cachedData->attributes[enumeratedCount] = propertyAttributes;
+                    cachedData->cachedCount = ++enumeratedCount;
+                }
             }
             else
             {
@@ -232,34 +233,49 @@ namespace Js
     JavascriptString * DynamicObjectPropertyEnumerator::MoveAndGetNextNoCache(PropertyId& propertyId, PropertyAttributes * attributes)
     {
         JavascriptString* propertyString = nullptr;
-
         BigPropertyIndex newIndex = this->objectIndex;
+        PropertyValueInfo info;
+        RecyclableObject * startingObject = this->object;
         do
         {
             newIndex++;
-            if (!object->FindNextProperty(newIndex, &propertyString, &propertyId, attributes,
-                GetTypeToEnumerate(), flags, this->scriptContext)
-                || (GetSnapShotSemantics() && newIndex >= initialPropertyCount))
+            PropertyValueInfo::ClearCacheInfo(&info);
+            if (!this->object->FindNextProperty(newIndex, &propertyString, &propertyId, attributes,
+                GetTypeToEnumerate(), flags, this->scriptContext, &info)
+                || (GetSnapShotSemantics() && PropertyIndexToPropertyEnumeration(newIndex) >= initialPropertyCount))
             {
                 // No more properties
                 newIndex--;
                 propertyString = nullptr;
+                PropertyValueInfo::ClearCacheInfo(&info);
                 break;
             }
         } while (Js::IsInternalPropertyId(propertyId));
 
+        if (info.GetPropertyRecordUsageCache() != nullptr && info.GetPropertyRecordUsageCache()->ShouldUseCache() && propertyString == info.GetProperty())
+        {
+            CacheOperators::CachePropertyRead(startingObject, this->object, false, propertyId, false, &info, scriptContext);
+            if ((!(this->flags & EnumeratorFlags::EphemeralReference)) && info.IsStoreFieldCacheEnabled() && info.IsWritable() && ((info.GetFlags() & (InlineCacheGetterFlag | InlineCacheSetterFlag)) == 0))
+            {
+                PropertyValueInfo::SetCacheInfo(&info, info.GetPropertyRecordUsageCache()->GetStElemInlineCache(), info.AllowResizingPolymorphicInlineCache());
+                CacheOperators::CachePropertyWrite(this->object, false, this->object->GetType(), propertyId, &info, scriptContext);
+            }
+        }
         this->objectIndex = newIndex;
         return propertyString;
     }
 
-    Var DynamicObjectPropertyEnumerator::MoveAndGetNext(PropertyId& propertyId, PropertyAttributes * attributes)
+    JavascriptString * DynamicObjectPropertyEnumerator::MoveAndGetNext(PropertyId& propertyId, PropertyAttributes * attributes)
     {
+        propertyId = Js::Constants::NoProperty;
         if (this->cachedData && this->initialType == this->object->GetDynamicType())
         {
             return MoveAndGetNextWithCache(propertyId, attributes);
         }
         if (this->object)
         {
+            // Once enters NoCache path, ensure never switches to Cache path above.
+            this->cachedData = nullptr;
             return MoveAndGetNextNoCache(propertyId, attributes);
         }
         return nullptr;

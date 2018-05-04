@@ -24,14 +24,14 @@
 //   4962 "Profile-guided optimizations disabled because profile data became inconsistent"
 //   4963 "'%s' : no profile data found; different compiler options were used in instrumented build"
 
-static char *PogoForceErrors = "-we4951 -we4952 -we4953 -we4961 -we4962 -we4963";
+static const char *PogoForceErrors = "-we4951 -we4952 -we4953 -we4961 -we4962 -we4963";
 
 //
 // Global variables set before worker threads start, and only accessed
 // (not set) by the worker threads.
 //
 // sets of options to iterate over
-char *OptFlags[MAXOPTIONS + 1], *PogoOptFlags[MAXOPTIONS + 1];
+const char *OptFlags[MAXOPTIONS + 1], *PogoOptFlags[MAXOPTIONS + 1];
 
 // use a big global array as scratch pad for passing the child process env vars
 #define MAX_ENV_LEN 10000
@@ -141,7 +141,7 @@ void
     else {
         int fd = _fileno(fp);
         struct _stat64 fileStats;
-        if(fd != -1 && _fstat64(fd, &fileStats) != -1)
+        if (fd != -1 && _fstat64(fd, &fileStats) != -1)
         {
             char creationTime[256];
             char accessTime[256];
@@ -151,7 +151,7 @@ void
             _ctime64_s(creationTime, &fileStats.st_ctime);
             _ctime64_s(accessTime, &fileStats.st_atime);
             auto stripNewline = [](char *buf) {
-                if(char *ptr = strchr(buf, '\n'))
+                if (char *ptr = strchr(buf, '\n'))
                     *ptr = '\0';
             };
             stripNewline(creationTime);
@@ -160,17 +160,35 @@ void
 
             LogOut("ERROR: name of output file: %s; size: %I64d; creation: %s, last access: %s, now: %s", path, fileStats.st_size, creationTime, accessTime, currTime);
         }
-        LogOut("ERROR: bad output file follows ============");
-        while (fgets(buf, BUFFER_SIZE, fp) != NULL) {
-            // Strip the newline, since LogOut adds one
-            p = strchr(buf, '\n');
-            if (p != NULL) {
-                *p = '\0';
+        if (!FNoProgramOutput)
+        {
+            bool printlines = !FOnlyAssertOutput;
+            if (printlines)
+            {
+                LogOut("ERROR: bad output file follows ============");
             }
-            LogOut("%s", buf);
+            while (fgets(buf, BUFFER_SIZE, fp) != NULL) {
+                // Strip the newline, since LogOut adds one
+                p = strchr(buf, '\n');
+                if (p != NULL) {
+                    *p = '\0';
+                }
+                if (!printlines && strlen(buf) > 8 && buf[0] == 'A' && buf[1] == 'S' && buf[2] == 'S' && buf[3] == 'E' && buf[4] == 'R' && buf[5] == 'T')
+                {
+                    printlines = true;
+                    LogOut("ERROR: bad output file follows ============");
+                }
+                if (printlines)
+                {
+                    LogOut("%s", buf);
+                }
+            }
+            if (printlines)
+            {
+                LogOut("ERROR: end of bad output file  ============");
+            }
         }
         fclose(fp);
-        LogOut("ERROR: end of bad output file  ============");
     }
 }
 
@@ -314,10 +332,10 @@ int
     DoOneExternalTest(
     CDirectory* pDir,
     TestVariant *pTestVariant,
-    char *optFlags,
-    char *inCCFlags,
-    char *inLinkFlags,
-    char *testCmd,
+    const char *optFlags,
+    const char *inCCFlags,
+    const char *inLinkFlags,
+    const char *testCmd,
     ExternalTestKind kind,
     BOOL fSyncVariationWhenFinished,
     BOOL fCleanBefore,
@@ -336,7 +354,7 @@ int
     char nogpfFlags[BUFFER_SIZE];
     char optReportBuf[BUFFER_SIZE];
     char nonZeroReturnBuf[BUFFER_SIZE];
-    char *reason = NULL;
+    const char *reason = NULL;
     time_t start_variation;
     UINT elapsed_variation;
     time_t start_build_variation;
@@ -485,7 +503,7 @@ int
     }
     else if (kind == TK_JSCRIPT || kind==TK_HTML || kind == TK_COMMAND)
     {
-        char tempExtraCCFlags[MAX_PATH] = {0};
+        char tempExtraCCFlags[MAX_PATH*2] = {0};
 
         // Only append when EXTRA_CC_FLAGS isn't empty.
         if (EXTRA_CC_FLAGS[0])
@@ -501,12 +519,24 @@ int
             }
         }
 
-        char* cmd = JCBinary;
+        const char* cmd = JCBinary;
         if (kind != TK_JSCRIPT && kind != TK_HTML)
         {
             cmd = pTestVariant->testInfo.data[TIK_COMMAND];
         }
-        sprintf_s(cmdbuf, "%s %s %s %s %s >%s 2>&1", cmd, optFlags, tempExtraCCFlags, ccFlags, testCmd, full);
+
+        //
+        // If the test is a JS test and we've passed in a custom config file, 
+        // ignore all of the other flags and just pass the config file in
+        //
+        if (kind == TK_JSCRIPT && pTestVariant->testInfo.data[TIK_CUSTOM_CONFIG_FILE] != nullptr)
+        {
+            sprintf_s(cmdbuf, "%s -CustomConfigFile:%s %s >%s 2>&1", cmd, pTestVariant->testInfo.data[TIK_CUSTOM_CONFIG_FILE], testCmd, full);
+        }
+        else
+        {
+            sprintf_s(cmdbuf, "%s %s %s %s %s >%s 2>&1", cmd, optFlags, tempExtraCCFlags, ccFlags, testCmd, full);
+        }
 
         Message("Running '%s'", cmdbuf);
 
@@ -548,7 +578,7 @@ int
 
         sprintf_s(baseline_file, "%s\\%s", pDir->GetFullPathFromSourceOrDirectory(),
             pTestVariant->testInfo.data[TIK_BASELINE]);
-        if (DoCompare(baseline_file, full)) {
+        if (DoCompare(baseline_file, full, pTestVariant->testInfo.hasData[TIK_EOL_NORMALIZATION])) {
             reason = "diffs from baseline";
             sprintf_s(optReportBuf, "%s", baseline_file);
             fFailed = TRUE;
@@ -671,7 +701,7 @@ int
     DWORD millisecTimeout
     )
 {
-    char *ccFlags = pTestVariant->testInfo.data[TIK_COMPILE_FLAGS];
+    const char *ccFlags = pTestVariant->testInfo.data[TIK_COMPILE_FLAGS];
     void *envFlags = GetEnvFlags(pTestVariant);
     return DoOneExternalTest(pDir, pTestVariant, pTestVariant->optFlags, ccFlags, NULL,
         testCmd, kind, TRUE, TRUE, TRUE, fSuppressNoGPF, envFlags, millisecTimeout);
@@ -687,8 +717,8 @@ int
     DWORD millisecTimeout
     )
 {
-    static char *pgc = "*.pgc";
-    static char *pgd = POGO_PGD;
+    static const char *pgc = "*.pgc";
+    static const char *pgd = POGO_PGD;
     char pgdFull[MAX_PATH];
     char ccFlags[BUFFER_SIZE];
     char linkFlags[BUFFER_SIZE];
@@ -698,8 +728,8 @@ int
 
     sprintf_s(pgdFull, "%s\\%s", pDir->GetDirectoryPath(), pgd);
 
-    char * inCCFlags = pTestVariant->testInfo.data[TIK_COMPILE_FLAGS];
-    char * optFlags = pTestVariant->optFlags;
+    const char * inCCFlags = pTestVariant->testInfo.data[TIK_COMPILE_FLAGS];
+    const char * optFlags = pTestVariant->optFlags;
 
     DeleteFileIfFound(pgdFull);
     DeleteMultipleFiles(pDir, pgc);
@@ -767,9 +797,9 @@ BOOL
     CDirectory *pDir,
     Test * pTest,
     TestVariant * pTestVariant,
-    char *optFlags,
-    char *inCCFlags,
-    char *inLinkFlags,
+    const char *optFlags,
+    const char *inCCFlags,
+    const char *inLinkFlags,
     BOOL fSyncVariationWhenFinished,
     BOOL fCleanAfter,
     BOOL fLinkOnly,    // relink only
@@ -1016,17 +1046,17 @@ BOOL
 
     DeleteFileIfFound(tmp_file1);
 
-    int retval = ExecuteCommand(pDir->GetDirectoryPath(), buf, millisecTimeout, envFlags);
-
     fFailed = FALSE;
 
     // Check for timeout.
-
-    if (retval == WAIT_TIMEOUT) {
-        ASSERT(millisecTimeout != INFINITE);
-        LogOut("ERROR: Test timed out after %ul seconds", millisecTimeout / 1000);
-        fFailed = TRUE;
-        goto logFailure;
+    {
+        int retval = ExecuteCommand(pDir->GetDirectoryPath(), buf, millisecTimeout, envFlags);
+        if (retval == WAIT_TIMEOUT) {
+            ASSERT(millisecTimeout != INFINITE);
+            LogOut("ERROR: Test timed out after %ul seconds", millisecTimeout / 1000);
+            fFailed = TRUE;
+            goto logFailure;
+        }
     }
 
     // Check the output.
@@ -1044,7 +1074,7 @@ BOOL
         else {
             sprintf_s(full, "%s\\%s", pDir->GetFullPathFromSourceOrDirectory(),
                 pTestVariant->testInfo.data[TIK_BASELINE]);
-            if (DoCompare(tmp_file1, full)) {
+            if (DoCompare(tmp_file1, full, pTestVariant->testInfo.hasData[TIK_EOL_NORMALIZATION])) {
 
                 // Output differs, run spiff to see if it's just minor
                 // floating point anomalies.
@@ -1212,8 +1242,8 @@ int
     DWORD millisecTimeout
     )
 {
-    static char *pgc = "*.pgc";
-    static char *pgd = POGO_PGD;
+    static const char *pgc = "*.pgc";
+    static const char *pgd = POGO_PGD;
     char pgdFull[MAX_PATH];
     char ccFlags[BUFFER_SIZE];
     char linkFlags[BUFFER_SIZE];
@@ -1221,8 +1251,8 @@ int
 
     sprintf_s(pgdFull, "%s\\%s", pDir->GetDirectoryPath(), pgd);
 
-    char * inCCFlags = pTestVariant->testInfo.data[TIK_COMPILE_FLAGS];
-    char * optFlags = pTestVariant->optFlags;
+    const char * inCCFlags = pTestVariant->testInfo.data[TIK_COMPILE_FLAGS];
+    const char * optFlags = pTestVariant->optFlags;
 
     DeleteFileIfFound(pgdFull);
     DeleteMultipleFiles(pDir, pgc);
@@ -1288,7 +1318,7 @@ int
     char *p = NULL;
     char full[MAX_PATH];
     DWORD millisecTimeout = DEFAULT_TEST_TIMEOUT;
-    char *strTimeout = pTestVariant->testInfo.data[TIK_TIMEOUT];
+    const char *strTimeout = pTestVariant->testInfo.data[TIK_TIMEOUT];
 
     if (strTimeout) {
         char *end;

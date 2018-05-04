@@ -23,7 +23,7 @@ namespace Js
 
     bool RootObjectBase::Is(Var var)
     {
-        return RecyclableObject::Is(var) && RootObjectBase::Is(RecyclableObject::FromVar(var));
+        return RecyclableObject::Is(var) && RootObjectBase::Is(RecyclableObject::UnsafeFromVar(var));
     }
 
     bool RootObjectBase::Is(RecyclableObject* obj)
@@ -33,6 +33,12 @@ namespace Js
     }
 
     RootObjectBase * RootObjectBase::FromVar(Var var)
+    {
+        AssertOrFailFast(RootObjectBase::Is(var));
+        return static_cast<Js::RootObjectBase *>(var);
+    }
+
+    RootObjectBase * RootObjectBase::UnsafeFromVar(Var var)
     {
         Assert(RootObjectBase::Is(var));
         return static_cast<Js::RootObjectBase *>(var);
@@ -96,7 +102,7 @@ namespace Js
 
     // TODO: Switch to take PropertyRecord instead once we clean up the function body to hold onto propertyRecord
     // instead of propertyId.
-    void
+    uint
     RootObjectBase::ReleaseInlineCache(Js::PropertyId propertyId, bool isLoadMethod, bool isStore, bool isShutdown)
     {
         uint unregisteredInlineCacheCount = 0;
@@ -129,10 +135,7 @@ namespace Js
             }
         );
         Assert(found);
-        if (unregisteredInlineCacheCount > 0)
-        {
-            this->GetScriptContext()->GetThreadContext()->NotifyInlineCacheBatchUnregistered(unregisteredInlineCacheCount);
-        }
+        return unregisteredInlineCacheCount;
     }
 
     BOOL

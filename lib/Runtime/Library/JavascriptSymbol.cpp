@@ -6,6 +6,11 @@
 
 namespace Js
 {
+    PropertyRecordUsageCache * JavascriptSymbol::GetPropertyRecordUsageCache()
+    {
+        return &this->propertyRecordUsageCache;
+    }
+
     bool JavascriptSymbol::Is(Var aValue)
     {
         return JavascriptOperators::GetTypeId(aValue) == TypeIds_Symbol;
@@ -13,9 +18,16 @@ namespace Js
 
     JavascriptSymbol* JavascriptSymbol::FromVar(Js::Var aValue)
     {
+        AssertOrFailFastMsg(Is(aValue), "Ensure var is actually a 'JavascriptSymbol'");
+
+        return static_cast<JavascriptSymbol *>(aValue);
+    }
+
+    JavascriptSymbol* JavascriptSymbol::UnsafeFromVar(Js::Var aValue)
+    {
         AssertMsg(Is(aValue), "Ensure var is actually a 'JavascriptSymbol'");
 
-        return static_cast<JavascriptSymbol *>(RecyclableObject::FromVar(aValue));
+        return static_cast<JavascriptSymbol *>(aValue);
     }
 
     Var JavascriptSymbol::NewInstance(RecyclableObject* function, CallInfo callInfo, ...)
@@ -26,14 +38,11 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         AssertMsg(args.Info.Count > 0, "Should always have implicit 'this'");
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(SymbolCount);
+        CHAKRATEL_LANGSTATS_INC_LANGFEATURECOUNT(ES6, Symbol, scriptContext);
 
         // SkipDefaultNewObject function flag should have prevented the default object from
         // being created, except when call true a host dispatch.
-        Var newTarget = callInfo.Flags & CallFlags_NewTarget ? args.Values[args.Info.Count] : args[0];
-        bool isCtorSuperCall = (callInfo.Flags & CallFlags_New) && newTarget != nullptr && !JavascriptOperators::IsUndefined(newTarget);
-        Assert(isCtorSuperCall || !(callInfo.Flags & CallFlags_New) || args[0] == nullptr
-            || JavascriptOperators::GetTypeId(args[0]) == TypeIds_HostDispatch);
+        JavascriptOperators::GetAndAssertIsConstructorSuperCall(args);
 
         if (callInfo.Flags & CallFlags_New)
         {
@@ -70,7 +79,8 @@ namespace Js
         }
         else if (JavascriptSymbolObject::Is(args[0]))
         {
-            return scriptContext->GetLibrary()->CreateSymbol(JavascriptSymbolObject::FromVar(args[0])->GetValue());
+            JavascriptSymbolObject* obj = JavascriptSymbolObject::FromVar(args[0]);
+            return CrossSite::MarshalVar(scriptContext, obj->Unwrap(), obj->GetScriptContext());
         }
         else
         {
@@ -120,6 +130,7 @@ namespace Js
         Assert(!(callInfo.Flags & CallFlags_New));
 
         JavascriptString* key;
+
         if (args.Info.Count > 1)
         {
             key = JavascriptConversion::ToString(args[1], scriptContext);
@@ -132,7 +143,7 @@ namespace Js
         // Search the global symbol registration map for a symbol with description equal to the string key.
         // The map can only have one symbol with that description so if we found a symbol, that is the registered
         // symbol for the string key.
-        const Js::PropertyRecord* propertyRecord = scriptContext->GetThreadContext()->GetSymbolFromRegistrationMap(key->GetString());
+        const Js::PropertyRecord* propertyRecord = scriptContext->GetThreadContext()->GetSymbolFromRegistrationMap(key->GetString(), key->GetLength());
 
         // If we didn't find a PropertyRecord in the map, we'll create a new symbol with description equal to the key string.
         // This is the only place we add new PropertyRecords to the map, so we should never have multiple PropertyRecords in the
@@ -144,7 +155,7 @@ namespace Js
 
         Assert(propertyRecord != nullptr);
 
-        return library->CreateSymbol(propertyRecord);
+        return scriptContext->GetSymbol(propertyRecord);
     }
 
     // Symbol.keyFor as described in ES 2015
@@ -165,12 +176,14 @@ namespace Js
         }
 
         JavascriptSymbol* sym = JavascriptSymbol::FromVar(args[1]);
-        const char16* key = sym->GetValue()->GetBuffer();
+        const Js::PropertyRecord* symPropertyRecord = sym->GetValue();
+        const char16* key = symPropertyRecord->GetBuffer();
+        const charcount_t keyLength = symPropertyRecord->GetLength();
 
         // Search the global symbol registration map for a key equal to the description of the symbol passed into Symbol.keyFor.
         // Symbol.for creates a new symbol with description equal to the key and uses that key as a mapping to the new symbol.
         // There will only be one symbol in the map with that string key value.
-        const Js::PropertyRecord* propertyRecord = scriptContext->GetThreadContext()->GetSymbolFromRegistrationMap(key);
+        const Js::PropertyRecord* propertyRecord = scriptContext->GetThreadContext()->GetSymbolFromRegistrationMap(key, keyLength);
 
         // If we found a PropertyRecord in the map, make sure it is the same symbol that was passed to Symbol.keyFor.
         // If the two are different, it means the symbol passed to keyFor has the same description as a symbol registered via
@@ -199,7 +212,8 @@ namespace Js
         }
         else if (JavascriptSymbolObject::Is(args[0]))
         {
-            return scriptContext->GetLibrary()->CreateSymbol(JavascriptSymbolObject::FromVar(args[0])->GetValue());
+            JavascriptSymbolObject* obj = JavascriptSymbolObject::FromVar(args[0]);
+            return CrossSite::MarshalVar(scriptContext, obj->Unwrap(), obj->GetScriptContext());
         }
         else
         {
@@ -211,7 +225,7 @@ namespace Js
     {
         // PropertyRecords are per-ThreadContext so we can just create a new primitive wrapper
         // around the PropertyRecord stored in this symbol via the other context library.
-        return requestContext->GetLibrary()->CreateSymbol(this->GetValue());
+        return requestContext->GetSymbol(this->GetValue());
     }
 
     Var JavascriptSymbol::TryInvokeRemotelyOrThrow(JavascriptMethod entryPoint, ScriptContext * scriptContext, Arguments & args, int32 errorCode, PCWSTR varName)
@@ -242,16 +256,25 @@ namespace Js
 
     BOOL JavascriptSymbol::Equals(JavascriptSymbol* left, Var right, BOOL* value, ScriptContext * requestContext)
     {
-        switch (JavascriptOperators::GetTypeId(right))
+        TypeId typeId = JavascriptOperators::GetTypeId(right);
+        if (typeId != TypeIds_Symbol && typeId != TypeIds_SymbolObject)
+        {
+            right = JavascriptConversion::ToPrimitive<JavascriptHint::None>(right, requestContext);
+            typeId = JavascriptOperators::GetTypeId(right);
+        }
+
+        switch (typeId)
         {
         case TypeIds_Symbol:
-            *value = left->GetValue() == JavascriptSymbol::FromVar(right)->GetValue();
+            *value = left == JavascriptSymbol::UnsafeFromVar(right);
+            Assert((left->GetValue() == JavascriptSymbol::UnsafeFromVar(right)->GetValue()) == *value);
             break;
         case TypeIds_SymbolObject:
-            *value = left->GetValue() == JavascriptSymbolObject::FromVar(right)->GetValue();
+            *value = left == JavascriptSymbol::UnsafeFromVar(JavascriptSymbolObject::UnsafeFromVar(right)->Unwrap());
+            Assert((left->GetValue() == JavascriptSymbolObject::UnsafeFromVar(right)->GetValue()) == *value);
             break;
         default:
-            *value = JavascriptOperators::Equal_Full(right, left, requestContext);
+            *value = FALSE;
             break;
         }
 

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Condition="'$(ChakraBuildPathImported)'!='true'" Project="$(SolutionDir)Chakra.Build.Paths.props" />
   <Import Project="$(BuildConfigPropsPath)Chakra.Build.ProjectConfiguration.props" />
@@ -23,7 +23,8 @@
       <DisableSpecificWarnings>
         %(DisableSpecificWarnings);
         4458; <!-- Declaration hides class member -->
-        4477; <!-- TODO: Format string specifier incorrect on x64 --></DisableSpecificWarnings>
+        4477; <!-- TODO: Format string specifier incorrect on x64 -->
+      </DisableSpecificWarnings>
     </ClCompile>
     <Link>
       <AdditionalDependencies>
@@ -32,7 +33,7 @@
         $(ChakraCommonLinkDependencies);
         Advapi32.lib;
         %(AdditionalDependencies)</AdditionalDependencies>
-      <AdditionalLibraryDirectories>$(OutDir);%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalLibraryDirectories>$(OutDir);%(AdditionalLibraryDirectories);$(SdkLibPath)</AdditionalLibraryDirectories>
       <SubSystem>Console</SubSystem>
     </Link>
   </ItemDefinitionGroup>

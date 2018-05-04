@@ -16,7 +16,7 @@ WAsmJs::TypedSlotInfo
 AsmJsJITInfo::GetTypedSlotInfo(WAsmJs::Types type) const
 {
     WAsmJs::TypedSlotInfo info;
-    if (type < WAsmJs::LIMIT)
+    if (type >= 0 && type < WAsmJs::LIMIT)
     {
         info.byteOffset = m_data.typedSlotInfos[type].byteOffset;
         info.constCount = m_data.typedSlotInfos[type].constCount;
@@ -60,7 +60,7 @@ AsmJsJITInfo::GetArgTypeArray() const
 Js::AsmJsVarType::Which
 AsmJsJITInfo::GetArgType(Js::ArgSlot argNum) const
 {
-    Assert(argNum < GetArgCount());
+    AssertOrFailFast(argNum < GetArgCount());
     return GetArgTypeArray()[argNum];
 }
 
@@ -78,13 +78,13 @@ AsmJsJITInfo::GetWasmSignatureAddr(uint index) const
     Assert(index < m_data.wasmSignatureCount);
     return m_data.wasmSignaturesBaseAddr + index * sizeof(Wasm::WasmSignature);
 }
-#endif
 
-bool
-AsmJsJITInfo::IsHeapBufferConst() const
+bool AsmJsJITInfo::IsSharedMemory() const
 {
-    return m_data.isHeapBufferConst != FALSE;
+    return !!m_data.wasmIsSharedMemory;
 }
+
+#endif
 
 bool
 AsmJsJITInfo::UsesHeapBuffer() const
@@ -95,7 +95,6 @@ AsmJsJITInfo::UsesHeapBuffer() const
 bool
 AsmJsJITInfo::AccessNeedsBoundCheck(uint offset) const
 {
-    // Normally, heap has min size of 0x10000, but if you use ChangeHeap, min heap size is increased to 0x1000000
-    return offset >= 0x1000000 || (IsHeapBufferConst() && offset >= 0x10000);
+    return offset >= 0x10000;
 }
 #endif

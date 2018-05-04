@@ -1,4 +1,4 @@
-add_library (Chakra.Common.Core STATIC
+add_library (Chakra.Common.Core OBJECT
     Api.cpp
     BinaryFeatureControl.cpp
     CmdParser.cpp
@@ -6,6 +6,7 @@ add_library (Chakra.Common.Core STATIC
     CommonCorePch.cpp
     ConfigFlagsTable.cpp
     ConfigParser.cpp
+    CRC.cpp
     DbgHelpSymbolManager.cpp
     DelayLoadLibrary.cpp
     EtwTraceCore.cpp

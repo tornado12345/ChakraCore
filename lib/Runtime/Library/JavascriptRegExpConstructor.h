@@ -24,10 +24,10 @@ namespace Js
     public:
         JavascriptRegExpConstructor(DynamicType * type);
 
-        virtual BOOL HasProperty(PropertyId propertyId) override;
-        virtual BOOL GetProperty(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
-        virtual BOOL GetProperty(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
-        virtual BOOL GetPropertyReference(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
+        virtual PropertyQueryFlags HasPropertyQuery(PropertyId propertyId, _Inout_opt_ PropertyValueInfo* info) override;
+        virtual PropertyQueryFlags GetPropertyQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
+        virtual PropertyQueryFlags GetPropertyQuery(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
+        virtual PropertyQueryFlags GetPropertyReferenceQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
         virtual BOOL SetProperty(PropertyId propertyId, Var value, PropertyOperationFlags flags, PropertyValueInfo* info) override;
         virtual BOOL SetProperty(JavascriptString* propertyNameString, Var value, PropertyOperationFlags flags, PropertyValueInfo* info) override;
         virtual BOOL InitProperty(PropertyId propertyId, Var value, PropertyOperationFlags flags = PropertyOperation_None, PropertyValueInfo* info = NULL) override;
@@ -37,14 +37,14 @@ namespace Js
         virtual BOOL GetDiagTypeString(StringBuilder<ArenaAllocator>* stringBuilder, ScriptContext* requestContext) override;
         virtual BOOL IsEnumerable(PropertyId propertyId) override;
         virtual BOOL IsConfigurable(PropertyId propertyId) override;
-        virtual BOOL GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, ForInCache * forInCache = nullptr) override;
+        virtual BOOL GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, EnumeratorCache * enumeratorCache = nullptr) override;
         BOOL GetSpecialNonEnumerablePropertyName(uint32 index, Var *propertyName, ScriptContext * requestContext);
         uint GetSpecialNonEnumerablePropertyCount() const;
         PropertyId const * GetSpecialNonEnumerablePropertyIds() const;
-        BOOL GetSpecialEnumerablePropertyName(uint32 index, Var *propertyName, ScriptContext * requestContext);
+        BOOL GetSpecialEnumerablePropertyName(uint32 index, JavascriptString ** propertyName, ScriptContext * requestContext);
         uint GetSpecialEnumerablePropertyCount() const;
         PropertyId const * GetSpecialEnumerablePropertyIds() const;
-        virtual BOOL GetSpecialPropertyName(uint32 index, Var *propertyName, ScriptContext * requestContext) override;
+        virtual BOOL GetSpecialPropertyName(uint32 index, JavascriptString ** propertyName, ScriptContext * requestContext) override;
         virtual uint GetSpecialPropertyCount() const override;
         virtual PropertyId const * GetSpecialPropertyIds() const override;
         UnifiedRegex::RegexPattern* GetLastPattern() const { return lastPattern; }
@@ -53,19 +53,21 @@ namespace Js
         bool GetPropertyBuiltIns(PropertyId propertyId, Var* value, BOOL* result);
         bool SetPropertyBuiltIns(PropertyId propertyId, Var value, BOOL* result);
         void SetLastMatch(UnifiedRegex::RegexPattern* lastPattern, JavascriptString* lastInput, UnifiedRegex::GroupInfo lastMatch);
+        void InvalidateLastMatch(UnifiedRegex::RegexPattern* lastPattern, JavascriptString* lastInput);
 
         void EnsureValues();
 
-        UnifiedRegex::RegexPattern* lastPattern;
-        JavascriptString* lastInput;
-        UnifiedRegex::GroupInfo lastMatch;
-        bool reset; // true if following fields must be recalculated from above before first use
-        Var lastParen;
-        Var lastIndex;
-        Var index;
-        Var leftContext;
-        Var rightContext;
-        Var captures[NumCtorCaptures];
+        Field(UnifiedRegex::RegexPattern*) lastPattern;
+        Field(JavascriptString*) lastInput;
+        Field(UnifiedRegex::GroupInfo) lastMatch;
+        Field(bool) invalidatedLastMatch; // true if last match must be recalculated before use
+        Field(bool) reset; // true if following fields must be recalculated from above before first use
+        Field(Var) lastParen;
+        Field(Var) lastIndex;
+        Field(Var) index;
+        Field(Var) leftContext;
+        Field(Var) rightContext;
+        Field(Var) captures[NumCtorCaptures];
     };
 
     class JavascriptRegExpConstructorProperties

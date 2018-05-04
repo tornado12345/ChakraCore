@@ -11,38 +11,45 @@ SmallHeapBlockT<TBlockAttributes>::SetAttributes(void * address, unsigned char a
 {
     Assert(this->address != nullptr);
     Assert(this->segment != nullptr);
-    Assert(this->ObjectInfo(GetAddressIndex(address)) == 0);
     ushort index = GetAddressIndex(address);
+    Assert(this->ObjectInfo(index) == 0);
     Assert(index != SmallHeapBlockT<TBlockAttributes>::InvalidAddressBit);
     ObjectInfo(index) = attributes;
 }
 
 inline
 IdleDecommitPageAllocator*
-HeapBlock::GetPageAllocator(Recycler* recycler)
+HeapBlock::GetPageAllocator(HeapInfo * heapInfo)
 {
     switch (this->GetHeapBlockType())
     {
     case SmallLeafBlockType:
     case MediumLeafBlockType:
-        return recycler->GetRecyclerLeafPageAllocator();
+        return heapInfo->GetRecyclerLeafPageAllocator();
     case LargeBlockType:
-        return recycler->GetRecyclerLargeBlockPageAllocator();
+        return heapInfo->GetRecyclerLargeBlockPageAllocator();
 #ifdef RECYCLER_WRITE_BARRIER
     case SmallNormalBlockWithBarrierType:
     case SmallFinalizableBlockWithBarrierType:
     case MediumNormalBlockWithBarrierType:
     case MediumFinalizableBlockWithBarrierType:
 #ifdef RECYCLER_WRITE_BARRIER_ALLOC_THREAD_PAGE
-        return recycler->GetRecyclerLeafPageAllocator();
+        return heapInfo->GetRecyclerLeafPageAllocator();
 #elif defined(RECYCLER_WRITE_BARRIER_ALLOC_SEPARATE_PAGE)
-        return recycler->GetRecyclerWithBarrierPageAllocator();
+        return heapInfo->GetRecyclerWithBarrierPageAllocator();
 #endif
 #endif
 
     default:
-        return recycler->GetRecyclerPageAllocator();
+        return heapInfo->GetRecyclerPageAllocator();
     };
+}
+
+template <class TBlockAttributes>
+IdleDecommitPageAllocator*
+SmallHeapBlockT<TBlockAttributes>::GetPageAllocator()
+{
+    return __super::GetPageAllocator(this->heapBucket->heapInfo);
 }
 
 template <class TBlockAttributes>
@@ -153,10 +160,14 @@ SmallHeapBlockT<TBlockAttributes>::FindImplicitRootObject(void* candidate, Recyc
     return true;
 }
 
-template <typename Fn>
+template <bool doSpecialMark, typename Fn>
 bool
 HeapBlock::UpdateAttributesOfMarkedObjects(MarkContext * markContext, void * objectAddress, size_t objectSize, unsigned char attributes, Fn fn)
 {
+#ifdef RECYCLER_VISITED_HOST
+    Assert(GetHeapBlockType() != HeapBlock::HeapBlockType::SmallRecyclerVisitedHostBlockType && GetHeapBlockType() != HeapBlock::HeapBlockType::MediumRecyclerVisitedHostBlockType && GetHeapBlockType() != HeapBlock::HeapBlockType::LargeBlockType);
+#endif
+
     bool noOOMDuringMark = true;
 
     if (attributes & TrackBit)
@@ -205,6 +216,16 @@ HeapBlock::UpdateAttributesOfMarkedObjects(MarkContext * markContext, void * obj
             noOOMDuringMark = false;
         }
     }
+
+    // Special mark-time behavior for finalizable objects on certain GC's
+    if (doSpecialMark)
+    {
+        if (attributes & FinalizeBit)
+        {
+            FinalizableObject * trackedObject = (FinalizableObject *)objectAddress;
+            trackedObject->OnMark();
+        }
+    }        
 
 #ifdef RECYCLER_STATS
     RECYCLER_STATS_INTERLOCKED_INC(markContext->GetRecycler(), markData.markCount);

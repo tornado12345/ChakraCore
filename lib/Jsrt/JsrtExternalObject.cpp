@@ -13,7 +13,7 @@ JsrtExternalType::JsrtExternalType(Js::ScriptContext* scriptContext, JsFinalizeC
         Js::TypeIds_Object,
         scriptContext->GetLibrary()->GetObjectPrototype(),
         nullptr,
-        Js::SimplePathTypeHandler::New(scriptContext, scriptContext->GetLibrary()->GetRootPath(), 0, 0, 0, true, true),
+        Js::PathTypeHandlerNoAttr::New(scriptContext, scriptContext->GetLibrary()->GetRootPath(), 0, 0, 0, true, true),
         true,
         true)
         , jsFinalizeCallback(finalizeCallback)
@@ -25,6 +25,30 @@ JsrtExternalObject::JsrtExternalObject(JsrtExternalType * type, void *data) :
     slot(data),
     Js::DynamicObject(type, false/* initSlots*/)
 {
+}
+
+/* static */
+JsrtExternalObject* JsrtExternalObject::Create(void *data, JsFinalizeCallback finalizeCallback, Js::RecyclableObject * prototype, Js::ScriptContext *scriptContext)
+{
+    Js::DynamicType * dynamicType = scriptContext->GetLibrary()->GetCachedJsrtExternalType(reinterpret_cast<uintptr_t>(finalizeCallback));
+
+    if (dynamicType == nullptr)
+    {
+        dynamicType = RecyclerNew(scriptContext->GetRecycler(), JsrtExternalType, scriptContext, finalizeCallback);
+        scriptContext->GetLibrary()->CacheJsrtExternalType(reinterpret_cast<uintptr_t>(finalizeCallback), dynamicType);
+    }
+
+    Assert(dynamicType->IsJsrtExternal());
+    Assert(dynamicType->GetIsShared());
+
+    JsrtExternalObject * externalObject = RecyclerNewFinalized(scriptContext->GetRecycler(), JsrtExternalObject, static_cast<JsrtExternalType*>(dynamicType), data);
+
+    if (prototype != nullptr)
+    {
+        externalObject->SetPrototype(prototype);
+    }
+
+    return externalObject;
 }
 
 bool JsrtExternalObject::Is(Js::Var value)
@@ -39,6 +63,12 @@ bool JsrtExternalObject::Is(Js::Var value)
 }
 
 JsrtExternalObject * JsrtExternalObject::FromVar(Js::Var value)
+{
+    AssertOrFailFast(Is(value));
+    return static_cast<JsrtExternalObject *>(value);
+}
+
+JsrtExternalObject * JsrtExternalObject::UnsafeFromVar(Js::Var value)
 {
     Assert(Is(value));
     return static_cast<JsrtExternalObject *>(value);

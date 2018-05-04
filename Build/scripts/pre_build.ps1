@@ -27,7 +27,7 @@
 
 param (
     [Parameter(Mandatory=$True)]
-    [ValidateSet("x86", "x64", "arm")]
+    [ValidateSet("x86", "x64", "arm", "arm64")]
     [string]$arch,
     [Parameter(Mandatory=$True)]
     [ValidateSet("debug", "release", "test", "codecoverage")]
@@ -45,20 +45,25 @@ param (
     [string]$oauth
 )
 
-$OuterScriptRoot = $PSScriptRoot # Used in pre_post_util.ps1
-. "$PSScriptRoot\pre_post_util.ps1"
+. $PSScriptRoot\pre_post_util.ps1
 
-if (($logFile -eq "") -and (Test-Path Env:\TF_BUILD_BINARIESDIRECTORY)) {
-    if (-not(Test-Path -Path "${Env:TF_BUILD_BINARIESDIRECTORY}\logs")) {
-        $dummy = New-Item -Path "${Env:TF_BUILD_BINARIESDIRECTORY}\logs" -ItemType Directory -Force
+$srcpath, $buildRoot, $objpath, $binpath = `
+    ComputePaths `
+        -arch $arch -flavor $flavor -subtype $subtype -OuterScriptRoot $PSScriptRoot `
+        -srcpath $srcpath -buildRoot $buildRoot -objpath $objpath -binpath $binpath
+
+WriteCommonArguments
+
+$buildName = ConstructBuildName $arch $flavor $subtype
+if (($logFile -eq "") -and (Test-Path $buildRoot)) {
+    if (-not(Test-Path -Path "${buildRoot}\logs")) {
+        $dummy = New-Item -Path "${buildRoot}\logs" -ItemType Directory -Force
     }
-    $logFile = "${Env:TF_BUILD_BINARIESDIRECTORY}\logs\pre_build.${Env:BuildName}.log"
+    $logFile = "${buildRoot}\logs\pre_build.${buildName}.log"
     if (Test-Path -Path $logFile) {
         Remove-Item $logFile -Force
     }
 }
-
-WriteCommonArguments
 
 #
 # Create packages.config files
@@ -72,7 +77,7 @@ $packagesConfigFileText = @"
 "@
 
 $packagesFiles = Get-ChildItem -Path $Env:TF_BUILD_SOURCESDIRECTORY *.vcxproj -Recurse `
-    | % { Join-Path $_.DirectoryName "packages.config" }
+    | ForEach-Object { Join-Path $_.DirectoryName "packages.config" }
 
 foreach ($file in $packagesFiles) {
     if (-not (Test-Path $file)) {
@@ -91,7 +96,7 @@ if (Test-Path Env:\TF_BUILD_SOURCEGETVERSION)
 
     $CoreHash = ""
     if (Test-Path $corePath) {
-        $CoreHash = iex "$gitExe rev-parse ${commitHash}:core"
+        $CoreHash = Invoke-Expression "$gitExe rev-parse ${commitHash}:core"
         if (-not $?) {
             $CoreHash = ""
         }
@@ -112,7 +117,7 @@ if (Test-Path Env:\TF_BUILD_SOURCEGETVERSION)
 
     # commit message
     $command = "$gitExe log -1 --name-status -m --first-parent -p $commitHash"
-    $CommitMessageLines = iex $command
+    $CommitMessageLines = Invoke-Expression $command
     $CommitMessage = $CommitMessageLines -join "`r`n"
 
     $changeTextFile = Join-Path -Path $outputDir -ChildPath "change.txt"
@@ -157,10 +162,49 @@ $CommitMessage
     $changeJson | Add-Member -type NoteProperty -name Username -value $Env:Username
     $changeJson | Add-Member -type NoteProperty -name CommitMessage -value $CommitMessageLines
 
+    ## Look for a git note that requests a cirro run.
+
+    ## We assume that, when this script is called in the context of a full build, the working directory
+    ## is the root of the local full checkout.
+
+    ## It's a bit of a layering violation to have this logic, which only applies to full builds, in the
+    ## core pre_build script, but there's not an obviously better place to put it.  There is a pre_build
+    ## script in the full repo, but it doesn't seem to be executed as part of a VSO build, and it's not
+    ## clear if anyone else uses it.
+    ##
+    ## Since we have to handle the case where a full build doesn't have a ChakraHub note anyway, just
+    ## add the logic to the core script.
+
+    ## Without the OAuth token, the git fetch command hangs, causing the entire build to time out.  Per
+    ## https://docs.microsoft.com/en-us/vsts/build-release/concepts/definitions/release/variables?view=vsts&tabs=shell#using-default-variables,
+    ## we expect to find the auth token in System_AccessToken instead of System.AccessToken.
+    if (${Env:System_AccessToken})
+    {
+        git -c http.extraheader="AUTHORIZATION: bearer ${Env:System_AccessToken}" fetch origin refs/notes/ChakraHub:refs/notes/ChakraHub
+        Write-Output "looking for notes"
+        ## One might be tempted to redirect the output of the "git notes" command on the next line to $null.  Don't do that;
+        ## it causes the check to fail even when git notes are present.  However, we do have to redirect stderr, because
+        ## git prints something to stderr if it doesn't find a note, and that would cause VSTS to think that the build failed.
+        if (git notes --ref=ChakraHub list HEAD 2>&1)
+        {
+            Write-Output "found git notes; adding to change.json"
+            $testConfig = (git notes --ref=ChakraHub show HEAD) -join "`n" | ConvertFrom-Json
+            $changeJson | Add-Member -type NoteProperty -name TestConfig -value $testConfig
+        }
+        else
+        {
+            Write-Output "no git notes found"
+        }
+    }
+    else
+    {
+        Write-Output "No OAuth token found; skipping check for git note that requests a cirro run"
+    }
+
     Write-Output "-----"
     Write-Output $outputJsonFile
-    $changeJson | ConvertTo-Json | Write-Output
-    $changeJson | ConvertTo-Json | Out-File $outputJsonFile -Encoding utf8
+    $changeJson | ConvertTo-Json -depth 100 | Write-Output
+    $changeJson | ConvertTo-Json -depth 100 | Out-File $outputJsonFile -Encoding utf8
 
     $buildInfoOutputDir = $objpath
     if (-not(Test-Path -Path $buildInfoOutputDir)) {
@@ -183,7 +227,7 @@ $CommitMessage
 </Project>
 "@
 
-    $propsFileContent = $propsFileTemplate -f $binpath, $objpath, $buildPushIdPart1, $buildPushIdPart2, $buildCommit, $buildDate
+    $propsFileContent = $propsFileTemplate -f $buildRoot, $objpath, $buildPushIdPart1, $buildPushIdPart2, $buildCommit, $buildDate
 
     Write-Output "-----"
     Write-Output $propsFile

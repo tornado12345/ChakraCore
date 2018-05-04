@@ -9,7 +9,7 @@ namespace Js
     class JavascriptSymbolObject : public DynamicObject
     {
     private:
-        JavascriptSymbol* value;
+        Field(JavascriptSymbol*) value;
 
         DEFINE_VTABLE_CTOR(JavascriptSymbolObject, DynamicObject);
         DEFINE_MARSHAL_OBJECT_TO_SCRIPT_CONTEXT(JavascriptSymbolObject);
@@ -18,6 +18,7 @@ namespace Js
         JavascriptSymbolObject(JavascriptSymbol* value, DynamicType * type);
         static bool Is(Var aValue);
         static JavascriptSymbolObject* FromVar(Js::Var aValue);
+        static JavascriptSymbolObject* UnsafeFromVar(Js::Var aValue);
 
         inline const PropertyRecord* GetValue()
         {
@@ -27,6 +28,8 @@ namespace Js
             }
             return value->GetValue();
         }
+
+        Var Unwrap() const;
 
         virtual BOOL GetDiagValueString(StringBuilder<ArenaAllocator>* stringBuilder, ScriptContext* requestContext) override;
         virtual BOOL GetDiagTypeString(StringBuilder<ArenaAllocator>* stringBuilder, ScriptContext* requestContext) override;

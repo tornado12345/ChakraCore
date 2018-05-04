@@ -6,7 +6,7 @@
 
 namespace Js
 {
-#ifdef _M_X64_OR_ARM64
+#ifdef TARGET_64
 // This base class has a 4-byte length field. Change struct pack to 4 on 64bit to avoid 4 padding bytes here.
 #pragma pack(push, 4)
 #endif
@@ -18,7 +18,7 @@ namespace Js
     class ArrayObject : public DynamicObject
     {
     protected:
-        uint32 length;
+        Field(uint32) length;
 
     protected:
         DEFINE_VTABLE_CTOR_ABSTRACT(ArrayObject, DynamicObject);
@@ -34,7 +34,7 @@ namespace Js
         }
 
         // For boxing stack instance
-        ArrayObject(ArrayObject * instance);
+        ArrayObject(ArrayObject * instance, bool deepCopy);
 
         void __declspec(noreturn) ThrowItemNotConfigurableError(PropertyId propId = Constants::NoProperty);
         void VerifySetItemAttributes(PropertyId propId, PropertyAttributes attributes);
@@ -51,7 +51,7 @@ namespace Js
         virtual JavascriptEnumerator * GetIndexEnumerator(EnumeratorFlags flags, ScriptContext* requestContext) = 0;
     };
 
-#ifdef _M_X64_OR_ARM64
+#ifdef TARGET_64
 #pragma pack(pop)
 #endif
 

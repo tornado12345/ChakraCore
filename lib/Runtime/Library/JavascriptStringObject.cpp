@@ -18,7 +18,7 @@ namespace Js
             // No need to invalidate store field caches for non-writable properties here. Since this type is just being created, it cannot represent
             // an object that is already a prototype. If it becomes a prototype and then we attempt to add a property to an object derived from this
             // object, then we will check if this property is writable, and only if it is will we do the fast path for add property.
-            GetLibrary()->NoPrototypeChainsAreEnsuredToHaveOnlyWritableDataProperties();
+            GetLibrary()->GetTypesWithOnlyWritablePropertyProtoChainCache()->Clear();
         }
     }
 
@@ -33,7 +33,7 @@ namespace Js
             // No need to invalidate store field caches for non-writable properties here. Since this type is just being created, it cannot represent
             // an object that is already a prototype. If it becomes a prototype and then we attempt to add a property to an object derived from this
             // object, then we will check if this property is writable, and only if it is will we do the fast path for add property.
-            GetLibrary()->NoPrototypeChainsAreEnsuredToHaveOnlyWritableDataProperties();
+            GetLibrary()->GetTypesWithOnlyWritablePropertyProtoChainCache()->Clear();
         }
     }
 
@@ -44,9 +44,16 @@ namespace Js
 
     JavascriptStringObject* JavascriptStringObject::FromVar(Var aValue)
     {
+        AssertOrFailFastMsg(Is(aValue), "Ensure var is actually a 'JavascriptString'");
+
+        return static_cast<JavascriptStringObject *>(aValue);
+    }
+
+    JavascriptStringObject* JavascriptStringObject::UnsafeFromVar(Var aValue)
+    {
         AssertMsg(Is(aValue), "Ensure var is actually a 'JavascriptString'");
 
-        return static_cast<JavascriptStringObject *>(RecyclableObject::FromVar(aValue));
+        return static_cast<JavascriptStringObject *>(aValue);
     }
 
     void JavascriptStringObject::Initialize(JavascriptString* value)
@@ -87,19 +94,19 @@ namespace Js
         return !conditionMetBehavior;
     }
 
-    BOOL JavascriptStringObject::HasProperty(PropertyId propertyId)
+    PropertyQueryFlags JavascriptStringObject::HasPropertyQuery(PropertyId propertyId, _Inout_opt_ PropertyValueInfo* info)
     {
         if (propertyId == PropertyIds::length)
         {
-            return true;
+            return PropertyQueryFlags::Property_Found;
         }
 
-        if (DynamicObject::HasProperty(propertyId))
+        if (JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::HasPropertyQuery(propertyId, info)))
         {
-            return true;
+            return PropertyQueryFlags::Property_Found;
         }
 
-        return JavascriptStringObject::IsValidIndex(propertyId, true);
+        return JavascriptConversion::BooleanToPropertyQueryFlags(JavascriptStringObject::IsValidIndex(propertyId, true));
     }
 
     DescriptorFlags JavascriptStringObject::GetSetter(PropertyId propertyId, Var* setterValue, PropertyValueInfo* info, ScriptContext* requestContext)
@@ -164,7 +171,7 @@ namespace Js
 
         // From DynamicObject::IsConfigurable we can't tell if the result is from a property or just default
         // value. Call HasProperty to find out.
-        if (DynamicObject::HasProperty(propertyId))
+        if (JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::HasPropertyQuery(propertyId, nullptr /*info*/)))
         {
             return DynamicObject::IsConfigurable(propertyId);
         }
@@ -192,7 +199,7 @@ namespace Js
 
         // From DynamicObject::IsWritable we can't tell if the result is from a property or just default
         // value. Call HasProperty to find out.
-        if (DynamicObject::HasProperty(propertyId))
+        if (JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::HasPropertyQuery(propertyId, nullptr /*info*/)))
         {
             return DynamicObject::IsWritable(propertyId);
         }
@@ -200,7 +207,7 @@ namespace Js
         return JavascriptStringObject::IsValidIndex(propertyId, false);
     }
 
-    BOOL JavascriptStringObject::GetSpecialPropertyName(uint32 index, Var *propertyName, ScriptContext * requestContext)
+    BOOL JavascriptStringObject::GetSpecialPropertyName(uint32 index, JavascriptString ** propertyName, ScriptContext * requestContext)
     {
         if (index == 0)
         {
@@ -222,23 +229,23 @@ namespace Js
         return specialPropertyIds;
     }
 
-    BOOL JavascriptStringObject::GetPropertyReference(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
+    PropertyQueryFlags JavascriptStringObject::GetPropertyReferenceQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
     {
-        return JavascriptStringObject::GetProperty(originalInstance, propertyId, value, info, requestContext);
+        return JavascriptStringObject::GetPropertyQuery(originalInstance, propertyId, value, info, requestContext);
     }
 
 
-    BOOL JavascriptStringObject::GetProperty(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
+    PropertyQueryFlags JavascriptStringObject::GetPropertyQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
     {
         BOOL result;
         if (GetPropertyBuiltIns(propertyId, value, requestContext, &result))
         {
-            return result;
+            return JavascriptConversion::BooleanToPropertyQueryFlags(result);
         }
 
-        if (DynamicObject::GetProperty(originalInstance, propertyId, value, info, requestContext))
+        if (JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::GetPropertyQuery(originalInstance, propertyId, value, info, requestContext)))
         {
-            return true;
+            return PropertyQueryFlags::Property_Found;
         }
 
         // For NumericPropertyIds check that index is less than JavascriptString length
@@ -246,15 +253,17 @@ namespace Js
         uint32 index;
         if (scriptContext->IsNumericPropertyId(propertyId, &index))
         {
-            JavascriptString* str = JavascriptString::FromVar(CrossSite::MarshalVar(requestContext, this->InternalUnwrap()));
-            return str->GetItemAt(index, value);
+            JavascriptString* str = this->InternalUnwrap();
+            str = JavascriptString::FromVar(CrossSite::MarshalVar(requestContext, str, scriptContext));
+
+            return JavascriptConversion::BooleanToPropertyQueryFlags(str->GetItemAt(index, value));
         }
 
         *value = requestContext->GetMissingPropertyResult();
-        return false;
+        return PropertyQueryFlags::Property_NotFound;
     }
 
-    BOOL JavascriptStringObject::GetProperty(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
+    PropertyQueryFlags JavascriptStringObject::GetPropertyQuery(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
     {
         AssertMsg(!PropertyRecord::IsPropertyNameNumeric(propertyNameString->GetString(), propertyNameString->GetLength()),
             "Numeric property names should have been converted to uint or PropertyRecord*");
@@ -265,10 +274,10 @@ namespace Js
 
         if (propertyRecord != nullptr && GetPropertyBuiltIns(propertyRecord->GetPropertyId(), value, requestContext, &result))
         {
-            return result;
+            return JavascriptConversion::BooleanToPropertyQueryFlags(result);
         }
 
-        return DynamicObject::GetProperty(originalInstance, propertyNameString, value, info, requestContext);
+        return DynamicObject::GetPropertyQuery(originalInstance, propertyNameString, value, info, requestContext);
     }
 
     bool JavascriptStringObject::GetPropertyBuiltIns(PropertyId propertyId, Var* value, ScriptContext* requestContext, BOOL* result)
@@ -333,8 +342,7 @@ namespace Js
 
     BOOL JavascriptStringObject::DeleteProperty(JavascriptString *propertyNameString, PropertyOperationFlags propertyOperationFlags)
     {
-        JsUtil::CharacterBuffer<WCHAR> propertyName(propertyNameString->GetString(), propertyNameString->GetLength());
-        if (BuiltInPropertyRecords::length.Equals(propertyName))
+        if (BuiltInPropertyRecords::length.Equals(propertyNameString))
         {
             JavascriptError::ThrowCantDeleteIfStrictMode(propertyOperationFlags, this->GetScriptContext(), propertyNameString->GetString());
 
@@ -343,28 +351,31 @@ namespace Js
         return DynamicObject::DeleteProperty(propertyNameString, propertyOperationFlags);
     }
 
-    BOOL JavascriptStringObject::HasItem(uint32 index)
+    PropertyQueryFlags JavascriptStringObject::HasItemQuery(uint32 index)
     {
         if (this->InternalUnwrap()->HasItem(index))
         {
-            return true;
+            return PropertyQueryFlags::Property_Found;
         }
-        return DynamicObject::HasItem(index);
+        return DynamicObject::HasItemQuery(index);
     }
 
-    BOOL JavascriptStringObject::GetItem(Var originalInstance, uint32 index, Var* value, ScriptContext* requestContext)
+    PropertyQueryFlags JavascriptStringObject::GetItemQuery(Var originalInstance, uint32 index, Var* value, ScriptContext* requestContext)
     {
-        JavascriptString* str = JavascriptString::FromVar(CrossSite::MarshalVar(requestContext, this->InternalUnwrap()));
+        Var strObject = CrossSite::MarshalVar(requestContext,
+          this->InternalUnwrap(), this->GetScriptContext());
+
+        JavascriptString* str = JavascriptString::FromVar(strObject);
         if (str->GetItemAt(index, value))
         {
-            return true;
+            return PropertyQueryFlags::Property_Found;
         }
-        return DynamicObject::GetItem(originalInstance, index, value, requestContext);
+        return DynamicObject::GetItemQuery(originalInstance, index, value, requestContext);
     }
 
-    BOOL JavascriptStringObject::GetItemReference(Var originalInstance, uint32 index, Var* value, ScriptContext* requestContext)
+    PropertyQueryFlags JavascriptStringObject::GetItemReferenceQuery(Var originalInstance, uint32 index, Var* value, ScriptContext* requestContext)
     {
-        return this->GetItem(originalInstance, index, value, requestContext);
+        return this->GetItemQuery(originalInstance, index, value, requestContext);
     }
 
     DescriptorFlags JavascriptStringObject::GetItemSetter(uint32 index, Var* setterValue, ScriptContext* requestContext)
@@ -385,11 +396,11 @@ namespace Js
         return DynamicObject::SetItem(index, value, flags);
     }
 
-    BOOL JavascriptStringObject::GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, ForInCache * forInCache)
+    BOOL JavascriptStringObject::GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, EnumeratorCache * enumeratorCache)
     {
         return GetEnumeratorWithPrefix(
             RecyclerNew(GetScriptContext()->GetRecycler(), JavascriptStringEnumerator, this->Unwrap(), requestContext),
-            enumerator, flags, requestContext, forInCache);
+            enumerator, flags, requestContext, enumeratorCache);
     }
 
     BOOL JavascriptStringObject::GetDiagValueString(StringBuilder<ArenaAllocator>* stringBuilder, ScriptContext* requestContext)

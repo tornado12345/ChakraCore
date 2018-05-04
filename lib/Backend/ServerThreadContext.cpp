@@ -7,50 +7,49 @@
 
 #if ENABLE_OOP_NATIVE_CODEGEN
 #include "JITServer/JITServer.h"
-#endif //ENABLE_OOP_NATIVE_CODEGEN
 
-ServerThreadContext::ServerThreadContext(ThreadContextDataIDL * data) :
+ServerThreadContext::ServerThreadContext(ThreadContextDataIDL* data, ProcessContext* processContext) :
     m_threadContextData(*data),
     m_refCount(0),
-    m_numericPropertySet(nullptr),
-    m_preReservedVirtualAllocator((HANDLE)data->processHandle),
-    m_codePageAllocators(nullptr, ALLOC_XDATA, &m_preReservedVirtualAllocator, (HANDLE)data->processHandle),
-#if DYNAMIC_INTERPRETER_THUNK || defined(ASMJS_PLAT)
-    m_thunkPageAllocators(nullptr, /* allocXData */ false, /* virtualAllocator */ nullptr, (HANDLE)data->processHandle),
+    m_numericPropertyBV(nullptr),
+    m_preReservedSectionAllocator(processContext->processHandle),
+    m_sectionAllocator(processContext->processHandle),
+    m_thunkPageAllocators(nullptr, /* allocXData */ false, &m_sectionAllocator, nullptr, processContext->processHandle),
+    m_codePageAllocators(nullptr, ALLOC_XDATA, &m_sectionAllocator, &m_preReservedSectionAllocator, processContext->processHandle),
+#if defined(_CONTROL_FLOW_GUARD) && !defined(_M_ARM)
+    m_jitThunkEmitter(this, &m_sectionAllocator, processContext->processHandle),
 #endif
-    m_codeGenAlloc(nullptr, nullptr, &m_codePageAllocators, (HANDLE)data->processHandle),
+    m_codeGenAlloc(nullptr, nullptr, this, &m_codePageAllocators, processContext->processHandle),
     m_pageAlloc(nullptr, Js::Configuration::Global.flags, PageAllocatorType_BGJIT,
         AutoSystemInfo::Data.IsLowMemoryProcess() ?
         PageAllocator::DefaultLowMaxFreePageCount :
         PageAllocator::DefaultMaxFreePageCount
     ),
-    m_jitCRTBaseAddress((intptr_t)GetModuleHandle(UCrtC99MathApis::LibraryName))
+    processContext(processContext)
 {
-#if ENABLE_OOP_NATIVE_CODEGEN
-    m_pid = GetProcessId((HANDLE)data->processHandle);
-#endif
+    m_pid = GetProcessId(processContext->processHandle);
 
-#if !_M_X64_OR_ARM64 && _CONTROL_FLOW_GUARD
+#if !TARGET_64 && _CONTROL_FLOW_GUARD
     m_codeGenAlloc.canCreatePreReservedSegment = data->allowPrereserveAlloc != FALSE;
 #endif
-    m_numericPropertySet = HeapNew(PropertySet, &HeapAllocator::Instance);
+    m_numericPropertyBV = HeapNew(BVSparse<HeapAllocator>, &HeapAllocator::Instance);
 }
 
 ServerThreadContext::~ServerThreadContext()
 {
-    // TODO: OOP JIT, clear out elements of map. maybe should arena alloc?
-    if (this->m_numericPropertySet != nullptr)
+    processContext->Release();
+    if (this->m_numericPropertyBV != nullptr)
     {
-        HeapDelete(m_numericPropertySet);
-        this->m_numericPropertySet = nullptr;
+        HeapDelete(m_numericPropertyBV);
+        this->m_numericPropertyBV = nullptr;
     }
 
 }
 
-PreReservedVirtualAllocWrapper *
-ServerThreadContext::GetPreReservedVirtualAllocator()
+PreReservedSectionAllocWrapper *
+ServerThreadContext::GetPreReservedSectionAllocator()
 {
-    return &m_preReservedVirtualAllocator;
+    return &m_preReservedSectionAllocator;
 }
 
 intptr_t
@@ -62,17 +61,13 @@ ServerThreadContext::GetBailOutRegisterSaveSpaceAddr() const
 ptrdiff_t
 ServerThreadContext::GetChakraBaseAddressDifference() const
 {
-#if ENABLE_OOP_NATIVE_CODEGEN
     return GetRuntimeChakraBaseAddress() - (intptr_t)AutoSystemInfo::Data.GetChakraBaseAddr();
-#else
-    return 0;
-#endif
 }
 
 ptrdiff_t
 ServerThreadContext::GetCRTBaseAddressDifference() const
 {
-    return GetRuntimeCRTBaseAddress() - m_jitCRTBaseAddress;
+    return GetRuntimeCRTBaseAddress() - GetJITCRTBaseAddress();
 }
 
 intptr_t
@@ -87,7 +82,7 @@ ServerThreadContext::GetImplicitCallFlagsAddr() const
     return static_cast<intptr_t>(m_threadContextData.implicitCallFlagsAddr);
 }
 
-#if defined(ENABLE_SIMDJS) && (defined(_M_IX86) || defined(_M_X64))
+#ifdef ENABLE_WASM_SIMD
 intptr_t
 ServerThreadContext::GetSimdTempAreaAddr(uint8 tempIndex) const
 {
@@ -117,39 +112,58 @@ ServerThreadContext::IsThreadBound() const
 HANDLE
 ServerThreadContext::GetProcessHandle() const
 {
-    return reinterpret_cast<HANDLE>(m_threadContextData.processHandle);
+    return this->processContext->processHandle;
 }
 
-#if DYNAMIC_INTERPRETER_THUNK || defined(ASMJS_PLAT)
-CustomHeap::CodePageAllocators *
+CustomHeap::OOPCodePageAllocators *
 ServerThreadContext::GetThunkPageAllocators()
 {
     return &m_thunkPageAllocators;
 }
-#endif
 
-CustomHeap::CodePageAllocators *
+CustomHeap::OOPCodePageAllocators *
 ServerThreadContext::GetCodePageAllocators()
 {
     return &m_codePageAllocators;
 }
 
-CodeGenAllocators *
+SectionAllocWrapper *
+ServerThreadContext::GetSectionAllocator()
+{
+    return &m_sectionAllocator;
+}
+
+OOPCodeGenAllocators *
 ServerThreadContext::GetCodeGenAllocators()
 {
     return &m_codeGenAlloc;
 }
 
+#if defined(_CONTROL_FLOW_GUARD) && !defined(_M_ARM)
+OOPJITThunkEmitter *
+ServerThreadContext::GetJITThunkEmitter()
+{
+    return &m_jitThunkEmitter;
+}
+#endif
+
 intptr_t
 ServerThreadContext::GetRuntimeChakraBaseAddress() const
 {
-    return static_cast<intptr_t>(m_threadContextData.chakraBaseAddress);
+    return this->processContext->chakraBaseAddress;
 }
 
 intptr_t
 ServerThreadContext::GetRuntimeCRTBaseAddress() const
 {
-    return static_cast<intptr_t>(m_threadContextData.crtBaseAddress);
+    return this->processContext->crtBaseAddress;
+}
+
+/* static */
+intptr_t
+ServerThreadContext::GetJITCRTBaseAddress()
+{
+    return (intptr_t)AutoSystemInfo::Data.GetCRTHandle();
 }
 
 PageAllocator *
@@ -166,38 +180,20 @@ ServerThreadContext::IsNumericProperty(Js::PropertyId propertyId)
         return Js::InternalPropertyRecords::GetInternalPropertyName(propertyId)->IsNumeric();
     }
 
-    m_numericPropertySet->LockResize();
-    bool found = m_numericPropertySet->ContainsKey(propertyId);
-    m_numericPropertySet->UnlockResize();
+    bool found = false;
+    {
+        AutoCriticalSection lock(&m_cs);
+        found = m_numericPropertyBV->Test(propertyId) != FALSE;
+    }
 
     return found;
 }
 
 void
-ServerThreadContext::RemoveFromNumericPropertySet(Js::PropertyId reclaimedId)
+ServerThreadContext::UpdateNumericPropertyBV(BVSparseNode * newProps)
 {
-    if (m_numericPropertySet->ContainsKey(reclaimedId))
-    {
-        // if there was reclaimed property that had its pid reused, delete the old property record
-        m_numericPropertySet->Remove(reclaimedId);
-    }
-    else
-    {
-        // we should only ever ask to reclaim properties which were previously added to the jit map
-        Assert(UNREACHED);
-    }
-}
-
-void
-ServerThreadContext::AddToNumericPropertySet(Js::PropertyId propId)
-{
-    // this should only happen if there was reclaimed property that we failed to add to reclaimed list due to a prior oom
-    if (m_numericPropertySet->ContainsKey(propId))
-    {
-        m_numericPropertySet->Remove(propId);
-    }
-
-    m_numericPropertySet->Add(propId);
+    AutoCriticalSection lock(&m_cs);
+    m_numericPropertyBV->CopyFromNode(newProps);
 }
 
 void ServerThreadContext::AddRef()
@@ -219,3 +215,31 @@ void ServerThreadContext::Close()
     ServerContextManager::RecordCloseContext(this);
 #endif
 }
+
+ProcessContext::ProcessContext(HANDLE processHandle, intptr_t chakraBaseAddress, intptr_t crtBaseAddress) :
+    processHandle(processHandle),
+    chakraBaseAddress(chakraBaseAddress),
+    crtBaseAddress(crtBaseAddress),
+    refCount(0)
+{
+}
+ProcessContext::~ProcessContext()
+{
+    CloseHandle(processHandle);
+}
+
+void ProcessContext::AddRef()
+{
+    InterlockedExchangeAdd(&this->refCount, 1);
+}
+void ProcessContext::Release()
+{
+    InterlockedExchangeSubtract(&this->refCount, 1);
+}
+
+bool ProcessContext::HasRef()
+{
+    return this->refCount != 0;
+}
+
+#endif

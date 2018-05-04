@@ -30,8 +30,8 @@ private:
     BYTE defCount;
     BYTE needDeclaration : 1;
     BYTE isBlockVar : 1;
+    BYTE isConst : 1;
     BYTE isGlobal : 1;
-    BYTE isEval : 1;
     BYTE hasNonLocalReference : 1;  // if true, then this symbol needs to be heap-allocated
     BYTE isFuncExpr : 1;              // if true, then this symbol is allocated on it's on activation object
     BYTE isCatch : 1;               // if true then this a catch identifier
@@ -44,6 +44,12 @@ private:
     BYTE isTrackedForDebugger : 1; // Whether the sym is tracked for debugger scope. This is fine because a sym can only be added to (not more than) one scope.
     BYTE isModuleExportStorage : 1; // If true, this symbol should be stored in the global scope export storage array.
     BYTE isModuleImport : 1; // If true, this symbol is the local name of a module import statement
+    BYTE isUsedInLdElem : 1;
+    BYTE isThis : 1;
+    BYTE isNewTarget : 1;
+    BYTE isSuper : 1;
+    BYTE isSuperConstructor : 1;
+    BYTE needsScopeObject : 1;
 
     // These are get and set a lot, don't put it in bit fields, we are exceeding the number of bits anyway
     bool hasFuncAssignment;
@@ -55,46 +61,50 @@ private:
 public:
     Symbol(SymbolName const& name, ParseNode *decl, SymbolType symbolType) :
         name(name),
+        pid(nullptr),
         decl(decl),
-        next(nullptr),
+        scope(nullptr),
+        position(Js::Constants::NoProperty),
         location(Js::Constants::NoRegister),
+        scopeSlot(Js::Constants::NoProperty),
+        moduleIndex(Js::Constants::NoProperty),
+        next(nullptr),
+        symbolType(symbolType), // will get set to the same value in SetSymbolType
+        defCount(0),
         needDeclaration(false),
         isBlockVar(false),
+        isConst(false),
         isGlobal(false),
         hasNonLocalReference(false),
         isFuncExpr(false),
         isCatch(false),
         hasInit(false),
         isUsed(false),
-        defCount(0),
-        position(Js::Constants::NoProperty),
-        scopeSlot(Js::Constants::NoProperty),
         isGlobalCatch(false),
         isCommittedToSlot(false),
         hasNonCommittedReference(false),
         hasVisitedCapturingFunc(false),
         isTrackedForDebugger(false),
-        isNonSimpleParameter(false),
-        assignmentState(NotAssigned),
         isModuleExportStorage(false),
         isModuleImport(false),
-        moduleIndex(Js::Constants::NoProperty)
+        isUsedInLdElem(false),
+        isThis(false),
+        isNewTarget(false),
+        isSuper(false),
+        isSuperConstructor(false),
+        needsScopeObject(false),
+        hasFuncAssignment(false), // will get reset by SetSymbolType
+        hasMaybeEscapedUse(false), // will get reset by SetSymbolType
+        isNonSimpleParameter(false),
+        assignmentState(NotAssigned)
     {
         SetSymbolType(symbolType);
-
-        // Set it so we don't have to check it explicitly
-        isEval = MatchName(_u("eval"), 4);
 
         if (PHASE_TESTTRACE1(Js::StackFuncPhase) && hasFuncAssignment)
         {
             Output::Print(_u("HasFuncDecl: %s\n"), this->GetName().GetBuffer());
             Output::Flush();
         }
-    }
-
-    bool MatchName(const char16 *key, int length)
-    {
-        return name == SymbolName(key, length);
     }
 
     void SetScope(Scope *scope)
@@ -148,6 +158,16 @@ public:
         return isBlockVar;
     }
 
+    void SetIsConst(bool is)
+    {
+        isConst = is;
+    }
+
+    bool GetIsConst() const
+    {
+        return isConst;
+    }
+
     void SetIsModuleExportStorage(bool is)
     {
         isModuleExportStorage = is;
@@ -166,6 +186,26 @@ public:
     bool GetIsModuleImport() const
     {
         return isModuleImport;
+    }
+
+    void SetIsUsedInLdElem(bool is)
+    {
+        isUsedInLdElem = is;
+    }
+
+    bool IsUsedInLdElem() const
+    {
+        return isUsedInLdElem;
+    }
+
+    void SetNeedsScopeObject(bool does = true)
+    {
+        needsScopeObject = does;
+    }
+
+    bool NeedsScopeObject() const
+    {
+        return needsScopeObject;
     }
 
     void SetModuleIndex(Js::PropertyId index)
@@ -255,11 +295,6 @@ public:
         return symbolType == STFormal;
     }
 
-    bool GetIsEval() const
-    {
-        return isEval;
-    }
-
     bool GetIsCatch() const
     {
         return isCatch;
@@ -300,6 +335,11 @@ public:
         isUsed = is;
     }
 
+    AssignmentState GetAssignmentState() const
+    {
+        return assignmentState;
+    }
+
     void PromoteAssignmentState()
     {
         if (assignmentState == NotAssigned)
@@ -334,7 +374,48 @@ public:
         isNonSimpleParameter = is;
     }
 
-    bool GetIsArguments() const;
+    bool IsArguments() const;
+    bool IsSpecialSymbol() const;
+
+    bool IsThis() const
+    {
+        return isThis;
+    }
+
+    void SetIsThis(bool is = true)
+    {
+        isThis = is;
+    }
+
+    bool IsNewTarget() const
+    {
+        return isNewTarget;
+    }
+
+    void SetIsNewTarget(bool is = true)
+    {
+        isNewTarget = is;
+    }
+
+    bool IsSuper() const
+    {
+        return isSuper;
+    }
+
+    void SetIsSuper(bool is = true)
+    {
+        isSuper = is;
+    }
+
+    bool IsSuperConstructor() const
+    {
+        return isSuperConstructor;
+    }
+
+    void SetIsSuperConstructor(bool is = true)
+    {
+        isSuperConstructor = is;
+    }
 
     void SetPosition(Js::PropertyId pos)
     {
@@ -384,9 +465,9 @@ public:
         return this->name;
     }
 
-    Js::PropertyId EnsureScopeSlot(FuncInfo *funcInfo);
-    bool IsInSlot(FuncInfo *funcInfo, bool ensureSlotAlloc = false);
-    bool NeedsSlotAlloc(FuncInfo *funcInfo);
+    Js::PropertyId EnsureScopeSlot(ByteCodeGenerator *byteCodeGenerator, FuncInfo *funcInfo);
+    bool IsInSlot(ByteCodeGenerator *byteCodeGenerator, FuncInfo *funcInfo, bool ensureSlotAlloc = false);
+    bool NeedsSlotAlloc(ByteCodeGenerator *byteCodeGenerator, FuncInfo *funcInfo);
 
     static void SaveToPropIdArray(Symbol *sym, Js::PropertyIdArray *propIds, ByteCodeGenerator *byteCodeGenerator, Js::PropertyId *pFirstSlot = nullptr);
 

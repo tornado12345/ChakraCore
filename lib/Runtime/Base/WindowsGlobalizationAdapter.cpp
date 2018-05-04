@@ -3,8 +3,11 @@
 // Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.
 //-------------------------------------------------------------------------------------------------------
 #include "RuntimeBasePch.h"
+#include "WindowsGlobalizationAdapter.h"
 
 #if defined(ENABLE_INTL_OBJECT) || defined(ENABLE_ES6_CHAR_CLASSIFIER)
+
+#ifdef INTL_WINGLOB
 
 #include "strsafe.h"
 
@@ -20,6 +23,8 @@ using namespace ABI::Windows::Globalization;
 using namespace ABI::Windows::Foundation::Collections;
 #endif
 
+#endif // INTL_WINGLOB
+
 #define IfFailThrowHr(op) \
     if (FAILED(hr=(op))) \
     { \
@@ -34,6 +39,8 @@ using namespace ABI::Windows::Foundation::Collections;
 
 namespace Js
 {
+#ifdef INTL_WINGLOB
+
 #ifdef ENABLE_INTL_OBJECT
     class HSTRINGIterator : public Microsoft::WRL::RuntimeClass<IIterator<HSTRING>>
     {
@@ -151,7 +158,7 @@ namespace Js
     public:
         HRESULT RuntimeClassInitialize(HSTRING *string, uint32 length)
         {
-            this->items = new HSTRING[length];
+            this->items = HeapNewNoThrowArray(HSTRING, length);
 
             if (this->items == nullptr)
             {
@@ -171,7 +178,7 @@ namespace Js
         {
             if(this->items != nullptr)
             {
-                delete [] items;
+                HeapDeleteArray(this->length, items);
             }
         }
 
@@ -255,7 +262,6 @@ namespace Js
         return hr;
     }
 
-
     HRESULT WindowsGlobalizationAdapter::EnsureDateTimeFormatObjectsInitialized(DelayLoadWindowsGlobalization *library)
     {
         HRESULT hr = S_OK;
@@ -305,7 +311,6 @@ namespace Js
 
         return hr;
     }
-
 #endif
 
 #if ENABLE_UNICODE_API
@@ -364,8 +369,6 @@ namespace Js
         return retVal;
     }
 
-        // OK for timeZoneId to get truncated as it would pass incomplete timeZoneId below which
-        // will be rejected by globalization dll
     HRESULT WindowsGlobalizationAdapter::NormalizeLanguageTag(_In_ ScriptContext* scriptContext, _In_z_ PCWSTR languageTag, HSTRING *result)
     {
         HRESULT hr;
@@ -374,6 +377,7 @@ namespace Js
         IfFailedReturn(CreateLanguage(scriptContext, languageTag, &language));
 
         IfFailedReturn(language->get_LanguageTag(result));
+        IfNullReturnError(*result, E_FAIL);
         return hr;
     }
 
@@ -384,6 +388,8 @@ namespace Js
         HSTRING_HEADER timeZoneHeader;
 
         // Construct HSTRING of timeZoneId passed
+        // OK for timeZoneId to get truncated as it would pass incomplete timeZoneId below which
+        // will be rejected by globalization dll
         IfFailThrowHr(GetWindowsGlobalizationLibrary(scriptContext)->WindowsCreateStringReference(timeZoneId, static_cast<UINT32>(wcslen(timeZoneId)), &timeZoneHeader, &timeZone));
 
         // The warning is timeZone could be '0'. This is valid scenario and in that case, ChangeTimeZone() would
@@ -397,13 +403,19 @@ namespace Js
         }
         // Retrieve canonicalize timeZone name
         IfFailThrowHr(timeZoneCalendar->GetTimeZone(result));
+        if (*result == nullptr)
+        {
+            return false;
+        }
         return true;
     }
 
-    void WindowsGlobalizationAdapter::GetDefaultTimeZoneId(_In_ ScriptContext* scriptContext, HSTRING *result)
+    HRESULT WindowsGlobalizationAdapter::GetDefaultTimeZoneId(_In_ ScriptContext* scriptContext, HSTRING *result)
     {
         HRESULT hr = S_OK;
         IfFailThrowHr(defaultTimeZoneCalendar->GetTimeZone(result));
+        IfNullReturnError(*result, E_FAIL);
+        return hr;
     }
 
     HRESULT WindowsGlobalizationAdapter::CreateTimeZoneOnCalendar(_In_ DelayLoadWindowsGlobalization *library, __out::ITimeZoneOnCalendar**  result)
@@ -635,8 +647,61 @@ if (this->object) \
     {
         return significantDigitsRounderActivationFactory->ActivateInstance(reinterpret_cast<IInspectable**>(numberRounder));
     }
-#endif
-}
 
+    HRESULT WindowsGlobalizationAdapter::GetResolvedLanguage(_In_ DateTimeFormatting::IDateTimeFormatter* formatter, HSTRING * locale)
+    {
+        HRESULT hr = formatter->get_ResolvedLanguage(locale);
+        return VerifyResult(locale, hr);
+    }
 
+    HRESULT WindowsGlobalizationAdapter::GetResolvedLanguage(_In_ NumberFormatting::INumberFormatterOptions* formatter, HSTRING * locale)
+    {
+        HRESULT hr = formatter->get_ResolvedLanguage(locale);
+        return VerifyResult(locale, hr);
+    }
+
+    HRESULT WindowsGlobalizationAdapter::GetNumeralSystem(_In_ NumberFormatting::INumberFormatterOptions* formatter, HSTRING * hNumeralSystem)
+    {
+        HRESULT hr = formatter->get_NumeralSystem(hNumeralSystem);
+        return VerifyResult(hNumeralSystem, hr);
+    }
+
+    HRESULT WindowsGlobalizationAdapter::GetNumeralSystem(_In_ DateTimeFormatting::IDateTimeFormatter* formatter, HSTRING * hNumeralSystem)
+    {
+        HRESULT hr = formatter->get_NumeralSystem(hNumeralSystem);
+        return VerifyResult(hNumeralSystem, hr);
+    }
+
+    HRESULT WindowsGlobalizationAdapter::GetCalendar(_In_ DateTimeFormatting::IDateTimeFormatter* formatter, HSTRING * hCalendar)
+    {
+        HRESULT hr = formatter->get_Calendar(hCalendar);
+        return VerifyResult(hCalendar, hr);
+    }
+
+    HRESULT WindowsGlobalizationAdapter::GetClock(_In_ DateTimeFormatting::IDateTimeFormatter* formatter, HSTRING * hClock)
+    {
+        HRESULT hr = formatter->get_Clock(hClock);
+        return VerifyResult(hClock, hr);
+    }
+
+    HRESULT WindowsGlobalizationAdapter::GetItemAt(_In_ IVectorView<HSTRING>* vector, _In_ uint32 index, HSTRING * item)
+    {
+        HRESULT hr = vector->GetAt(index, item);
+        return VerifyResult(item, hr);
+    }
+
+    /* static */
+    HRESULT WindowsGlobalizationAdapter::VerifyResult(HSTRING * result, HRESULT errCode)
+    {
+        HRESULT hr = S_OK;
+        IfFailedReturn(errCode);
+        IfNullReturnError(*result, E_FAIL);
+        return hr;
+    }
 #endif
+
+#endif // INTL_WINGLOB
+
+} // namespace Js
+
+#endif // defined(ENABLE_INTL_OBJECT) || defined(ENABLE_ES6_CHAR_CLASSIFIER)

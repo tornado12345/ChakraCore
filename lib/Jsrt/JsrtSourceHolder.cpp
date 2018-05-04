@@ -17,14 +17,14 @@ namespace Js
     class JsrtSourceHolderPolicy<JsSerializedScriptLoadSourceCallback>
     {
     public:
-        typedef wchar_t TLoadCharType;
+        typedef WCHAR TLoadCharType;
 
         // Helper function for converting a Unicode script to utf8.
         // If heapAlloc is true the returned buffer must be freed with HeapDelete.
         // Otherwise scriptContext must be provided and GCed object is
         // returned.
         static void ScriptToUtf8(_When_(heapAlloc, _In_opt_) _When_(!heapAlloc, _In_) Js::ScriptContext *scriptContext,
-            _In_z_ const wchar_t *script, _Outptr_result_buffer_(*utf8Length) utf8char_t **utf8Script, _Out_ size_t *utf8Length,
+            _In_z_ const WCHAR *script, _Outptr_result_buffer_(*utf8Length) utf8char_t **utf8Script, _Out_ size_t *utf8Length,
             _Out_ size_t *scriptLength, _Out_opt_ size_t *utf8AllocLength, _In_ bool heapAlloc)
         {
             Assert(utf8Script != nullptr);
@@ -81,7 +81,7 @@ namespace Js
 #endif  // _WIN32
 
     template <typename TLoadCallback, typename TUnloadCallback>
-    void JsrtSourceHolder<TLoadCallback, TUnloadCallback>::EnsureSource(MapRequestFor requestedFor, const wchar_t* reasonString)
+    void JsrtSourceHolder<TLoadCallback, TUnloadCallback>::EnsureSource(MapRequestFor requestedFor, const WCHAR* reasonString)
     {
         if (this->mappedSource != nullptr)
         {
@@ -113,7 +113,7 @@ namespace Js
 
 #if ENABLE_DEBUG_CONFIG_OPTIONS
         AssertMsg(reasonString != nullptr, "Reason string for why we are mapping the source was not provided.");
-        JS_ETW(EventWriteJSCRIPT_SOURCEMAPPING((uint32)wcslen(reasonString), reasonString, (ushort)requestedFor));
+        JS_ETW(EventWriteJSCRIPT_SOURCEMAPPING(reasonString, (ushort)requestedFor));
 #endif
     }
 
@@ -164,7 +164,7 @@ namespace Js
             }
             else
             {
-                const wchar_t *script = (const wchar_t*) script_;
+                const WCHAR *script = (const WCHAR*) script_;
                 Assert(utf8Script != nullptr);
                 Assert(utf8Length != nullptr);
                 Assert(scriptLength != nullptr);
@@ -225,7 +225,7 @@ namespace Js
     template <>
     void JsrtSourceHolder<JsSerializedLoadScriptCallback,
         JsSerializedScriptUnloadCallback>::EnsureSource(MapRequestFor requestedFor,
-        const wchar_t* reasonString)
+        const WCHAR* reasonString)
     {
         if (this->mappedSource != nullptr)
         {
@@ -285,7 +285,7 @@ namespace Js
 
 #if ENABLE_DEBUG_CONFIG_OPTIONS
         AssertMsg(reasonString != nullptr, "Reason string for why we are mapping the source was not provided.");
-        JS_ETW(EventWriteJSCRIPT_SOURCEMAPPING((uint32)wcslen(reasonString), reasonString, (ushort)requestedFor));
+        JS_ETW(EventWriteJSCRIPT_SOURCEMAPPING(reasonString, (ushort)requestedFor));
 #endif
     }
 
@@ -299,6 +299,7 @@ namespace Js
             this->mappedSource = nullptr;
         }
         this->mappedScriptValue = nullptr;
+        this->mappedSerializedScriptValue = nullptr;
 
         // Don't allow load or unload again after told to unload.
         scriptLoadCallback = nullptr;

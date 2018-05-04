@@ -54,7 +54,7 @@ namespace UnifiedRegex
     }
 
 #define EMIT(compiler, T, ...) (new (compiler.Emit(sizeof(T))) T(__VA_ARGS__))
-#define L2I(O, label) LabelToInstPointer<O##Inst>(Inst::O, label)
+#define L2I(O, label) LabelToInstPointer<O##Inst>(Inst::InstTag::O, label)
 
     // Remember: The machine address of an instruction is no longer valid after a subsequent emit,
     //           so all label fixups must be done using Compiler::GetFixup / Compiler::DoFixup
@@ -525,7 +525,15 @@ namespace UnifiedRegex
                         //  - not in a negative assertion
                         //  - backtracking could never rewind the input pointer
                         //
-                        EMIT(compiler, BOITestInst, isAtLeastOnce && isNotNegated && isPrevWillNotRegress);
+                        bool canHardFail = isAtLeastOnce && isNotNegated && isPrevWillNotRegress;
+                        if (canHardFail)
+                        {
+                            EMIT(compiler, BOITestInst<true>);
+                        }
+                        else
+                        {
+                            EMIT(compiler, BOITestInst<false>);
+                        }
                     }
                 }
                 break;
@@ -533,13 +541,16 @@ namespace UnifiedRegex
         case EOL:
             {
                 if ((compiler.program->flags & MultilineRegexFlag) != 0)
+                {
                     //
                     // Compilation scheme:
                     //
                     //   EOLTest
                     //
                     EMIT(compiler, EOLTestInst);
+                }
                 else
+                {
                     //
                     // Compilation scheme:
                     //
@@ -550,7 +561,16 @@ namespace UnifiedRegex
                     //  - not in a negative assertion
                     //  - backtracking could never advance the input pointer
                     //
-                    EMIT(compiler, EOITestInst, isAtLeastOnce && isNotNegated && isPrevWillNotProgress);
+                    bool canHardFail = isAtLeastOnce && isNotNegated && isPrevWillNotProgress;
+                    if (canHardFail)
+                    {
+                        EMIT(compiler, EOITestInst<true>);
+                    }
+                    else
+                    {
+                        EMIT(compiler, EOITestInst<false>);
+                    }
+                }
                 break;
             }
         default:
@@ -577,7 +597,7 @@ namespace UnifiedRegex
 
     bool SimpleNode::BuildCharTrie(Compiler& compiler, CharTrie* trie, Node* cont, bool isAcceptFirst) const
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         Assert(tag == Empty);
         if (cont == 0)
@@ -726,7 +746,15 @@ namespace UnifiedRegex
         //
         //   WordBoundaryTest
         //
-        EMIT(compiler, WordBoundaryTestInst, isNegation);
+        if (isNegation)
+        {
+            EMIT(compiler, WordBoundaryTestInst<true>);
+        }
+        else
+        {
+            EMIT(compiler, WordBoundaryTestInst<false>);
+
+        }
     }
 
     CharCount WordBoundaryNode::EmitScan(Compiler& compiler, bool isHeadSyncronizingNode)
@@ -794,7 +822,7 @@ namespace UnifiedRegex
         {
             // We'll need to expand each character of literal into its equivalence class
             isEquivClass = true;
-            return length * CaseInsensitive::EquivClassSize;
+            return UInt32Math::MulAdd<CaseInsensitive::EquivClassSize,0>(length);
         }
         else
             return length;
@@ -1095,7 +1123,7 @@ namespace UnifiedRegex
 
     bool MatchLiteralNode::BuildCharTrie(Compiler& compiler, CharTrie* trie, Node* cont, bool isAcceptFirst) const
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         Assert(!isEquivClass);
         CharTrie* tail = trie;
@@ -1173,7 +1201,17 @@ namespace UnifiedRegex
     {
         if ((compiler.program->flags & IgnoreCaseRegexFlag) != 0)
         {
-            Char equivs[CaseInsensitive::EquivClassSize];
+            // To ensure initialization, we first default-initialize the
+            // whole array with a constant, and then individually set it
+            // to be just the first character (known to exist). This can
+            // hopefully be optimized to just initialize to cs[0] by the
+            // compiler.
+            Char equivs[CaseInsensitive::EquivClassSize] = { (Char)-1 };
+            for (int i = 0; i < CaseInsensitive::EquivClassSize; i++)
+            {
+                equivs[i] = cs[0];
+
+            }
             bool isNonTrivial = compiler.standardChars->ToEquivs(compiler.program->GetCaseMappingSource(), cs[0], equivs);
             if (isNonTrivial)
             {
@@ -1262,7 +1300,7 @@ namespace UnifiedRegex
 
     void MatchCharNode::BestSyncronizingNode(Compiler& compiler, Node*& bestNode)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         if (IsBetterSyncronizingNode(compiler, bestNode, this))
         {
@@ -1279,10 +1317,23 @@ namespace UnifiedRegex
     {
         if (isEquivClass)
         {
-            Char uniqueEquivs[CaseInsensitive::EquivClassSize];
+            // To ensure initialization, we first default-initialize the
+            // whole array with a constant, and then individually set it
+            // to be just the first character (known to exist). This can
+            // hopefully be optimized to just initialize to cs[0] by the
+            // compiler.
+            Char uniqueEquivs[CaseInsensitive::EquivClassSize] = { (Char)-1 };
+            for (int i = 0; i < CaseInsensitive::EquivClassSize; i++)
+            {
+                uniqueEquivs[i] = cs[0];
+            }
             CharCount uniqueEquivCount = FindUniqueEquivs(cs, uniqueEquivs);
             switch (uniqueEquivCount)
             {
+            case 1:
+                EMIT(compiler, MatchCharInst, uniqueEquivs[0]);
+                break;
+
             case 2:
                 EMIT(compiler, MatchChar2Inst, uniqueEquivs[0], uniqueEquivs[1]);
                 break;
@@ -1411,7 +1462,7 @@ namespace UnifiedRegex
 
     bool MatchCharNode::BuildCharTrie(Compiler& compiler, CharTrie* trie, Node* cont, bool isAcceptFirst) const
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         for (int i = 0; i < (isEquivClass ? CaseInsensitive::EquivClassSize : 1); i++)
         {
@@ -1684,7 +1735,7 @@ namespace UnifiedRegex
 
     bool MatchSetNode::BuildCharTrie(Compiler& compiler, CharTrie* trie, Node* cont, bool isAcceptFirst) const
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         Assert(!isNegation && set.IsCompact());
         Char entries[CharSet<Char>::MaxCompact];
@@ -1745,7 +1796,7 @@ namespace UnifiedRegex
 
     CharCount ConcatNode::TransferPass0(Compiler& compiler, const Char* litbuf)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         Assert(tail != 0);
         CharCount n = 0;
@@ -1756,7 +1807,7 @@ namespace UnifiedRegex
         {
             Assert(curr->head->tag != Concat);
             Assert(prev == 0 || !(prev->head->LiteralLength() > 0 && curr->head->LiteralLength() > 0));
-            n += curr->head->TransferPass0(compiler, litbuf);
+            n = UInt32Math::Add(n, curr->head->TransferPass0(compiler, litbuf));
 #if DBG
             prev = curr;
 #endif
@@ -1766,7 +1817,7 @@ namespace UnifiedRegex
 
     void ConcatNode::TransferPass1(Compiler& compiler, const Char* litbuf)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         for (ConcatNode *curr = this; curr != 0; curr = curr->tail)
             curr->head->TransferPass1(compiler, litbuf);
@@ -1779,7 +1830,7 @@ namespace UnifiedRegex
 
     void ConcatNode::AnnotatePass0(Compiler& compiler)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         Node* prev = 0;
         for (ConcatNode* curr = this; curr != 0; curr = curr->tail)
@@ -1804,7 +1855,7 @@ namespace UnifiedRegex
 
     void ConcatNode::AnnotatePass1(Compiler& compiler, bool parentNotInLoop, bool parentAtLeastOnce, bool parentNotSpeculative, bool parentNotNegated)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         features = HasConcat;
         isNotInLoop = parentNotInLoop;
@@ -1863,7 +1914,7 @@ namespace UnifiedRegex
 
     void ConcatNode::AnnotatePass2(Compiler& compiler, CountDomain accumConsumes, bool accumPrevWillNotProgress, bool accumPrevWillNotRegress)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         prevConsumes = accumConsumes;
         isPrevWillNotProgress = accumPrevWillNotProgress;
@@ -1881,7 +1932,7 @@ namespace UnifiedRegex
 
     void ConcatNode::AnnotatePass3(Compiler& compiler, CountDomain accumConsumes, CharSet<Char>* accumFollow, bool accumFollowIrrefutable, bool accumFollowEOL)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         followConsumes = accumConsumes;
         followSet = accumFollow;
@@ -1929,7 +1980,7 @@ namespace UnifiedRegex
 
     void ConcatNode::AnnotatePass4(Compiler& compiler)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         isDeterministic = true;
         for (ConcatNode* curr = this; curr != 0; curr = curr->tail)
@@ -1942,7 +1993,7 @@ namespace UnifiedRegex
 
     bool ConcatNode::SupportsPrefixSkipping(Compiler& compiler) const
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         int prefix = 0;
         for (const ConcatNode* curr = this; curr != 0; curr = curr->tail)
@@ -1957,14 +2008,14 @@ namespace UnifiedRegex
 
     Node* ConcatNode::HeadSyncronizingNode(Compiler& compiler)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         return head->HeadSyncronizingNode(compiler);
     }
 
     void ConcatNode::AccumDefineGroups(Js::ScriptContext* scriptContext, int& minGroup, int& maxGroup)
     {
-        PROBE_STACK(scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(scriptContext, Js::Constants::MinStackRegex);
 
         for (ConcatNode *curr = this; curr != 0; curr = curr->tail)
             curr->head->AccumDefineGroups(scriptContext, minGroup, maxGroup);
@@ -1982,7 +2033,7 @@ namespace UnifiedRegex
 
     void ConcatNode::BestSyncronizingNode(Compiler& compiler, Node*& bestNode)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         for (ConcatNode* curr = this; curr != 0; curr = curr->tail)
             curr->head->BestSyncronizingNode(compiler, bestNode);
@@ -1990,7 +2041,7 @@ namespace UnifiedRegex
 
     void ConcatNode::Emit(Compiler& compiler, CharCount& skipped)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         //
         // Compilation scheme:
@@ -2013,7 +2064,7 @@ namespace UnifiedRegex
 
     bool ConcatNode::IsOctoquad(Compiler& compiler, OctoquadIdentifier* oi)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         for (ConcatNode* curr = this; curr != 0; curr = curr->tail)
         {
@@ -2025,7 +2076,7 @@ namespace UnifiedRegex
 
     bool ConcatNode::IsCharTrieArm(Compiler& compiler, uint& accNumAlts) const
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         for (const ConcatNode* curr = this; curr != 0; curr = curr->tail)
         {
@@ -2037,7 +2088,7 @@ namespace UnifiedRegex
 
     bool ConcatNode::BuildCharTrie(Compiler& compiler, CharTrie* trie, Node* cont, bool isAcceptFirst) const
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         if (cont != 0)
             // We don't want to manage a stack of continuations
@@ -2076,7 +2127,7 @@ namespace UnifiedRegex
 
     CharCount AltNode::TransferPass0(Compiler& compiler, const Char* litbuf)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         Assert(tail != 0);
         CharCount n = 0;
@@ -2087,7 +2138,7 @@ namespace UnifiedRegex
         {
             Assert(curr->head->tag != Alt);
             Assert(prev == 0 || !(prev->head->IsCharOrPositiveSet() && curr->head->IsCharOrPositiveSet()));
-            n += curr->head->TransferPass0(compiler, litbuf);
+            n = UInt32Math::Add(n, curr->head->TransferPass0(compiler, litbuf));
 #if DBG
             prev = curr;
 #endif
@@ -2097,7 +2148,7 @@ namespace UnifiedRegex
 
     void AltNode::TransferPass1(Compiler& compiler, const Char* litbuf)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         for (AltNode *curr = this; curr != 0; curr = curr->tail)
             curr->head->TransferPass1(compiler, litbuf);
@@ -2110,7 +2161,7 @@ namespace UnifiedRegex
 
     void AltNode::AnnotatePass0(Compiler& compiler)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         isWord = true;
         for (AltNode* curr = this; curr != 0; curr = curr->tail)
@@ -2123,7 +2174,7 @@ namespace UnifiedRegex
 
     void AltNode::AnnotatePass1(Compiler& compiler, bool parentNotInLoop, bool parentAtLeastOnce, bool parentNotSpeculative, bool parentNotNegated)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         features = HasAlt;
         isNotInLoop = parentNotInLoop;
@@ -2172,7 +2223,7 @@ namespace UnifiedRegex
 
     void AltNode::AnnotatePass2(Compiler& compiler, CountDomain accumConsumes, bool accumPrevWillNotProgress, bool accumPrevWillNotRegress)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         prevConsumes = accumConsumes;
         isPrevWillNotProgress = accumPrevWillNotProgress;
@@ -2183,7 +2234,7 @@ namespace UnifiedRegex
 
     void AltNode::AnnotatePass3(Compiler& compiler, CountDomain accumConsumes, CharSet<Char>* accumFollow, bool accumFollowIrrefutable, bool accumFollowEOL)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         followConsumes = accumConsumes;
         followSet = accumFollow;
@@ -2200,7 +2251,7 @@ namespace UnifiedRegex
 
     void AltNode::AnnotatePass4(Compiler& compiler)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         //
         // Simplification rule
@@ -2272,9 +2323,13 @@ namespace UnifiedRegex
                 }
                 numItems++;
                 if (!curr->head->firstSet->IsCompact())
+                {
                     allCompact = false;
+                }
                 if (!curr->head->IsSimpleOneChar())
+                {
                     allSimpleOneChar = false;
+                }
                 totalChars += curr->head->firstSet->Count();
             }
 
@@ -2288,24 +2343,27 @@ namespace UnifiedRegex
                 {
                     // **COMMIT**
                     if (allSimpleOneChar)
+                    {
                         // This will probably never fire since the parser has already converted alts-of-chars/sets
                         // to sets. We include it for symmetry with below.
                         scheme = Set;
-                    else if (allCompact && totalChars <= Switch20Inst::MaxCases)
+                    }
+                    else if (allCompact && totalChars <= Switch24Inst::MaxCases)
                     {
                         // Can use a switch instruction to jump to item
                         scheme = Switch;
                         switchSize = totalChars;
                     }
                     else
+                    {
                         // Must use a chain of jump instructions to jump to item
                         scheme = Chain;
+                    }
                     isOptional = false;
                     return;
                 }
             }
         }
-
 
         //
         // Compilation scheme: None/Switch/Chain/Set, isOptional
@@ -2339,7 +2397,9 @@ namespace UnifiedRegex
             for (AltNode* curr = this; curr != 0; curr = curr->tail)
             {
                 if (curr->head->IsEmptyOnly())
+                {
                     fires = true;
+                }
                 else if (curr->head->thisConsumes.CouldMatchEmpty())
                 {
                     fires = false;
@@ -2349,9 +2409,13 @@ namespace UnifiedRegex
                 {
                     numNonEmpty++;
                     if (!curr->head->IsSimpleOneChar())
+                    {
                         allSimpleOneChar = false;
+                    }
                     if (!curr->head->firstSet->IsCompact())
+                    {
                         allCompact = false;
+                    }
                     totalChars += curr->head->firstSet->Count();
                 }
             }
@@ -2374,23 +2438,31 @@ namespace UnifiedRegex
                     unionSet.UnionInPlace(compiler.ctAllocator, *firstSet);
                     unionSet.UnionInPlace(compiler.ctAllocator, *followSet);
                     if (totalChars + followSet->Count() == unionSet.Count())
+                    {
                         fires = true;
+                    }
                 }
 
                 if (fires)
                 {
                     // **COMMIT**
                     if (numNonEmpty == 0)
+                    {
                         scheme = None;
+                    }
                     else if (allSimpleOneChar)
+                    {
                         scheme = Set;
-                    else if (numNonEmpty > 1 && allCompact && totalChars <= Switch20Inst::MaxCases)
+                    }
+                    else if (numNonEmpty > 1 && allCompact && totalChars <= Switch24Inst::MaxCases)
                     {
                         switchSize = totalChars;
                         scheme = Switch;
                     }
                     else
+                    {
                         scheme = Chain;
+                    }
                     isOptional = true;
                     return;
                 }
@@ -2494,7 +2566,7 @@ namespace UnifiedRegex
 
     CharCount AltNode::MinSyncronizingLiteralLength(Compiler& compiler, int& numLiterals) const
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         // Here, we ignore nodes with length 1, which are Char nodes. The way the Alt node synchronization
         // is currently implemented, it expects all nodes to be Literal nodes. It requires quite a bit of
@@ -2524,7 +2596,7 @@ namespace UnifiedRegex
 
     void AltNode::CollectSyncronizingLiterals(Compiler& compiler, ScannersMixin& scanners) const
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         for (const AltNode* curr = this; curr != 0; curr = curr->tail)
             curr->head->CollectSyncronizingLiterals(compiler, scanners);
@@ -2532,7 +2604,7 @@ namespace UnifiedRegex
 
     void AltNode::BestSyncronizingNode(Compiler& compiler, Node*& bestNode)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         if (IsBetterSyncronizingNode(compiler, bestNode, this))
             bestNode = this;
@@ -2540,7 +2612,7 @@ namespace UnifiedRegex
 
     void AltNode::AccumDefineGroups(Js::ScriptContext* scriptContext, int& minGroup, int& maxGroup)
     {
-        PROBE_STACK(scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(scriptContext, Js::Constants::MinStackRegex);
 
         for (AltNode *curr = this; curr != 0; curr = curr->tail)
             curr->head->AccumDefineGroups(scriptContext, minGroup, maxGroup);
@@ -2548,7 +2620,7 @@ namespace UnifiedRegex
 
     void AltNode::Emit(Compiler& compiler, CharCount& skipped)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         Assert(skipped == 0);
         switch (scheme)
@@ -2648,7 +2720,7 @@ namespace UnifiedRegex
                     //
                     // Compilation scheme:
                     //
-                    //            Switch(AndConsume)?(10|20)(<dispatch to each arm>)
+                    //            Switch(AndConsume)?(2|4|8|16|24)(<dispatch to each arm>)
                     //            Fail                                (if non-optional)
                     //            Jump Lexit                          (if optional)
                     //     L1:    <item1>
@@ -2658,7 +2730,7 @@ namespace UnifiedRegex
                     //     L3:    <item3>
                     //     Lexit:
                     //
-                    Assert(switchSize <= Switch20Inst::MaxCases);
+                    Assert(switchSize <= Switch24Inst::MaxCases);
                     int numItems = 0;
                     bool allCanSkip = true;
                     for (AltNode* curr = this; curr != 0; curr = curr->tail)
@@ -2671,7 +2743,9 @@ namespace UnifiedRegex
                         {
                             numItems++;
                             if (!curr->head->SupportsPrefixSkipping(compiler))
+                            {
                                 allCanSkip = false;
+                            }
                         }
                     }
                     Assert(numItems > 1);
@@ -2682,28 +2756,73 @@ namespace UnifiedRegex
                     Label* caseLabels = AnewArray(compiler.ctAllocator, Label, numItems);
                     // We must fixup the switch arms
                     Label switchLabel = compiler.CurrentLabel();
-                    Assert(switchSize <= Switch20Inst::MaxCases);
+
+                    Assert(switchSize <= Switch24Inst::MaxCases);
                     if (allCanSkip)
                     {
-                        if (switchSize > Switch10Inst::MaxCases)
-                            EMIT(compiler, SwitchAndConsume20Inst);
+                        if (switchSize <= Switch2Inst::MaxCases)
+                        {
+                            EMIT(compiler, SwitchAndConsume2Inst);
+                        }
+                        else if (switchSize <= Switch4Inst::MaxCases)
+                        {
+                            EMIT(compiler, SwitchAndConsume4Inst);
+                        }
+                        else if (switchSize <= Switch8Inst::MaxCases)
+                        {
+                            EMIT(compiler, SwitchAndConsume8Inst);
+                        }
+                        else if (switchSize <= Switch16Inst::MaxCases)
+                        {
+                            EMIT(compiler, SwitchAndConsume16Inst);
+                        }
+                        else if (switchSize <= Switch24Inst::MaxCases)
+                        {
+                            EMIT(compiler, SwitchAndConsume24Inst);
+                        }
                         else
-                            EMIT(compiler, SwitchAndConsume10Inst);
+                        {
+                            AssertOrFailFastMsg(false, "It should not be possible to reach here. This implies that we entered the Switch layout with greater than the max allowable cases.");
+                        }
                     }
                     else
                     {
-                        if (switchSize > Switch10Inst::MaxCases)
-                            EMIT(compiler, Switch20Inst);
+                        if (switchSize <= Switch2Inst::MaxCases)
+                        {
+                            EMIT(compiler, Switch2Inst);
+                        }
+                        else if (switchSize <= Switch4Inst::MaxCases)
+                        {
+                            EMIT(compiler, Switch4Inst);
+                        }
+                        else if (switchSize <= Switch8Inst::MaxCases)
+                        {
+                            EMIT(compiler, Switch8Inst);
+                        }
+                        else if (switchSize <= Switch16Inst::MaxCases)
+                        {
+                            EMIT(compiler, Switch16Inst);
+                        }
+                        else if (switchSize <= Switch24Inst::MaxCases)
+                        {
+                            EMIT(compiler, Switch24Inst);
+                        }
                         else
-                            EMIT(compiler, Switch10Inst);
+                        {
+                            AssertOrFailFastMsg(false, "It should not be possible to reach here. This implies that we entered the Switch layout with greater than the max allowable cases.");
+                        }
                     }
 
                     Label defaultJumpFixup = 0;
                     if (isOptional)
+                    {
                         // Must fixup default jump to exit
                         defaultJumpFixup = compiler.GetFixup(&EMIT(compiler, JumpInst)->targetLabel);
+                    }
                     else
+                    {
                         compiler.Emit<FailInst>();
+                    }
 
                     // Emit each item
                     int item = 0;
@@ -2712,20 +2831,29 @@ namespace UnifiedRegex
                         if (!curr->head->thisConsumes.CouldMatchEmpty())
                         {
                             if (allCanSkip)
+                            {
                                 skipped = 1;
+                            }
                             caseLabels[item] = compiler.CurrentLabel();
                             curr->head->Emit(compiler, skipped);
                             if (item < numItems - 1)
+                            {
                                 jumpFixups[item] = compiler.GetFixup(&EMIT(compiler, JumpInst)->targetLabel);
+                            }
                             item++;
                         }
                     }
 
                     // Fixup exit labels
                     if (isOptional)
+                    {
                         compiler.DoFixup(defaultJumpFixup, compiler.CurrentLabel());
+                    }
+
                     for (item = 0; item < numItems - 1; item++)
+                    {
                         compiler.DoFixup(jumpFixups[item], compiler.CurrentLabel());
+                    }
 
                     // Fixup the switch entries
                     item = 0;
@@ -2740,17 +2868,49 @@ namespace UnifiedRegex
                             {
                                 if (allCanSkip)
                                 {
-                                    if (switchSize > Switch10Inst::MaxCases)
-                                        compiler.L2I(SwitchAndConsume20, switchLabel)->AddCase(entries[i], caseLabels[item]);
-                                    else
-                                        compiler.L2I(SwitchAndConsume10, switchLabel)->AddCase(entries[i], caseLabels[item]);
+                                    if (switchSize <= Switch2Inst::MaxCases)
+                                    {
+                                        compiler.L2I(SwitchAndConsume2, switchLabel)->AddCase(entries[i], caseLabels[item]);
+                                    }
+                                    else if (switchSize <= Switch4Inst::MaxCases)
+                                    {
+                                        compiler.L2I(SwitchAndConsume4, switchLabel)->AddCase(entries[i], caseLabels[item]);
+                                    }
+                                    else if (switchSize <= Switch8Inst::MaxCases)
+                                    {
+                                        compiler.L2I(SwitchAndConsume8, switchLabel)->AddCase(entries[i], caseLabels[item]);
+                                    }
+                                    else if (switchSize <= Switch16Inst::MaxCases)
+                                    {
+                                        compiler.L2I(SwitchAndConsume16, switchLabel)->AddCase(entries[i], caseLabels[item]);
+                                    }
+                                    else if (switchSize <= Switch24Inst::MaxCases)
+                                    {
+                                        compiler.L2I(SwitchAndConsume24, switchLabel)->AddCase(entries[i], caseLabels[item]);
+                                    }
                                 }
                                 else
                                 {
-                                    if (switchSize > Switch10Inst::MaxCases)
-                                        compiler.L2I(Switch20, switchLabel)->AddCase(entries[i], caseLabels[item]);
-                                    else
-                                        compiler.L2I(Switch10, switchLabel)->AddCase(entries[i], caseLabels[item]);
+                                    if (switchSize <= Switch2Inst::MaxCases)
+                                    {
+                                        compiler.L2I(Switch2, switchLabel)->AddCase(entries[i], caseLabels[item]);
+                                    }
+                                    else if (switchSize <= Switch4Inst::MaxCases)
+                                    {
+                                        compiler.L2I(Switch4, switchLabel)->AddCase(entries[i], caseLabels[item]);
+                                    }
+                                    else if (switchSize <= Switch8Inst::MaxCases)
+                                    {
+                                        compiler.L2I(Switch8, switchLabel)->AddCase(entries[i], caseLabels[item]);
+                                    }
+                                    else if (switchSize <= Switch16Inst::MaxCases)
+                                    {
+                                        compiler.L2I(Switch16, switchLabel)->AddCase(entries[i], caseLabels[item]);
+                                    }
+                                    else if (switchSize <= Switch24Inst::MaxCases)
+                                    {
+                                        compiler.L2I(Switch24, switchLabel)->AddCase(entries[i], caseLabels[item]);
+                                    }
                                 }
                             }
                             item++;
@@ -2870,7 +3030,7 @@ namespace UnifiedRegex
 
     CharCount AltNode::EmitScan(Compiler& compiler, bool isHeadSyncronizingNode)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         Assert(!isHeadSyncronizingNode);
 
@@ -2892,7 +3052,7 @@ namespace UnifiedRegex
 
     bool AltNode::IsOctoquad(Compiler& compiler, OctoquadIdentifier* oi)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         if (tail == 0 || tail->tail != 0)
             // Must be exactly two alts
@@ -2948,7 +3108,7 @@ namespace UnifiedRegex
 
     CharCount DefineGroupNode::TransferPass0(Compiler& compiler, const Char* litbuf)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         Assert(groupId > 0 && groupId < compiler.program->numGroups);
         return body->TransferPass0(compiler, litbuf);
@@ -2956,7 +3116,7 @@ namespace UnifiedRegex
 
     void DefineGroupNode::TransferPass1(Compiler& compiler, const Char* litbuf)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         body->TransferPass1(compiler, litbuf);
     }
@@ -2968,7 +3128,7 @@ namespace UnifiedRegex
 
     void DefineGroupNode::AnnotatePass0(Compiler& compiler)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         body->AnnotatePass0(compiler);
         isWord = body->isWord;
@@ -2976,7 +3136,7 @@ namespace UnifiedRegex
 
     void DefineGroupNode::AnnotatePass1(Compiler& compiler, bool parentNotInLoop, bool parentAtLeastOnce, bool parentNotSpeculative, bool parentNotNegated)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         features = HasDefineGroup;
         body->AnnotatePass1(compiler, parentNotInLoop, parentAtLeastOnce, parentNotSpeculative, parentNotNegated);
@@ -2995,7 +3155,7 @@ namespace UnifiedRegex
 
     void DefineGroupNode::AnnotatePass2(Compiler& compiler, CountDomain accumConsumes, bool accumPrevWillNotProgress, bool accumPrevWillNotRegress)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         prevConsumes = accumConsumes;
         isPrevWillNotProgress = accumPrevWillNotProgress;
@@ -3005,7 +3165,7 @@ namespace UnifiedRegex
 
     void DefineGroupNode::AnnotatePass3(Compiler& compiler, CountDomain accumConsumes, CharSet<Char>* accumFollow, bool accumFollowIrrefutable, bool accumFollowEOL)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         followConsumes = accumConsumes;
         followSet = accumFollow;
@@ -3018,7 +3178,7 @@ namespace UnifiedRegex
 
     void DefineGroupNode::AnnotatePass4(Compiler& compiler)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         body->AnnotatePass4(compiler);
         isDeterministic = body->isDeterministic;
@@ -3064,7 +3224,7 @@ namespace UnifiedRegex
 
     bool DefineGroupNode::SupportsPrefixSkipping(Compiler& compiler) const
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         if (scheme != Fixed)
             // We can't skip over part of the match if the BeginDefineGroup must capture it's start
@@ -3074,7 +3234,7 @@ namespace UnifiedRegex
 
     Node* DefineGroupNode::HeadSyncronizingNode(Compiler& compiler)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         if (scheme != Fixed)
             // Can't skip BeginDefineGroup
@@ -3084,28 +3244,28 @@ namespace UnifiedRegex
 
     CharCount DefineGroupNode::MinSyncronizingLiteralLength(Compiler& compiler, int& numLiterals) const
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         return body->MinSyncronizingLiteralLength(compiler, numLiterals);
     }
 
     void DefineGroupNode::CollectSyncronizingLiterals(Compiler& compiler, ScannersMixin& scanners) const
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         body->CollectSyncronizingLiterals(compiler, scanners);
     }
 
     void DefineGroupNode::BestSyncronizingNode(Compiler& compiler, Node*& bestNode)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         body->BestSyncronizingNode(compiler, bestNode);
     }
 
     void DefineGroupNode::AccumDefineGroups(Js::ScriptContext* scriptContext, int& minGroup, int& maxGroup)
     {
-        PROBE_STACK(scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(scriptContext, Js::Constants::MinStackRegex);
 
         if (groupId < minGroup)
             minGroup = groupId;
@@ -3116,7 +3276,7 @@ namespace UnifiedRegex
 
     void DefineGroupNode::Emit(Compiler& compiler, CharCount& skipped)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         switch (scheme)
         {
@@ -3369,7 +3529,7 @@ namespace UnifiedRegex
 
     CharCount LoopNode::TransferPass0(Compiler& compiler, const Char* litbuf)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         Assert(repeats.upper == CharCountFlag || repeats.upper > 0);
         Assert(repeats.upper == CharCountFlag || repeats.upper >= repeats.lower);
@@ -3379,7 +3539,7 @@ namespace UnifiedRegex
 
     void LoopNode::TransferPass1(Compiler& compiler, const Char* litbuf)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         body->TransferPass1(compiler, litbuf);
     }
@@ -3391,7 +3551,7 @@ namespace UnifiedRegex
 
     void LoopNode::AnnotatePass0(Compiler& compiler)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         body->AnnotatePass0(compiler);
         isWord = !repeats.CouldMatchEmpty() && body->isWord;
@@ -3399,7 +3559,7 @@ namespace UnifiedRegex
 
     void LoopNode::AnnotatePass1(Compiler& compiler, bool parentNotInLoop, bool parentAtLeastOnce, bool parentNotSpeculative, bool parentNotNegated)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         features = HasLoop;
         isNotInLoop = parentNotInLoop;
@@ -3424,7 +3584,7 @@ namespace UnifiedRegex
 
     void LoopNode::AnnotatePass2(Compiler& compiler, CountDomain accumConsumes, bool accumPrevWillNotProgress, bool accumPrevWillNotRegress)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         prevConsumes = accumConsumes;
         isPrevWillNotProgress = accumPrevWillNotProgress;
@@ -3442,7 +3602,7 @@ namespace UnifiedRegex
 
     void LoopNode::AnnotatePass3(Compiler& compiler, CountDomain accumConsumes, CharSet<Char>* accumFollow, bool accumFollowIrrefutable, bool accumFollowEOL)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         followConsumes = accumConsumes;
         followSet = accumFollow;
@@ -3500,7 +3660,7 @@ namespace UnifiedRegex
 
     void LoopNode::AnnotatePass4(Compiler& compiler)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         body->AnnotatePass4(compiler);
         isDeterministic = body->isDeterministic;
@@ -3731,7 +3891,7 @@ namespace UnifiedRegex
 
     void LoopNode::BestSyncronizingNode(Compiler& compiler, Node*& bestNode)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         if (repeats.lower > 0)
             body->BestSyncronizingNode(compiler, bestNode);
@@ -3740,14 +3900,14 @@ namespace UnifiedRegex
 
     void LoopNode::AccumDefineGroups(Js::ScriptContext* scriptContext, int& minGroup, int& maxGroup)
     {
-        PROBE_STACK(scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(scriptContext, Js::Constants::MinStackRegex);
 
         body->AccumDefineGroups(scriptContext, minGroup, maxGroup);
     }
 
     void LoopNode::Emit(Compiler& compiler, CharCount& skipped)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         Assert(skipped == 0);
 
@@ -4110,14 +4270,14 @@ namespace UnifiedRegex
 
     CharCount AssertionNode::TransferPass0(Compiler& compiler, const Char* litbuf)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         return body->TransferPass0(compiler, litbuf);
     }
 
     void AssertionNode::TransferPass1(Compiler& compiler, const Char* litbuf)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         body->TransferPass1(compiler, litbuf);
     }
@@ -4129,7 +4289,7 @@ namespace UnifiedRegex
 
     void AssertionNode::AnnotatePass0(Compiler& compiler)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         isWord = false;
         body->AnnotatePass0(compiler);
@@ -4137,7 +4297,7 @@ namespace UnifiedRegex
 
     void AssertionNode::AnnotatePass1(Compiler& compiler, bool parentNotInLoop, bool parentAtLeastOnce, bool parentNotSpeculative, bool parentNotNegated)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         features = HasAssertion;
         body->AnnotatePass1(compiler, parentNotInLoop, parentAtLeastOnce, false, parentNotNegated && !isNegation);
@@ -4164,7 +4324,7 @@ namespace UnifiedRegex
 
     void AssertionNode::AnnotatePass2(Compiler& compiler, CountDomain accumConsumes, bool accumPrevWillNotProgress, bool accumPrevWillNotRegress)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         prevConsumes = accumConsumes;
         isPrevWillNotProgress = accumPrevWillNotProgress;
@@ -4174,7 +4334,7 @@ namespace UnifiedRegex
 
     void AssertionNode::AnnotatePass3(Compiler& compiler, CountDomain accumConsumes, CharSet<Char>* accumFollow, bool accumFollowIrrefutable, bool accumFollowEOL)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         followConsumes = accumConsumes;
         followSet = accumFollow;
@@ -4192,7 +4352,7 @@ namespace UnifiedRegex
 
     void AssertionNode::AnnotatePass4(Compiler& compiler)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         body->AnnotatePass4(compiler);
         // Even if body is non-deterministic we cut the choicepoints on exit from the assertion,
@@ -4256,14 +4416,14 @@ namespace UnifiedRegex
 
     void AssertionNode::AccumDefineGroups(Js::ScriptContext* scriptContext, int& minGroup, int& maxGroup)
     {
-        PROBE_STACK(scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(scriptContext, Js::Constants::MinStackRegex);
 
         body->AccumDefineGroups(scriptContext, minGroup, maxGroup);
     }
 
     void AssertionNode::Emit(Compiler& compiler, CharCount& skipped)
     {
-        PROBE_STACK(compiler.scriptContext, Js::Constants::MinStackRegex);
+        PROBE_STACK_NO_DISPOSE(compiler.scriptContext, Js::Constants::MinStackRegex);
 
         Assert(skipped == 0);
 
@@ -4373,7 +4533,7 @@ namespace UnifiedRegex
 
     void Compiler::CaptureNoLiterals(Program* program)
     {
-        program->rep.insts.litbuf = 0;
+        program->rep.insts.litbuf = nullptr;
         program->rep.insts.litbufLen = 0;
     }
 
@@ -4381,6 +4541,11 @@ namespace UnifiedRegex
     {
         // Program will own literal buffer. Prepare buffer and nodes for case-invariant matching if necessary.
         CharCount finalLen = root->TransferPass0(*this, litbuf);
+        if (finalLen < root->LiteralLength()) // overflowed
+        {
+            Js::Throw::OutOfMemory();
+        }
+
         program->rep.insts.litbuf = finalLen == 0 ? 0 : RecyclerNewArrayLeaf(scriptContext->GetRecycler(), Char, finalLen);
 
         program->rep.insts.litbufLen = 0;
@@ -4424,7 +4589,7 @@ namespace UnifiedRegex
 #endif
         )
     {
-        program->tag = Program::InstructionsTag;
+        program->tag = Program::ProgramTag::InstructionsTag;
         CaptureNoLiterals(program);
         EmitAndCaptureSuccInst(pattern->GetScriptContext()->GetRecycler(), program);
     }
@@ -4448,7 +4613,7 @@ namespace UnifiedRegex
 #if ENABLE_REGEX_CONFIG_OPTIONS
         if (w != 0)
         {
-            w->PrintEOL(_u("REGEX AST /%s/ {"), program->source);
+            w->PrintEOL(_u("REGEX AST /%s/ {"), PointerValue(program->source));
             w->Indent();
             root->Print(w, litbuf);
             w->Unindent();
@@ -4498,18 +4663,18 @@ namespace UnifiedRegex
 
                 OctoquadIdentifier oi(numCodes, *codeToChar, *charToCode);
                 // We haven't captured literals yet: temporarily set the program's litbuf to be the parser's litbuf
-                Assert(program->rep.insts.litbuf == 0);
+                Assert(program->rep.insts.litbuf == nullptr);
                 program->rep.insts.litbuf = (Char*)litbuf;
                 if (root->IsOctoquad(compiler, &oi) && oi.IsOctoquad())
                 {
-                    program->rep.insts.litbuf = 0;
+                    program->rep.insts.litbuf = nullptr;
                     oi.InitializeTrigramInfo(scriptContext, pattern);
-                    program->tag = Program::OctoquadTag;
+                    program->tag = Program::ProgramTag::OctoquadTag;
                     program->rep.octoquad.matcher = OctoquadMatcher::New(scriptContext->GetRecycler(), standardChars, program->GetCaseMappingSource(), &oi);
                     compiled = true;
                 }
                 else
-                    program->rep.insts.litbuf = 0;
+                    program->rep.insts.litbuf = nullptr;
             }
         }
 
@@ -4517,33 +4682,33 @@ namespace UnifiedRegex
         {
             if (REGEX_CONFIG_FLAG(RegexOptimize))
             {
-                Char c;
+                Char c = 0;
                 if (root->IsSingleChar(compiler, c))
                 {
                     // SPECIAL CASE: c
-                    program->tag = Program::SingleCharTag;
+                    program->tag = Program::ProgramTag::SingleCharTag;
                     program->rep.singleChar.c = c;
                 }
                 else if (root->IsBoundedWord(compiler))
                 {
                     // SPECIAL CASE: \b\w+\b
-                    program->tag = Program::BoundedWordTag;
+                    program->tag = Program::ProgramTag::BoundedWordTag;
                 }
                 else if (root->IsLeadingTrailingSpaces(compiler,
                     program->rep.leadingTrailingSpaces.beginMinMatch,
                     program->rep.leadingTrailingSpaces.endMinMatch))
                 {
                     // SPECIAL CASE: ^\s*|\s*$
-                    program->tag = Program::LeadingTrailingSpacesTag;
+                    program->tag = Program::ProgramTag::LeadingTrailingSpacesTag;
                 }
                 else if (root->IsBOILiteral2(compiler))
                 {
-                    program->tag = Program::BOILiteral2Tag;
+                    program->tag = Program::ProgramTag::BOILiteral2Tag;
                     program->rep.boiLiteral2.literal = *(DWORD *)litbuf;
                 }
                 else
                 {
-                    program->tag = Program::InstructionsTag;
+                    program->tag = Program::ProgramTag::InstructionsTag;
                     compiler.CaptureLiterals(root, litbuf);
 
                     root->AnnotatePass0(compiler);
@@ -4560,7 +4725,7 @@ namespace UnifiedRegex
 #if ENABLE_REGEX_CONFIG_OPTIONS
                     if (w != 0)
                     {
-                        w->PrintEOL(_u("REGEX ANNOTATED AST /%s/ {"), program->source);
+                        w->PrintEOL(_u("REGEX ANNOTATED AST /%s/ {"), PointerValue(program->source));
                         w->Indent();
                         root->Print(w, program->rep.insts.litbuf);
                         w->Unindent();
@@ -4621,7 +4786,7 @@ namespace UnifiedRegex
             }
             else
             {
-                program->tag = Program::InstructionsTag;
+                program->tag = Program::ProgramTag::InstructionsTag;
                 compiler.CaptureLiterals(root, litbuf);
                 CharCount skipped = 0;
                 root->Emit(compiler, skipped);
@@ -4633,7 +4798,7 @@ namespace UnifiedRegex
 #if ENABLE_REGEX_CONFIG_OPTIONS
         if (w != 0)
         {
-            w->PrintEOL(_u("REGEX PROGRAM /%s/ "), program->source);
+            w->PrintEOL(_u("REGEX PROGRAM /%s/"), PointerValue(program->source));
             program->Print(w);
             w->Flush();
         }

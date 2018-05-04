@@ -3,6 +3,7 @@
 // Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.
 //-------------------------------------------------------------------------------------------------------
 #include "Backend.h"
+#include "RuntimeMathPch.h"
 
 namespace IR
 {
@@ -82,6 +83,12 @@ bool
 Instr::HasEquivalentTypeCheckBailOut() const
 {
     return this->HasBailOutInfo() && IR::IsEquivalentTypeCheckBailOutKind(this->GetBailOutKind());
+}
+
+bool
+Instr::HasBailOnNoProfile() const
+{
+    return this->HasBailOutInfo() && this->GetBailOutKind() == IR::BailOutOnNoProfile;
 }
 
 void
@@ -352,7 +359,6 @@ Instr::Free()
                         return;
                     }
                     Assert(this->m_func->GetTopFunc()->allowRemoveBailOutArgInstr || !stackSym->m_isBailOutReferenced);
-                    stackSym->m_instrDef = nullptr;
                 }
                 else
                 {
@@ -366,6 +372,18 @@ Instr::Free()
                     || (stackSym->m_isEncodedConstant && stackSym->constantValue != 0));
             }
         }
+        this->FreeDst();
+    }
+    if (this->GetSrc1())
+    {
+        this->FreeSrc1();
+    }
+    if (this->GetSrc2())
+    {
+        // This pattern isn't so unusual:
+        //     src = instr->UnlinkSrc1();
+        //     instr->Remove();
+        this->FreeSrc2();
     }
 
     ClearBailOutInfo();
@@ -1135,11 +1153,10 @@ Instr::UnlinkBailOutInfo()
     return bailOutInfo;
 }
 
-bool
+void
 Instr::ReplaceBailOutInfo(BailOutInfo *newBailOutInfo)
 {
-    BailOutInfo *oldBailOutInfo;
-    bool deleteOld = false;
+    BailOutInfo *oldBailOutInfo = nullptr;
 
 #if DBG
     newBailOutInfo->wasCopied = true;
@@ -1171,10 +1188,9 @@ Instr::ReplaceBailOutInfo(BailOutInfo *newBailOutInfo)
         JitArenaAllocator * alloc = this->m_func->m_alloc;
         oldBailOutInfo->Clear(alloc);
         JitAdelete(alloc, oldBailOutInfo);
-        deleteOld = true;
     }
 
-    return deleteOld;
+    return;
 }
 
 IR::Instr *Instr::ShareBailOut()
@@ -1994,8 +2010,10 @@ Instr::New(Js::OpCode opcode, Opnd *dstOpnd, Func *func)
     Instr * instr;
 
     instr = Instr::New(opcode, func);
-    instr->SetDst(dstOpnd);
-
+    if (dstOpnd)
+    {
+        instr->SetDst(dstOpnd);
+    }
     return instr;
 }
 
@@ -2086,7 +2104,7 @@ Instr::SetDst(Opnd * newDst)
             stackSym->m_isIntConst  = false;
             stackSym->m_isInt64Const= false;
             stackSym->m_isTaggableIntConst  = false;
-            stackSym->m_isNotInt    = false;
+            stackSym->m_isNotNumber    = false;
             stackSym->m_isStrConst  = false;
             stackSym->m_isStrEmpty  = false;
             stackSym->m_isFltConst  = false;
@@ -2146,17 +2164,23 @@ Instr::UnlinkDst()
         }
     }
 
+    if (stackSym && stackSym->m_isSingleDef)
+    {
+        if (stackSym->m_instrDef == this)
+        {
+            stackSym->m_instrDef = nullptr;
+        }
+        else
+        {
+            Assert(oldDst->isFakeDst);
+        }
+    }
 #if DBG
     if (oldDst->isFakeDst)
     {
         oldDst->isFakeDst = false;
     }
 #endif
-    if (stackSym && stackSym->m_isSingleDef)
-    {
-        AssertMsg(stackSym->m_instrDef == this, "m_instrDef incorrectly set");
-        stackSym->m_instrDef = nullptr;
-    }
 
     oldDst->UnUse();
     this->m_dst = nullptr;
@@ -2208,7 +2232,7 @@ Instr::ReplaceDst(Opnd * newDst)
 Instr *
 Instr::SinkDst(Js::OpCode assignOpcode, RegNum regNum, IR::Instr *insertAfterInstr)
 {
-    return SinkDst(assignOpcode, StackSym::New(TyVar, m_func), regNum, insertAfterInstr);
+    return SinkDst(assignOpcode, StackSym::New(this->GetDst()->GetType(), m_func), regNum, insertAfterInstr);
 }
 
 Instr *
@@ -2477,6 +2501,7 @@ Instr::HoistIndirOffset(IR::IndirOpnd *indirOpnd, RegNum regNum)
     int32 offset = indirOpnd->GetOffset();
     if (indirOpnd->GetIndexOpnd())
     {
+        Assert(indirOpnd->GetBaseOpnd());
         return HoistIndirOffsetAsAdd(indirOpnd, indirOpnd->GetBaseOpnd(), offset, regNum);
     }
     IntConstOpnd *offsetOpnd = IntConstOpnd::New(offset, TyInt32, this->m_func);
@@ -2504,7 +2529,7 @@ Instr::HoistIndirOffset(IR::IndirOpnd *indirOpnd, RegNum regNum)
     indirOpnd->SetOffset(0);
     indirOpnd->SetIndexOpnd(indexOpnd);
 
-    Instr *instrAssign = LowererMD::CreateAssign(indexOpnd, offsetOpnd, this);
+    Instr *instrAssign = Lowerer::InsertMove(indexOpnd, offsetOpnd, this);
     indexOpnd->m_sym->SetIsIntConst(offset);
     return instrAssign;
 }
@@ -2602,7 +2627,7 @@ Instr::HoistIndirIndexOpndAsAdd(IR::IndirOpnd *orgOpnd, IR::Opnd *baseOpnd, IR::
 {
         IR::RegOpnd *newBaseOpnd = IR::RegOpnd::New(StackSym::New(TyMachPtr, this->m_func), regNum, TyMachPtr, this->m_func);
 
-        IR::Instr * instrAdd = IR::Instr::New(Js::OpCode::ADD, newBaseOpnd, baseOpnd, indexOpnd, this->m_func);
+        IR::Instr * instrAdd = IR::Instr::New(Js::OpCode::ADD, newBaseOpnd, baseOpnd, indexOpnd->UseWithNewType(TyMachPtr, this->m_func), this->m_func);
 
         this->InsertBefore(instrAdd);
 
@@ -2831,106 +2856,148 @@ Instr::GetOrCreateContinueLabel(const bool isHelper)
     return label;
 }
 
-///----------------------------------------------------------------------------
-///
-/// Instr::FindRegUse
-///
-///     Search a reg use of the given sym.  Return the RegOpnd that uses it.
-///
-///----------------------------------------------------------------------------
-
-IR::RegOpnd *
-Instr::FindRegUse(StackSym *sym)
+bool
+Instr::HasSymUseSrc(StackSym *sym, IR::Opnd* src)
 {
-    IR::Opnd *src1 = this->GetSrc1();
-
-    // Check src1
-    if (src1)
+    if (!src)
     {
-        if (src1->IsRegOpnd())
-        {
-            RegOpnd *regOpnd = src1->AsRegOpnd();
+        return false;
+    }
+    if (src->IsRegOpnd())
+    {
+        RegOpnd *regOpnd = src->AsRegOpnd();
 
-            if (regOpnd->m_sym == sym)
-            {
-                return regOpnd;
-            }
-        }
-        else if (src1->IsIndirOpnd())
+        if (regOpnd->m_sym == sym)
         {
-            IR::IndirOpnd *indirOpnd = src1->AsIndirOpnd();
-            if (indirOpnd->GetBaseOpnd()->m_sym == sym)
-            {
-                return indirOpnd->GetBaseOpnd();
-            }
-            else if (indirOpnd->GetIndexOpnd() && indirOpnd->GetIndexOpnd()->m_sym == sym)
-            {
-                return indirOpnd->GetIndexOpnd();
-            }
-        }
-        IR::Opnd *src2 = this->GetSrc2();
-
-        // Check src2
-        if (src2)
-        {
-            if (src2->IsRegOpnd())
-            {
-                RegOpnd *regOpnd = src2->AsRegOpnd();
-
-                if (regOpnd->m_sym == sym)
-                {
-                    return regOpnd;
-                }
-            }
-            else if (src2->IsIndirOpnd())
-            {
-                IR::IndirOpnd *indirOpnd = src2->AsIndirOpnd();
-                if (indirOpnd->GetBaseOpnd()->m_sym == sym)
-                {
-                    return indirOpnd->GetBaseOpnd();
-                }
-                else if (indirOpnd->GetIndexOpnd() && indirOpnd->GetIndexOpnd()->m_sym == sym)
-                {
-                    return indirOpnd->GetIndexOpnd();
-                }
-            }
+            return true;
         }
     }
-
-    // Check uses in dst
-    IR::Opnd *dst = this->GetDst();
-
-    if (dst != nullptr && dst->IsIndirOpnd())
+    else if (src->IsIndirOpnd())
     {
-        IR::IndirOpnd *indirOpnd = dst->AsIndirOpnd();
-        if (indirOpnd->GetBaseOpnd()->m_sym == sym)
+        IR::IndirOpnd *indirOpnd = src->AsIndirOpnd();
+        RegOpnd * baseOpnd = indirOpnd->GetBaseOpnd();
+        if (baseOpnd != nullptr && baseOpnd->m_sym == sym)
         {
-            return indirOpnd->GetBaseOpnd();
+            return true;
         }
         else if (indirOpnd->GetIndexOpnd() && indirOpnd->GetIndexOpnd()->m_sym == sym)
         {
-            return indirOpnd->GetIndexOpnd();
+            return true;
         }
     }
-
-    return nullptr;
+    else if (src->IsListOpnd())
+    {
+        IR::ListOpnd* list = src->AsListOpnd();
+        for (int i = 0; i < list->Count(); ++i)
+        {
+            if (HasSymUseSrc(sym, list->Item(i)))
+            {
+                return true;
+            }
+        }
+    }
+    else if (src->IsSymOpnd())
+    {
+        SymOpnd* symOpnd = src->AsSymOpnd();
+        if (symOpnd->GetSym() == sym)
+        {
+            return true;
+        }
+        if (symOpnd->IsPropertySymOpnd())
+        {
+            PropertySymOpnd* propertySymOpnd = symOpnd->AsPropertySymOpnd();
+            if (propertySymOpnd->GetObjectSym() == sym)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
-IR::RegOpnd *
-Instr::FindRegUseInRange(StackSym *sym, IR::Instr *instrBegin, IR::Instr *instrEnd)
+
+bool
+Instr::HasSymUseDst(StackSym *sym, IR::Opnd* dst)
+{
+    if (!dst)
+    {
+        return false;
+    }
+    if (dst->IsIndirOpnd())
+    {
+        IR::IndirOpnd *indirOpnd = dst->AsIndirOpnd();
+        RegOpnd * baseOpnd = indirOpnd->GetBaseOpnd();
+        if (baseOpnd != nullptr && baseOpnd->m_sym == sym)
+        {
+            return true;
+        }
+        else if (indirOpnd->GetIndexOpnd() && indirOpnd->GetIndexOpnd()->m_sym == sym)
+        {
+            return true;
+        }
+    }
+    else if (dst->IsListOpnd())
+    {
+        IR::ListOpnd* list = dst->AsListOpnd();
+        for (int i = 0; i < list->Count(); ++i)
+        {
+            if (HasSymUseDst(sym, list->Item(i)))
+            {
+                return true;
+            }
+        }
+    }
+    else if (dst->IsSymOpnd())
+    {
+        SymOpnd* symOpnd = dst->AsSymOpnd();
+        if (symOpnd->GetSym() == sym)
+        {
+            return true;
+        }
+        if (symOpnd->IsPropertySymOpnd())
+        {
+            PropertySymOpnd* propertySymOpnd = symOpnd->AsPropertySymOpnd();
+            if (propertySymOpnd->GetObjectSym() == sym)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool
+Instr::HasSymUse(StackSym *sym)
+{
+    if (HasSymUseSrc(sym, this->GetSrc1()))
+    {
+        return true;
+    }
+    if (HasSymUseSrc(sym, this->GetSrc2()))
+    {
+        return true;
+    }
+    if (HasSymUseDst(sym, this->GetDst()))
+    {
+        return true;
+    }
+    return false;
+}
+
+bool
+Instr::HasSymUseInRange(StackSym *sym, IR::Instr *instrBegin, IR::Instr *instrEnd)
 {
     FOREACH_INSTR_IN_RANGE(instr, instrBegin, instrEnd)
     {
         Assert(instr);
-        IR::RegOpnd *opnd = instr->FindRegUse(sym);
-        if (opnd)
+        if (instr->HasSymUse(sym))
         {
-            return opnd;
+            return true;
         }
     }
     NEXT_INSTR_IN_RANGE;
 
-    return nullptr;
+    return false;
 }
 
 ///----------------------------------------------------------------------------
@@ -3233,6 +3300,21 @@ bool Instr::HasFixedFunctionAddressTarget() const
         this->GetSrc1()->AsAddrOpnd()->m_isFunction;
 }
 
+bool Instr::TransfersSrcValue()
+{
+    // Return whether the instruction transfers a value to the destination.
+    // This is used to determine whether we should generate a value for the src so that it will
+    // match with the dst for copy prop.
+
+    // No point creating an unknown value for the src of a binary instr, as the dst will just be a different
+    // Don't create value for instruction without dst as well. The value doesn't go anywhere.
+
+    // if (src2 == nullptr) Disable copy prop for ScopedLdFld/ScopeStFld, etc., consider enabling that in the future
+    // Consider: Add opcode attribute to indicate whether the opcode would use the value or not
+
+    return this->GetDst() != nullptr && this->GetSrc2() == nullptr && !OpCodeAttr::DoNotTransfer(this->m_opcode) && !this->CallsAccessor();
+}
+
 
 void Instr::MoveArgs(bool generateByteCodeCapture)
 {
@@ -3312,6 +3394,16 @@ IR::Instr* Instr::GetArgOutSnapshot()
     return instr;
 }
 
+bool Instr::OpndHasAnyImplicitCalls(IR::Opnd* opnd, bool isSrc)
+{
+    return opnd && (
+        (opnd->IsSymOpnd() && opnd->AsSymOpnd()->m_sym->IsPropertySym()) ||
+        opnd->IsIndirOpnd() ||
+        (isSrc && !opnd->GetValueType().IsPrimitive()) ||
+        (opnd->IsListOpnd() && opnd->AsListOpnd()->Any([isSrc](IR::Opnd* lOpnd) { return OpndHasAnyImplicitCalls(lOpnd, isSrc); }))
+    );
+}
+
 bool Instr::HasAnyImplicitCalls() const
 {
     // there can be no implicit calls in asm.js
@@ -3325,40 +3417,11 @@ bool Instr::HasAnyImplicitCalls() const
     }
     if (OpCodeAttr::OpndHasImplicitCall(this->m_opcode))
     {
-        if (this->m_dst &&
-            ((this->m_dst->IsSymOpnd() && this->m_dst->AsSymOpnd()->m_sym->IsPropertySym()) ||
-             this->m_dst->IsIndirOpnd()))
-        {
-            return true;
-        }
-
-        IR::Opnd *src1 = this->GetSrc1();
-        if (src1)
-        {
-            if ((src1->IsSymOpnd() && src1->AsSymOpnd()->m_sym->IsPropertySym()) || src1->IsIndirOpnd())
-            {
-                return true;
-            }
-
-            if (!src1->GetValueType().IsPrimitive())
-            {
-                return true;
-            }
-
-            IR::Opnd *src2 = this->GetSrc2();
-            if (src2)
-            {
-                if ((src2->IsSymOpnd() && src2->AsSymOpnd()->m_sym->IsPropertySym()) || src2->IsIndirOpnd())
-                {
-                    return true;
-                }
-
-                if (!src2->GetValueType().IsPrimitive())
-                {
-                    return true;
-                }
-            }
-        }
+        return (
+            OpndHasAnyImplicitCalls(this->GetDst(), false) ||
+            OpndHasAnyImplicitCalls(this->GetSrc1(), true) ||
+            OpndHasAnyImplicitCalls(this->GetSrc2(), true)
+        );
     }
 
     return false;
@@ -3366,17 +3429,9 @@ bool Instr::HasAnyImplicitCalls() const
 
 bool Instr::HasAnySideEffects() const
 {
-    if (OpCodeAttr::HasSideEffects(this->m_opcode))
-    {
-        return true;
-    }
-
-    if (this->HasAnyImplicitCalls())
-    {
-        return true;
-    }
-
-    return false;
+    return (hasSideEffects ||
+            OpCodeAttr::HasSideEffects(this->m_opcode) ||
+            this->HasAnyImplicitCalls());
 }
 
 bool Instr::AreAllOpndInt64() const
@@ -3387,10 +3442,10 @@ bool Instr::AreAllOpndInt64() const
     return isDstInt64 && isSrc1Int64 && isSrc2Int64;
 }
 
-JITTimeFixedField* Instr::GetFixedFunction() const
+FixedFieldInfo* Instr::GetFixedFunction() const
 {
     Assert(HasFixedFunctionAddressTarget());
-    JITTimeFixedField* function = (JITTimeFixedField*)this->m_src1->AsAddrOpnd()->m_metadata;
+    FixedFieldInfo* function = (FixedFieldInfo*)this->m_src1->AsAddrOpnd()->m_metadata;
     return function;
 }
 
@@ -3442,15 +3497,54 @@ uint Instr::GetArgOutCount(bool getInterpreterArgOutCount)
     Assert(opcode == Js::OpCode::StartCall ||
            opcode == Js::OpCode::InlineeEnd || opcode == Js::OpCode::InlineBuiltInEnd|| opcode == Js::OpCode::InlineNonTrackingBuiltInEnd ||
            opcode == Js::OpCode::EndCallForPolymorphicInlinee || opcode == Js::OpCode::LoweredStartCall);
-    if (!getInterpreterArgOutCount)
-    {
-        return this->GetSrc1()->AsIntConstOpnd()->AsUint32();
-    }
 
-    Assert(opcode == Js::OpCode::StartCall);
-    IntConstType argOutCount = !this->GetSrc2() ? this->GetSrc1()->AsIntConstOpnd()->GetValue() : this->GetSrc2()->AsIntConstOpnd()->GetValue();
-    Assert(argOutCount >= 0 && argOutCount < UINT32_MAX);
+    Assert(!getInterpreterArgOutCount || opcode == Js::OpCode::StartCall);
+    uint argOutCount = !this->GetSrc2() || !getInterpreterArgOutCount || m_func->GetJITFunctionBody()->IsAsmJsMode()
+        ? this->GetSrc1()->AsIntConstOpnd()->AsUint32()
+        : this->GetSrc2()->AsIntConstOpnd()->AsUint32();
+
     return (uint)argOutCount;
+}
+
+uint Instr::GetAsmJsArgOutSize()
+{
+    switch (m_opcode)
+    {
+    case Js::OpCode::StartCall:
+    case Js::OpCode::LoweredStartCall:
+        return GetSrc2()->AsIntConstOpnd()->AsUint32();
+
+    case Js::OpCode::InlineeEnd:
+    {
+        // StartCall instr has the size, so walk back to it
+        IR::Instr *argInstr = this;
+        while(argInstr->m_opcode != Js::OpCode::StartCall && argInstr->m_opcode != Js::OpCode::LoweredStartCall)
+        {
+            argInstr = argInstr->GetSrc2()->GetStackSym()->GetInstrDef();
+        }
+        // add StartCall arg size with inlinee meta args for full size
+        uint size = UInt32Math::Add(argInstr->GetSrc2()->AsIntConstOpnd()->AsUint32(), Js::Constants::InlineeMetaArgCount * MachPtr);
+        return size;
+    }
+    default:
+        Assert(UNREACHED);
+        return 0;
+    }
+}
+
+uint Instr::GetArgOutSize(bool getInterpreterArgOutCount)
+{
+    Js::OpCode opcode = this->m_opcode;
+    Assert(opcode == Js::OpCode::StartCall ||
+        opcode == Js::OpCode::InlineeEnd || opcode == Js::OpCode::InlineBuiltInEnd || opcode == Js::OpCode::InlineNonTrackingBuiltInEnd ||
+        opcode == Js::OpCode::EndCallForPolymorphicInlinee || opcode == Js::OpCode::LoweredStartCall);
+
+    Assert(!getInterpreterArgOutCount || opcode == Js::OpCode::StartCall);
+    if (m_func->GetJITFunctionBody()->IsAsmJsMode())
+    {
+        return GetAsmJsArgOutSize();
+    }
+    return UInt32Math::Mul<MachPtr>(GetArgOutCount(getInterpreterArgOutCount));
 }
 
 PropertySymOpnd *Instr::GetPropertySymOpnd() const
@@ -3466,7 +3560,7 @@ PropertySymOpnd *Instr::GetPropertySymOpnd() const
     return nullptr;
 }
 
-bool Instr::CallsAccessor(IR::PropertySymOpnd* methodOpnd)
+bool Instr::CallsAccessor(IR::PropertySymOpnd * methodOpnd)
 {
     if (methodOpnd)
     {
@@ -3477,7 +3571,7 @@ bool Instr::CallsAccessor(IR::PropertySymOpnd* methodOpnd)
     return CallsGetter() || CallsSetter();
 }
 
-bool Instr::CallsSetter(IR::PropertySymOpnd* methodOpnd)
+bool Instr::CallsSetter()
 {
     return
         this->IsProfiledInstr() &&
@@ -3485,7 +3579,7 @@ bool Instr::CallsSetter(IR::PropertySymOpnd* methodOpnd)
         ((this->AsProfiledInstr()->u.FldInfo().flags & Js::FldInfo_FromAccessor) != 0);
 }
 
-bool Instr::CallsGetter(IR::PropertySymOpnd* methodOpnd)
+bool Instr::CallsGetter()
 {
     return
         this->IsProfiledInstr() &&
@@ -3542,8 +3636,7 @@ IR::Instr* IR::Instr::NewConstantLoad(IR::RegOpnd* dstOpnd, intptr_t varConst, V
                 Assert(dstOpnd->m_sym->m_isSingleDef);
                 if (dstOpnd->m_sym->IsSingleDef())
                 {
-                    dstOpnd->m_sym->m_isStrConst = true;
-                    dstOpnd->m_sym->m_isConst = true;
+                    dstOpnd->m_sym->SetIsStrConst();
                 }
                 dstOpnd->SetValueType(ValueType::String);
                 srcOpnd->SetValueType(ValueType::String);
@@ -3572,11 +3665,11 @@ IR::Instr* IR::Instr::NewConstantLoad(IR::RegOpnd* dstOpnd, intptr_t varConst, V
                     dstOpnd->m_sym->SetIsFloatConst();
 
 #if FLOATVAR
-                    dstOpnd->m_sym->m_isNotInt = FALSE;
+                    dstOpnd->m_sym->m_isNotNumber = FALSE;
 #else
-                    // Don't set m_isNotInt to true if the float constant value is an int32 or uint32. Uint32s may sometimes be
+                    // Don't set m_isNotNumber to true if the float constant value is an int32 or uint32. Uint32s may sometimes be
                     // treated as int32s for the purposes of int specialization.
-                    dstOpnd->m_sym->m_isNotInt = !Js::JavascriptNumber::IsInt32OrUInt32(((IR::FloatConstOpnd*)srcOpnd)->m_value);
+                    dstOpnd->m_sym->m_isNotNumber = !Js::JavascriptNumber::IsInt32OrUInt32(((IR::FloatConstOpnd*)srcOpnd)->m_value);
 
 
 #endif
@@ -3614,7 +3707,7 @@ bool Instr::UsesAllFields()
 BranchInstr *
 Instr::ChangeCmCCToBranchInstr(LabelInstr *targetInstr)
 {
-    Js::OpCode newOpcode;
+    Js::OpCode newOpcode = Js::OpCode::InvalidOpCode;
     switch (this->m_opcode)
     {
     case Js::OpCode::CmEq_A:
@@ -3714,28 +3807,101 @@ bool Instr::IsCmCC_I4()
     return (this->m_opcode >= Js::OpCode::CmEq_I4 && this->m_opcode <= Js::OpCode::CmUnGe_I4);
 }
 
-bool Instr::BinaryCalculator(IntConstType src1Const, IntConstType src2Const, IntConstType *pResult)
+bool Instr::IsNeq()
+{
+    switch (m_opcode)
+    {
+    case Js::OpCode::BrNeq_A:
+    case Js::OpCode::BrNeq_I4:
+    case Js::OpCode::BrNotEq_A:
+    case Js::OpCode::BrSrNeq_A:
+    case Js::OpCode::BrSrNotEq_A:
+    case Js::OpCode::CmNeq_A:
+    case Js::OpCode::CmNeq_I4:
+    case Js::OpCode::CmSrNeq_A:
+        return true;
+    default:
+        return false;
+    }
+}
+
+template <typename T>
+bool Instr::BinaryCalculatorT(T src1Const, T src2Const, int64 *pResult, bool checkWouldTrap)
+{
+    T value = 0;
+    switch (this->m_opcode)
+    {
+#define DO_HANDLER(HANDLER, type) HANDLER(type##src1Const, type##src2Const)
+#define BINARY_CASE_CHECK(OPCODE,HANDLER,CHECK_HANDLER,type) \
+    case Js::OpCode::##OPCODE: \
+        if (checkWouldTrap && DO_HANDLER(CHECK_HANDLER,type)) { return false; } \
+        value = DO_HANDLER(HANDLER,type); \
+        break;
+#define BINARY_CASE(OPCODE,HANDLER,type) \
+    case Js::OpCode::##OPCODE: \
+        value = DO_HANDLER(HANDLER,type); \
+        break;
+#define BINARY_U(OPCODE,HANDLER) BINARY_CASE(OPCODE,HANDLER,(typename SignedTypeTraits<T>::UnsignedType))
+#define BINARY(OPCODE,HANDLER)  BINARY_CASE(OPCODE,HANDLER,)
+
+        BINARY(CmEq_I4, Js::AsmJsMath::CmpEq)
+        BINARY(CmNeq_I4, Js::AsmJsMath::CmpNe)
+        BINARY(CmLt_I4, Js::AsmJsMath::CmpLt)
+        BINARY(CmGt_I4, Js::AsmJsMath::CmpGt)
+        BINARY(CmLe_I4, Js::AsmJsMath::CmpLe)
+        BINARY(CmGe_I4, Js::AsmJsMath::CmpGe)
+        BINARY_U(CmUnLt_I4, Js::AsmJsMath::CmpLt)
+        BINARY_U(CmUnGt_I4, Js::AsmJsMath::CmpGt)
+        BINARY_U(CmUnLe_I4, Js::AsmJsMath::CmpLe)
+        BINARY_U(CmUnGe_I4, Js::AsmJsMath::CmpGe)
+        BINARY(Add_I4, Js::AsmJsMath::Add)
+        BINARY(Sub_I4, Js::AsmJsMath::Sub)
+        BINARY(Mul_I4, Js::AsmJsMath::Mul)
+        BINARY(And_I4, Js::AsmJsMath::And)
+        BINARY(Or_I4, Js::AsmJsMath::Or)
+        BINARY(Xor_I4, Js::AsmJsMath::Xor)
+        BINARY(Shl_I4, Wasm::WasmMath::Shl)
+        BINARY(Shr_I4, Wasm::WasmMath::Shr)
+        BINARY_U(ShrU_I4, Wasm::WasmMath::ShrU)
+        BINARY_CASE_CHECK(DivU_I4, Js::AsmJsMath::DivChecked, Js::AsmJsMath::DivWouldTrap, (typename SignedTypeTraits<T>::UnsignedType))
+        BINARY_CASE_CHECK(Div_I4, Js::AsmJsMath::DivChecked, Js::AsmJsMath::DivWouldTrap, )
+        BINARY_CASE_CHECK(RemU_I4, Js::AsmJsMath::RemChecked, Js::AsmJsMath::RemWouldTrap, (typename SignedTypeTraits<T>::UnsignedType))
+        BINARY_CASE_CHECK(Rem_I4, Js::AsmJsMath::RemChecked, Js::AsmJsMath::RemWouldTrap, )
+        default:
+            return false;
+#undef BINARY
+#undef BINARY_U
+    }
+
+    *pResult = value;
+    return true;
+}
+
+template bool Instr::BinaryCalculatorT<int>(int src1Const64, int src2Const64, int64 *pResult, bool checkWouldTrap);
+template bool Instr::BinaryCalculatorT<int64>(int64 src1Const64, int64 src2Const64, int64 *pResult, bool checkWouldTrap);
+
+bool Instr::BinaryCalculator(IntConstType src1Const, IntConstType src2Const, IntConstType *pResult, IRType type)
 {
     IntConstType value = 0;
 
     switch (this->m_opcode)
     {
     case Js::OpCode::Add_A:
-        if (IntConstMath::Add(src1Const, src2Const, &value))
+        if (IntConstMath::Add(src1Const, src2Const, type, &value))
         {
             return false;
         }
         break;
 
     case Js::OpCode::Sub_A:
-        if (IntConstMath::Sub(src1Const, src2Const, &value))
+        if (IntConstMath::Sub(src1Const, src2Const, type, &value))
         {
             return false;
         }
         break;
 
     case Js::OpCode::Mul_A:
-        if (IntConstMath::Mul(src1Const, src2Const, &value))
+        if (IntConstMath::Mul(src1Const, src2Const, type, &value))
         {
             return false;
         }
@@ -3759,7 +3925,7 @@ bool Instr::BinaryCalculator(IntConstType src1Const, IntConstType src2Const, Int
             // folds to -0. Bail for now...
             return false;
         }
-        if (IntConstMath::Div(src1Const, src2Const, &value))
+        if (IntConstMath::Div(src1Const, src2Const, type, &value))
         {
             return false;
         }
@@ -3777,7 +3943,7 @@ bool Instr::BinaryCalculator(IntConstType src1Const, IntConstType src2Const, Int
             // Bail for now...
             return false;
         }
-        if (IntConstMath::Mod(src1Const, src2Const, &value))
+        if (IntConstMath::Mod(src1Const, src2Const, type, &value))
         {
             return false;
         }
@@ -3791,17 +3957,15 @@ bool Instr::BinaryCalculator(IntConstType src1Const, IntConstType src2Const, Int
 
     case Js::OpCode::Shl_A:
         // We don't care about overflow here
-        IntConstMath::Shl(src1Const, src2Const & 0x1F, &value);
+        value = src1Const << (src2Const & 0x1F);
         break;
 
     case Js::OpCode::Shr_A:
-        // We don't care about overflow here, and there shouldn't be any
-        IntConstMath::Shr(src1Const, src2Const & 0x1F, &value);
+        value = src1Const >> (src2Const & 0x1F);
         break;
 
     case Js::OpCode::ShrU_A:
-        // We don't care about overflow here, and there shouldn't be any
-        IntConstMath::ShrU(src1Const, src2Const & 0x1F, &value);
+        value = ((UIntConstType)src1Const) >> (src2Const & 0x1F);
         if (value < 0)
         {
             // ShrU produces a UInt32.  If it doesn't fit in an Int32, bail as we don't
@@ -3811,18 +3975,15 @@ bool Instr::BinaryCalculator(IntConstType src1Const, IntConstType src2Const, Int
         break;
 
     case Js::OpCode::And_A:
-        // We don't care about overflow here, and there shouldn't be any
-        IntConstMath::And(src1Const, src2Const, &value);
+        value = src1Const & src2Const;
         break;
 
     case Js::OpCode::Or_A:
-        // We don't care about overflow here, and there shouldn't be any
-        IntConstMath::Or(src1Const, src2Const, &value);
+        value = src1Const | src2Const;
         break;
 
     case Js::OpCode::Xor_A:
-        // We don't care about overflow here, and there shouldn't be any
-        IntConstMath::Xor(src1Const, src2Const, &value);
+        value = src1Const ^ src2Const;
         break;
 
     case Js::OpCode::InlineMathMin:
@@ -3842,7 +4003,7 @@ bool Instr::BinaryCalculator(IntConstType src1Const, IntConstType src2Const, Int
     return true;
 }
 
-bool Instr::UnaryCalculator(IntConstType src1Const, IntConstType *pResult)
+bool Instr::UnaryCalculator(IntConstType src1Const, IntConstType *pResult, IRType type)
 {
     IntConstType value = 0;
 
@@ -3855,14 +4016,14 @@ bool Instr::UnaryCalculator(IntConstType src1Const, IntConstType *pResult)
             return false;
         }
 
-        if (IntConstMath::Neg(src1Const, &value))
+        if (IntConstMath::Neg(src1Const, type, &value))
         {
             return false;
         }
         break;
 
     case Js::OpCode::Not_A:
-        IntConstMath::Not(src1Const, &value);
+        value = ~src1Const;
         break;
 
     case Js::OpCode::Ld_A:
@@ -3880,14 +4041,14 @@ bool Instr::UnaryCalculator(IntConstType src1Const, IntConstType *pResult)
         break;
 
     case Js::OpCode::Incr_A:
-        if (IntConstMath::Inc(src1Const, &value))
+        if (IntConstMath::Inc(src1Const, type, &value))
         {
             return false;
         }
         break;
 
     case Js::OpCode::Decr_A:
-        if (IntConstMath::Dec(src1Const, &value))
+        if (IntConstMath::Dec(src1Const, type, &value))
         {
             return false;
         }
@@ -4116,7 +4277,7 @@ Instr::DumpByteCodeOffset()
 void
 Instr::DumpGlobOptInstrString()
 {
-    if(this->globOptInstrString)
+    if(this->globOptInstrString && !PHASE_OFF(Js::DumpGlobOptInstrPhase, m_func))
     {
         Output::Print(_u("\n\n GLOBOPT INSTR: %s\n\n"), this->globOptInstrString);
     }
@@ -4139,7 +4300,20 @@ Instr::Dump(IRDumpFlags flags)
 
     const auto PrintOpCodeName = [&]() {
         Output::SkipToColumn(23);
+#if DBG
+        WORD oldValue = 0;
+        if (this->highlight != 0)
+        {
+            oldValue = Output::SetConsoleForeground(this->highlight);
+        }
+#endif
         Output::Print(_u("%s "), Js::OpCodeUtil::GetOpCodeName(m_opcode));
+#if DBG
+        if (this->highlight != 0)
+        {
+            Output::SetConsoleForeground(oldValue);
+        }
+#endif
         Output::SkipToColumn(38);
     };
 
@@ -4423,7 +4597,16 @@ LabelInstr::Dump(IRDumpFlags flags)
     {
         this->m_block->DumpHeader();
     }
-    Output::Print(_u("$L%d:"), this->m_id);
+#if DBG
+    if (this->m_name != nullptr)
+    {
+        Output::Print(_u("$L%d (%s):"), this->m_id, this->m_name);
+    }
+    else
+#endif
+    {
+        Output::Print(_u("$L%d:"), this->m_id);
+    }
     if (this->isOpHelper)
     {
         Output::Print(_u(" [helper]"));
@@ -4466,7 +4649,7 @@ PragmaInstr::Dump(IRDumpFlags flags)
         {
             functionBody = ((Js::FunctionBody*)m_func->GetJITFunctionBody()->GetAddr());
         }
-        if (functionBody)
+        if (functionBody && !functionBody->GetUtf8SourceInfo()->GetIsLibraryCode())
         {
             functionBody->PrintStatementSourceLine(this->m_statementIndex);
         }

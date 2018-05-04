@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <regress-exe>
   <test>
     <default>
@@ -10,14 +10,50 @@
   <test>
     <default>
       <files>unicode_digit_as_identifier_should_work.js</files>
-      <baseline />
-      <tags>exclude_serialized,bugfix</tags>
+      <tags>exclude_serialized,exclude_noicu</tags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>OS_2977448.js</files>
+      <tags>require_winglob</tags>
     </default>
   </test>
   <test>
     <default>
       <files>surrogatepair.js</files>
-      <baseline />
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>bugGH2386.js</files>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>unicode_sequence_serialized.js</files>
+      <compile-flags>-forceserialized -oopjit-</compile-flags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>bugGH2656.js</files>
+      <compile-flags>-args summary -endargs</compile-flags>
+      <tags>require_winglob,exclude_noicu</tags> <!-- Microsoft/ChakraCore#3777: Fix this test under ICU -->
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>utf8_console_log.js</files>
+      <baseline>utf8_console_log.baseline</baseline>
+      <tags>exclude_jshost</tags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>utf8_console_log_null_embedded.js</files>
+      <baseline>utf8_console_log_null_embedded.baseline</baseline>
+      <tags>exclude_jshost</tags>
     </default>
   </test>
 </regress-exe>

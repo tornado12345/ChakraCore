@@ -6,70 +6,85 @@
 
 namespace Js
 {
-    struct PropertyCache
+class PropertyString : public JavascriptString
+{
+protected:
+    Field(PropertyRecordUsageCache) propertyRecordUsageCache;
+
+    DEFINE_VTABLE_CTOR(PropertyString, JavascriptString);
+
+    PropertyString(StaticType* type, const Js::PropertyRecord* propertyRecord);
+public:
+    virtual void GetPropertyRecord(_Out_ PropertyRecord const** propertyRecord, bool dontLookupFromDictionary = false) override
     {
-        Type * type;
-        union
-        {
-            struct
-            {
-                uint16 preventdataSlotIndexFalseRef;
-                uint16 dataSlotIndex;
-            };
-            intptr_t ptrSlot1;
-        };
-        union
-        {
-            struct
-            {
-                uint16 preventFlagsFalseRef;
-                bool isInlineSlot;
-                bool isStoreFieldEnabled;
-            };
-            intptr_t ptrSlot2;
-        };
-        intptr_t blank;
-    };
+        *propertyRecord = this->propertyRecordUsageCache.GetPropertyRecord();
+    }
 
-    CompileAssert(sizeof(PropertyCache) == sizeof(InlineCacheAllocator::CacheLayout));
-    CompileAssert(offsetof(PropertyCache, blank) == offsetof(InlineCacheAllocator::CacheLayout, strongRef));
-
-    class PropertyString : public JavascriptString
+    Js::PropertyId GetPropertyId()
     {
-    protected:
-        PropertyCache* propCache;
-        const Js::PropertyRecord* m_propertyRecord;
-        DEFINE_VTABLE_CTOR(PropertyString, JavascriptString);
-        DECLARE_CONCRETE_STRING_CLASS;
+        return this->propertyRecordUsageCache.GetPropertyRecord()->GetPropertyId();
+    }
 
-        PropertyString(StaticType* type, const Js::PropertyRecord* propertyRecord);
-    public:
-        PropertyCache const * GetPropertyCache() const;
-        void ClearPropertyCache();
-        Js::PropertyRecord const * GetPropertyRecord() const { return m_propertyRecord; }
-        static PropertyString* New(StaticType* type, const Js::PropertyRecord* propertyRecord, Recycler *recycler);
-        static PropertyString* New(StaticType* type, const Js::PropertyRecord* propertyRecord, ArenaAllocator *arena);
-        void UpdateCache(Type * type, uint16 dataSlotIndex, bool isInlineSlot, bool isStoreFieldEnabled);
-        void ClearCache() { propCache->type = nullptr; }
+    PolymorphicInlineCache * GetLdElemInlineCache() const;
+    PolymorphicInlineCache * GetStElemInlineCache() const;
+    PropertyRecordUsageCache * GetPropertyRecordUsageCache();
 
-        virtual void const * GetOriginalStringReference() override;
-        virtual RecyclableObject * CloneToScriptContext(ScriptContext* requestContext) override;
-        virtual bool IsArenaAllocPropertyString() { return false; }
+    bool TrySetPropertyFromCache(
+        _In_ RecyclableObject *const object,
+        _In_ Var propertyValue,
+        _In_ ScriptContext *const requestContext,
+        const PropertyOperationFlags propertyOperationFlags,
+        _Inout_ PropertyValueInfo *const propertyValueInfo);
 
-        static uint32 GetOffsetOfPropertyCache() { return offsetof(PropertyString, propCache); }
+
+    template <
+        bool OwnPropertyOnly,
+        bool OutputExistence /*When set, propertyValue represents whether the property exists on the instance, not its actual value*/>
+    bool TryGetPropertyFromCache(
+        Var const instance,
+        RecyclableObject *const object,
+        Var *const propertyValue,
+        ScriptContext *const requestContext,
+        PropertyValueInfo *const propertyValueInfo)
+    {
+        return this->propertyRecordUsageCache.TryGetPropertyFromCache<OwnPropertyOnly, OutputExistence, false /* ReturnOperationInfo */>(instance, object, propertyValue, requestContext, propertyValueInfo, this, nullptr);
+    }
+
+    static PropertyString* New(StaticType* type, const Js::PropertyRecord* propertyRecord, Recycler *recycler);
+
+    virtual void const * GetOriginalStringReference() override;
+    virtual RecyclableObject * CloneToScriptContext(ScriptContext* requestContext) override;
+
+    static uint32 GetOffsetOfLdElemInlineCache() { return offsetof(PropertyString, propertyRecordUsageCache) + PropertyRecordUsageCache::GetOffsetOfLdElemInlineCache(); }
+    static uint32 GetOffsetOfStElemInlineCache() { return offsetof(PropertyString, propertyRecordUsageCache) + PropertyRecordUsageCache::GetOffsetOfStElemInlineCache(); }
+    static uint32 GetOffsetOfHitRate() { return offsetof(PropertyString, propertyRecordUsageCache) + PropertyRecordUsageCache::GetOffsetOfHitRate(); }
+    static bool Is(Var var);
+    static bool Is(RecyclableObject * var);
+
+    template <typename T> static PropertyString* TryFromVar(T var);
+    static PropertyString* UnsafeFromVar(Var aValue);
 
 #if ENABLE_TTD
-        //Get the associated property id for this string if there is on (e.g. it is a propertystring otherwise return Js::PropertyIds::_none)
-        virtual Js::PropertyId TryGetAssociatedPropertyId() const override { return this->m_propertyRecord->GetPropertyId(); }
+    //Get the associated property id for this string if there is on (e.g. it is a propertystring otherwise return Js::PropertyIds::_none)
+    virtual Js::PropertyId TryGetAssociatedPropertyId() const override { return this->propertyRecordUsageCache.GetPropertyRecord()->GetPropertyId(); }
 #endif
-    };
-
-    class ArenaAllocPropertyString sealed : public PropertyString
+public:
+    virtual VTableValue DummyVirtualFunctionToHinderLinkerICF()
     {
-        friend PropertyString;
-    protected:
-        ArenaAllocPropertyString(StaticType* type, const Js::PropertyRecord* propertyRecord);
-    public:
-        virtual bool IsArenaAllocPropertyString() override { return true; }
-    };
+        return VTableValue::VtablePropertyString;
+    }
+};
+
+// Templated so that the Is call dispatchs to different function depending
+// on if argument is already a RecyclableObject* or only known to be a Var
+//
+// In case it is known to be a RecyclableObject*, the Is call skips that check
+template <typename T> inline
+PropertyString * PropertyString::TryFromVar(T var)
+{
+    return PropertyString::Is(var)
+        ? reinterpret_cast<PropertyString*>(var)
+        : nullptr;
 }
+
+} // namespace Js

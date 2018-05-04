@@ -139,6 +139,8 @@ void ThreadBoundThreadContextManager::DestroyAllContexts()
         entries.Remove(currentEntry);
         ThreadContextTLSEntry::CleanupThread();
 
+        BGParseManager::DeleteBGParseManager();
+
 #if ENABLE_BACKGROUND_JOB_PROCESSOR
         if (s_sharedJobProcessor != NULL)
         {
@@ -158,9 +160,13 @@ void ThreadBoundThreadContextManager::DestroyAllContexts()
 #endif
 }
 
-void ThreadBoundThreadContextManager::DestroyAllContextsAndEntries()
+void ThreadBoundThreadContextManager::DestroyAllContextsAndEntries(bool shouldDeleteCurrentTlsEntry)
 {
     AutoCriticalSection lock(ThreadContext::GetCriticalSection());
+
+    // When shouldDeleteCurrentTlsEntry is true, the comparison in the while loop will always be true, so
+    // every entry in the list will be deleted.
+    ThreadContextTLSEntry* currentThreadEntry = shouldDeleteCurrentTlsEntry ? nullptr : ThreadContextTLSEntry::GetEntryForCurrentThread();
 
     while (!entries.Empty())
     {
@@ -184,8 +190,15 @@ void ThreadBoundThreadContextManager::DestroyAllContextsAndEntries()
             HeapDelete(threadContext);
         }
 
-        ThreadContextTLSEntry::Delete(entry);
+        if (currentThreadEntry != entry)
+        {
+            // Note: This deletes the ThreadContextTLSEntry but does not remove its pointer
+            // from the thread's TLS
+            ThreadContextTLSEntry::Delete(entry);
+        }
     }
+
+    BGParseManager::DeleteBGParseManager();
 
 #if ENABLE_BACKGROUND_JOB_PROCESSOR
     if (s_sharedJobProcessor != NULL)
@@ -223,10 +236,19 @@ JsUtil::JobProcessor * ThreadBoundThreadContextManager::GetSharedJobProcessor()
 
 void RentalThreadContextManager::DestroyThreadContext(ThreadContext* threadContext)
 {
-    ShutdownThreadContext(threadContext);
+    bool deleteThreadContext = true;
+
+#ifdef CHAKRA_STATIC_LIBRARY
+    // xplat-todo: Cleanup staticlib shutdown. Deleting contexts / finalizers having
+    // trouble with current runtime/context.
+    deleteThreadContext = false;
+#endif
+
+    ShutdownThreadContext(threadContext, deleteThreadContext);
 }
 
-void ThreadContextManagerBase::ShutdownThreadContext(ThreadContext* threadContext)
+void ThreadContextManagerBase::ShutdownThreadContext(
+    ThreadContext* threadContext, bool deleteThreadContext /*= true*/)
 {
 
 #if DBG
@@ -238,5 +260,8 @@ void ThreadContextManagerBase::ShutdownThreadContext(ThreadContext* threadContex
 #endif
     threadContext->ShutdownThreads();
 
-    HeapDelete(threadContext);
+    if (deleteThreadContext)
+    {
+        HeapDelete(threadContext);
+    }
 }

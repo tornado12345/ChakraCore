@@ -1,4 +1,4 @@
-﻿//-------------------------------------------------------------------------------------------------------
+//-------------------------------------------------------------------------------------------------------
 // Copyright (C) Microsoft. All rights reserved.
 // Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.
 //-------------------------------------------------------------------------------------------------------
@@ -85,7 +85,7 @@ namespace Js
 
             if (TaggedInt::Is(arg))
             {
-#if defined(_M_X64_OR_ARM64)
+#if defined(TARGET_64)
                 __int64 result = ::_abs64(TaggedInt::ToInt32(arg));
 #else
                 __int32 result = ::abs(TaggedInt::ToInt32(arg));
@@ -702,6 +702,7 @@ namespace Js
         ARGUMENTS(args, callInfo);
         AssertMsg(args.Info.Count > 0, "Should always have implicit 'this'");
         ScriptContext* scriptContext = function->GetScriptContext();
+        bool hasOnlyIntegerArgs = false;
 
         Assert(!(callInfo.Flags & CallFlags_New));
 
@@ -714,14 +715,31 @@ namespace Js
             double result = JavascriptConversion::ToNumber(args[1], scriptContext);
             return JavascriptNumber::ToVarNoCheck(result, scriptContext);
         }
-        else if (args.Info.Count == 3)
+        else
         {
-            if (TaggedInt::Is(args[1]) && TaggedInt::Is(args[2]))
+            hasOnlyIntegerArgs = TaggedInt::OnlyContainsTaggedInt(args);
+            if (hasOnlyIntegerArgs && args.Info.Count == 3)
             {
                 return TaggedInt::ToVarUnchecked(max(TaggedInt::ToInt32(args[1]), TaggedInt::ToInt32(args[2])));
             }
         }
 
+        if (hasOnlyIntegerArgs)
+        {
+            int32 current = TaggedInt::ToInt32(args[1]);
+            for (uint idxArg = 2; idxArg < args.Info.Count; idxArg++)
+            {
+                int32 compare = TaggedInt::ToInt32(args[idxArg]);
+                if (current < compare)
+                {
+                    current = compare;
+                }
+            }
+
+            return TaggedInt::ToVarUnchecked(current);
+        }
+        else
+        {
         double current = JavascriptConversion::ToNumber(args[1], scriptContext);
         if(JavascriptNumber::IsNan(current))
         {
@@ -735,7 +753,10 @@ namespace Js
             {
                 return scriptContext->GetLibrary()->GetNaN();
             }
-            if((JavascriptNumber::IsNegZero(current) && compare == 0) ||
+
+                // In C++, -0.0f == 0.0f; however, in ES, -0.0f < 0.0f. Thus, use additional library 
+                // call to test this comparison.
+                if ((compare == 0 && JavascriptNumber::IsNegZero(current)) ||
                 current < compare )
             {
                 current = compare;
@@ -743,6 +764,7 @@ namespace Js
         }
 
         return JavascriptNumber::ToVarNoCheck(current, scriptContext);
+    }
     }
 
 
@@ -760,6 +782,7 @@ namespace Js
         ARGUMENTS(args, callInfo);
         AssertMsg(args.Info.Count > 0, "Should always have implicit 'this'");
         ScriptContext* scriptContext = function->GetScriptContext();
+        bool hasOnlyIntegerArgs = false;
 
         Assert(!(callInfo.Flags & CallFlags_New));
 
@@ -772,14 +795,31 @@ namespace Js
             double result = JavascriptConversion::ToNumber(args[1], scriptContext);
             return JavascriptNumber::ToVarNoCheck(result, scriptContext);
         }
-        else if (args.Info.Count == 3)
+        else
         {
-            if (TaggedInt::Is(args[1]) && TaggedInt::Is(args[2]))
+            hasOnlyIntegerArgs = TaggedInt::OnlyContainsTaggedInt(args);
+            if (hasOnlyIntegerArgs && args.Info.Count == 3)
             {
                 return TaggedInt::ToVarUnchecked(min(TaggedInt::ToInt32(args[1]), TaggedInt::ToInt32(args[2])));
             }
         }
 
+        if (hasOnlyIntegerArgs)
+        {
+            int32 current = TaggedInt::ToInt32(args[1]);
+            for (uint idxArg = 2; idxArg < args.Info.Count; idxArg++)
+            {
+                int32 compare = TaggedInt::ToInt32(args[idxArg]);
+                if (current > compare)
+                {
+                    current = compare;
+                }
+            }
+
+            return TaggedInt::ToVarUnchecked(current);
+        }
+        else
+        {
         double current = JavascriptConversion::ToNumber(args[1], scriptContext);
         if(JavascriptNumber::IsNan(current))
         {
@@ -793,7 +833,10 @@ namespace Js
             {
                 return scriptContext->GetLibrary()->GetNaN();
             }
-            if((JavascriptNumber::IsNegZero(compare) && current == 0) ||
+
+                // In C++, -0.0f == 0.0f; however, in ES, -0.0f < 0.0f. Thus, use additional library 
+                // call to test this comparison.
+                if ((current == 0 && JavascriptNumber::IsNegZero(compare)) ||
                 current > compare )
             {
                 current = compare;
@@ -801,6 +844,7 @@ namespace Js
         }
 
         return JavascriptNumber::ToVarNoCheck(current, scriptContext);
+    }
     }
 
 
@@ -1105,7 +1149,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Log10Count);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_log10);
 
         if (args.Info.Count >= 2)
         {
@@ -1159,7 +1203,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Log2Count);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_log2);
 
         if (args.Info.Count >= 2)
         {
@@ -1200,7 +1244,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Log1pCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_log1p);
 
         if (args.Info.Count >= 2)
         {
@@ -1237,7 +1281,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Expm1Count);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_expm1);
 
         if (args.Info.Count >= 2)
         {
@@ -1274,7 +1318,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(CoshCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_cosh);
 
         if (args.Info.Count >= 2)
         {
@@ -1303,7 +1347,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(SinhCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_sinh);
 
         if (args.Info.Count >= 2)
         {
@@ -1332,7 +1376,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(TanhCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_tanh);
 
         if (args.Info.Count >= 2)
         {
@@ -1361,7 +1405,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(AcoshCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_acosh);
 
         if (args.Info.Count >= 2)
         {
@@ -1412,7 +1456,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(AsinhCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_asinh);
 
         if (args.Info.Count >= 2)
         {
@@ -1459,7 +1503,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(AtanhCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_atanh);
 
         if (args.Info.Count >= 2)
         {
@@ -1516,13 +1560,13 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(HypotCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_hypot);
 
         // ES6 20.2.2.18 Math.hypot(value1, value2, ...values)
         // If no arguments are passed, the result is +0.
-        // If any argument is +∞, the result is +∞.
-        // If any argument is -∞, the result is +∞.
-        // If no argument is +∞ or -∞, and any argument is NaN, the result is NaN.
+        // If any argument is +Infinity, the result is +Infinity.
+        // If any argument is -Infinity, the result is +Infinity.
+        // If no argument is +Infinity or -Infinity, and any argument is NaN, the result is NaN.
         // If all arguments are either +0 or -0, the result is +0.
 
         double result = JavascriptNumber::k_Zero; // If there are no arguments return value is positive zero.
@@ -1591,7 +1635,7 @@ namespace Js
             {
                 if (JavascriptNumber::IsNan(doubleVal))
                 {
-                    //Even though we found NaN, we still need to validate none of the other arguments are +∞ or -∞
+                    //Even though we found NaN, we still need to validate none of the other arguments are +Infinity or -Infinity
                     foundNaN = true;
                 }
                 else
@@ -1632,7 +1676,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(TruncCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_trunc);
 
         if (args.Info.Count >= 2)
         {
@@ -1669,7 +1713,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(SignCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_sign);
 
         if (args.Info.Count >= 2)
         {
@@ -1707,7 +1751,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(CbrtCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_cbrt);
 
         if (args.Info.Count >= 2)
         {
@@ -1759,7 +1803,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(ImulCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_imul);
 
         if (args.Info.Count >= 3)
         {
@@ -1792,7 +1836,7 @@ namespace Js
         Var value = args.Info.Count > 1 ? args[1] : scriptContext->GetLibrary()->GetUndefined();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Clz32Count);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_clz32);
 
         uint32 uint32value = JavascriptConversion::ToUInt32(value, scriptContext);
         DWORD index;
@@ -1813,7 +1857,7 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
 
         Assert(!(callInfo.Flags & CallFlags_New));
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(FroundCount);
+        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(Math_Constructor_fround);
 
         if (args.Info.Count >= 2)
         {

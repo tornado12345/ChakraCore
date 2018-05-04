@@ -37,6 +37,8 @@
       </AdditionalIncludeDirectories>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>JsrtPch.h</PrecompiledHeaderFile>
+      <!-- # Check out https://osgwiki.com/wiki/Dev_14_Migration for more details about -Zc:implicitNoexcept- -->
+      <AdditionalOptions>-Zc:implicitNoexcept- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -59,6 +61,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="ChakraCommon.h" />
+    <ClInclude Include="ChakraCommonWindows.h" />
     <ClInclude Include="ChakraCore.h" />
     <ClInclude Include="ChakraDebug.h" />
     <ClInclude Include="JsrtContext.h" />

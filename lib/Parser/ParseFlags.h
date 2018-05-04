@@ -4,23 +4,19 @@
 //-------------------------------------------------------------------------------------------------------
 #pragma once
 
-
 // Parse flags
 enum
 {
     fscrNil = 0,
-    fscrHtmlComments = 1 << 0,   // throw away html style comments
+    // Unused = 1 << 0,
     fscrReturnExpression = 1 << 1,   // call should return the last expression
     fscrImplicitThis = 1 << 2,   // 'this.' is optional (for Call)
-    fscrImplicitParents = 1 << 3,   // the parents of 'this' are implicit
-    fscrMapQuote = 1 << 4,   // map single quote to double quote
+    // Unused = 1 << 3,
+    // Unused = 1 << 4,
     fscrDynamicCode = 1 << 5,   // The code is being generated dynamically (eval, new Function, etc.)
-    fscrSyntaxColor = 1 << 6,   // used by the scanner for syntax coloring
+    // Unused = 1 << 6,
     fscrNoImplicitHandlers = 1 << 7,   // same as Opt NoConnect at start of block
-
-                                       // prevents the need to make a copy to strip off trailing html comments
-                                       // - modifies the behavior of fscrHtmlComments
-    fscrDoNotHandleTrailingHtmlComments = 1 << 8,
+    // Unused = 1 << 8,
 
 #if DEBUG
     fscrEnforceJSON = 1 << 9,  // used together with fscrReturnExpression
@@ -38,7 +34,7 @@ enum
     fscrAllowFunctionProxy = 1 << 17,  // Allow creation of function proxies instead of function bodies
     fscrIsLibraryCode = 1 << 18,  // Current code is engine library code written in Javascript
     fscrNoDeferParse = 1 << 19,  // Do not defer parsing
-    // Unused = 1 << 20,
+    fscrJsBuiltIn = 1 << 20, // Current code is a JS built in code written in JavaScript
 #ifdef IR_VIEWER
     fscrIrDumpEnable = 1 << 21,  // Allow parseIR to generate an IR dump
 #endif /* IRVIEWER */
@@ -51,6 +47,7 @@ enum
                                      //  let/const in global scope instead of eval scope so that they can be preserved across console inputs
     fscrNoAsmJs = 1 << 25, // Disable generation of asm.js code
     fscrIsModuleCode = 1 << 26, // Current code should be parsed as a module body
-    fscrAll = (1 << 27) - 1
-};
 
+    fscrDeferredFncIsMethod = 1 << 27,
+    fscrAll = (1 << 28) - 1
+};

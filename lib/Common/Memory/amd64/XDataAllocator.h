@@ -18,6 +18,9 @@ namespace Memory
 struct XDataAllocation : public SecondaryAllocation
 {
     XDataAllocation()
+#ifdef _WIN32
+        :functionTable(nullptr)
+#endif
     {}
 
     bool IsFreed() const
@@ -62,12 +65,10 @@ private:
     uint  size;
 
     XDataAllocationEntry* freeList;
-    HANDLE processHandle;
 
 // --------- Public functions ---------/
 public:
-    XDataAllocator(BYTE* address, uint size, HANDLE processHandle);
-
+    XDataAllocator(BYTE* address, uint size);
     virtual ~XDataAllocator();
 
     bool Initialize(void* segmentStart, void* segmentEnd);
@@ -99,5 +100,4 @@ private:
 
     void ClearFreeList();
 };
-
 }

@@ -6,6 +6,8 @@
 
 #if ENABLE_TTD
 
+#define PATH_BUFFER_COUNT 256
+
 namespace TTD
 {
     InflateMap::InflateMap()
@@ -13,6 +15,7 @@ namespace TTD
         m_tagToGlobalObjectMap(), m_objectMap(),
         m_functionBodyMap(), m_environmentMap(), m_slotArrayMap(), m_promiseDataMap(&HeapAllocator::Instance),
         m_debuggerScopeHomeBodyMap(), m_debuggerScopeChainIndexMap(),
+        m_inflatePinSet(), m_environmentPinSet(), m_oldInflatePinSet(),
         m_oldObjectMap(), m_oldFunctionBodyMap(), m_propertyReset(&HeapAllocator::Instance)
     {
         ;
@@ -80,7 +83,7 @@ namespace TTD
         this->m_oldFunctionBodyMap.MoveDataInto(this->m_functionBodyMap);
 
         //allocate the old pin set and fill it
-        AssertMsg(this->m_oldInflatePinSet == nullptr, "Old pin set is not null.");
+        TTDAssert(this->m_oldInflatePinSet == nullptr, "Old pin set is not null.");
         Recycler* pinRecycler = this->m_inflatePinSet->GetAllocator();
         this->m_oldInflatePinSet.Root(RecyclerNew(pinRecycler, ObjectPinSet, pinRecycler, this->m_inflatePinSet->Count()), pinRecycler);
 
@@ -135,6 +138,7 @@ namespace TTD
         {
             return nullptr;
         }
+        else
         {
             return this->m_oldObjectMap.LookupKnownItem(objid);
         }
@@ -150,6 +154,11 @@ namespace TTD
         {
             return this->m_oldFunctionBodyMap.LookupKnownItem(fbodyid);
         }
+    }
+
+    Js::RecyclableObject* InflateMap::FindReusableObject_WellKnowReuseCheck(TTD_PTR_ID objid) const
+    {
+        return this->m_objectMap.LookupKnownItem(objid);
     }
 
     Js::DynamicTypeHandler* InflateMap::LookupHandler(TTD_PTR_ID handlerId) const
@@ -182,7 +191,7 @@ namespace TTD
         return this->m_environmentMap.LookupKnownItem(envid);
     }
 
-    Js::Var* InflateMap::LookupSlotArray(TTD_PTR_ID slotid) const
+    Field(Js::Var)* InflateMap::LookupSlotArray(TTD_PTR_ID slotid) const
     {
         return this->m_slotArrayMap.LookupKnownItem(slotid);
     }
@@ -229,7 +238,7 @@ namespace TTD
         this->m_environmentPinSet->AddNew(value);
     }
 
-    void InflateMap::AddSlotArray(TTD_PTR_ID slotId, Js::Var* value)
+    void InflateMap::AddSlotArray(TTD_PTR_ID slotId, Field(Js::Var)* value)
     {
         this->m_slotArrayMap.AddItem(slotId, value);
         this->m_slotArrayPinSet->AddNew(value);
@@ -237,7 +246,7 @@ namespace TTD
 
     void InflateMap::UpdateFBScopes(const NSSnapValues::SnapFunctionBodyScopeChain& scopeChainInfo, Js::FunctionBody* fb)
     {
-        AssertMsg((int32)scopeChainInfo.ScopeCount == (fb->GetScopeObjectChain() != nullptr ? fb->GetScopeObjectChain()->pScopeChain->Count() : 0), "Mismatch in scope counts!!!");
+        TTDAssert((int32)scopeChainInfo.ScopeCount == (fb->GetScopeObjectChain() != nullptr ? fb->GetScopeObjectChain()->pScopeChain->Count() : 0), "Mismatch in scope counts!!!");
 
         if(fb->GetScopeObjectChain() != nullptr)
         {
@@ -291,18 +300,20 @@ namespace TTD
         ;
     }
 
-    void TTDComparePath::WritePathToConsole(ThreadContext* threadContext, bool printNewline, char16* namebuff) const
+    void TTDComparePath::WritePathToConsole(ThreadContext* threadContext, bool printNewline, _Out_writes_z_(buffLength) char16* namebuff, charcount_t namebuffLength) const
     {
         if(this->m_prefix != nullptr)
         {
-            this->m_prefix->WritePathToConsole(threadContext, false, namebuff);
+            this->m_prefix->WritePathToConsole(threadContext, false, namebuff, namebuffLength);
         }
 
         if(this->m_stepKind == StepKind::PropertyData || this->m_stepKind == StepKind::PropertyGetter || this->m_stepKind == StepKind::PropertySetter)
         {
             const Js::PropertyRecord* pRecord = threadContext->GetPropertyName((Js::PropertyId)this->m_step.IndexOrPID);
-            js_memcpy_s(namebuff, 256 * sizeof(char16), pRecord->GetBuffer(), pRecord->GetLength() * sizeof(char16));
-            namebuff[pRecord->GetLength()] = _u('\0');
+            js_memcpy_s(namebuff, namebuffLength * sizeof(char16), pRecord->GetBuffer(), pRecord->GetLength() * sizeof(char16));
+
+            // Don't allow the null to be written past the end of the buffer.
+            namebuff[min(namebuffLength - 1, pRecord->GetLength())] = _u('\0');
         }
 
         bool isFirst = (this->m_prefix == nullptr);
@@ -311,43 +322,43 @@ namespace TTD
         case StepKind::Empty:
             break;
         case StepKind::Root:
-            wprintf(_u("root#%I64i"), this->m_step.IndexOrPID);
+            Output::Print(_u("root#%I64i"), this->m_step.IndexOrPID);
             break;
         case StepKind::PropertyData:
-            wprintf(_u("%ls%ls"), (isFirst ? _u("") : _u(".")), namebuff);
+            Output::Print(_u("%ls%ls"), (isFirst ? _u("") : _u(".")), namebuff);
             break;
         case StepKind::PropertyGetter:
-            wprintf(_u("%ls<%ls"), (isFirst ? _u("") : _u(".")), namebuff);
+            Output::Print(_u("%ls<%ls"), (isFirst ? _u("") : _u(".")), namebuff);
             break;
         case StepKind::PropertySetter:
-            wprintf(_u("%ls>%ls"), (isFirst ? _u("") : _u(".")), namebuff);
+            Output::Print(_u("%ls>%ls"), (isFirst ? _u("") : _u(".")), namebuff);
             break;
         case StepKind::Array:
-            wprintf(_u("[%I64i]"), this->m_step.IndexOrPID);
+            Output::Print(_u("[%I64i]"), this->m_step.IndexOrPID);
             break;
         case StepKind::Scope:
-            wprintf(_u("%ls_scope[%I64i]"), (isFirst ? _u("") : _u(".")), this->m_step.IndexOrPID);
+            Output::Print(_u("%ls_scope[%I64i]"), (isFirst ? _u("") : _u(".")), this->m_step.IndexOrPID);
             break;
         case StepKind::SlotArray:
-            wprintf(_u("%ls_slots[%I64i]"), (isFirst ? _u("") : _u(".")), this->m_step.IndexOrPID);
+            Output::Print(_u("%ls_slots[%I64i]"), (isFirst ? _u("") : _u(".")), this->m_step.IndexOrPID);
             break;
         case StepKind::FunctionBody:
-            wprintf(_u("%ls%ls"), (isFirst ? _u("") : _u(".")), this->m_step.OptName);
+            Output::Print(_u("%ls%ls"), (isFirst ? _u("") : _u(".")), this->m_step.OptName);
             break;
         case StepKind::Special:
-            wprintf(_u("%ls_%ls"), (isFirst ? _u("") : _u(".")), this->m_step.OptName);
+            Output::Print(_u("%ls_%ls"), (isFirst ? _u("") : _u(".")), this->m_step.OptName);
             break;
         case StepKind::SpecialArray:
-            wprintf(_u("%ls_%ls[%I64i]"), (isFirst ? _u("") : _u(".")), this->m_step.OptName, this->m_step.IndexOrPID);
+            Output::Print(_u("%ls_%ls[%I64i]"), (isFirst ? _u("") : _u(".")), this->m_step.OptName, this->m_step.IndexOrPID);
             break;
         default:
-            AssertMsg(false, "Unknown tag in switch statement!!!");
+            TTDAssert(false, "Unknown tag in switch statement!!!");
             break;
         }
 
         if(printNewline)
         {
-            wprintf(_u("\n"));
+            Output::Print(_u("\n"));
         }
     }
 
@@ -365,7 +376,7 @@ namespace TTD
     {
         this->StrictCrossSite = !threadContext->TTDLog->IsDebugModeFlagSet();
 
-        this->PathBuffer = TT_HEAP_ALLOC_ARRAY_ZERO(char16, 256);
+        this->PathBuffer = TT_HEAP_ALLOC_ARRAY_ZERO(char16, PATH_BUFFER_COUNT);
 
         this->SnapObjCmpVTable = TT_HEAP_ALLOC_ARRAY_ZERO(fPtr_AssertSnapEquivAddtlInfo, (int32)NSSnapObjects::SnapObjectType::Limit);
 
@@ -390,11 +401,12 @@ namespace TTD
         this->SnapObjCmpVTable[(int32)NSSnapObjects::SnapObjectType::SnapPromiseObject] = &NSSnapObjects::AssertSnapEquiv_SnapPromiseInfo;
         this->SnapObjCmpVTable[(int32)NSSnapObjects::SnapObjectType::SnapPromiseResolveOrRejectFunctionObject] = &NSSnapObjects::AssertSnapEquiv_SnapPromiseResolveOrRejectFunctionInfo;
         this->SnapObjCmpVTable[(int32)NSSnapObjects::SnapObjectType::SnapPromiseReactionTaskFunctionObject] = &NSSnapObjects::AssertSnapEquiv_SnapPromiseReactionTaskFunctionInfo;
+        this->SnapObjCmpVTable[(int32)NSSnapObjects::SnapObjectType::SnapPromiseAllResolveElementFunctionObject] = &NSSnapObjects::AssertSnapEquiv_SnapPromiseAllResolveElementFunctionInfo;
     }
 
     TTDCompareMap::~TTDCompareMap()
     {
-        TT_HEAP_FREE_ARRAY(char16, this->PathBuffer, 256);
+        TT_HEAP_FREE_ARRAY(char16, this->PathBuffer, PATH_BUFFER_COUNT);
 
         TT_HEAP_FREE_ARRAY(TTD::fPtr_AssertSnapEquivAddtlInfo, this->SnapObjCmpVTable, (int32)NSSnapObjects::SnapObjectType::Limit);
 
@@ -411,13 +423,13 @@ namespace TTD
         {
             if(this->CurrentPath != nullptr)
             {
-                wprintf(_u("Snap1 ptrid: *0x%I64x\n"), this->CurrentH1Ptr);
-                wprintf(_u("Snap2 ptrid: *0x%I64x\n"), this->CurrentH2Ptr);
-                this->CurrentPath->WritePathToConsole(this->Context, true, this->PathBuffer);
+                Output::Print(_u("Snap1 ptrid: *0x%I64x\n"), this->CurrentH1Ptr);
+                Output::Print(_u("Snap2 ptrid: *0x%I64x\n"), this->CurrentH2Ptr);
+                this->CurrentPath->WritePathToConsole(this->Context, true, this->PathBuffer, PATH_BUFFER_COUNT);
             }
         }
 
-        AssertMsg(condition, "Diagnostic compare assertion failed!!!");
+        TTDAssert(condition, "Diagnostic compare assertion failed!!!");
     }
 
     void TTDCompareMap::CheckConsistentAndAddPtrIdMapping_Helper(TTD_PTR_ID h1PtrId, TTD_PTR_ID h2PtrId, TTDComparePath::StepKind stepKind, const TTDComparePath::PathEntry& next)
@@ -543,8 +555,8 @@ namespace TTD
             }
             else
             {
-                AssertMsg(!this->H1ValueMap.ContainsKey(*h1PtrId), "Should be comparing by value!!!");
-                AssertMsg(false, "Id not found in any of the maps!!!");
+                TTDAssert(!this->H1ValueMap.ContainsKey(*h1PtrId), "Should be comparing by value!!!");
+                TTDAssert(false, "Id not found in any of the maps!!!");
                 *tag = TTDCompareTag::Done;
             }
         }
@@ -552,14 +564,14 @@ namespace TTD
 
     void TTDCompareMap::GetCompareValues(TTDCompareTag compareTag, TTD_PTR_ID h1PtrId, const NSSnapValues::SlotArrayInfo** val1, TTD_PTR_ID h2PtrId, const NSSnapValues::SlotArrayInfo** val2)
     {
-        AssertMsg(compareTag == TTDCompareTag::SlotArray, "Should be a type");
+        TTDAssert(compareTag == TTDCompareTag::SlotArray, "Should be a type");
         *val1 = this->H1SlotArrayMap.Item(h1PtrId);
         *val2 = this->H2SlotArrayMap.Item(h2PtrId);
     }
 
     void TTDCompareMap::GetCompareValues(TTDCompareTag compareTag, TTD_PTR_ID h1PtrId, const NSSnapValues::ScriptFunctionScopeInfo** val1, TTD_PTR_ID h2PtrId, const NSSnapValues::ScriptFunctionScopeInfo** val2)
     {
-        AssertMsg(compareTag == TTDCompareTag::FunctionScopeInfo, "Should be a type");
+        TTDAssert(compareTag == TTDCompareTag::FunctionScopeInfo, "Should be a type");
         *val1 = this->H1FunctionScopeInfoMap.Item(h1PtrId);
         *val2 = this->H2FunctionScopeInfoMap.Item(h2PtrId);
     }
@@ -578,7 +590,7 @@ namespace TTD
         }
         else
         {
-            AssertMsg(compareTag == TTDCompareTag::TopLevelEvalFunction, "Should be a type");
+            TTDAssert(compareTag == TTDCompareTag::TopLevelEvalFunction, "Should be a type");
             *val1 = this->H1FunctionTopLevelEvalMap.Item(h1PtrId);
             *val2 = this->H2FunctionTopLevelEvalMap.Item(h2PtrId);
         }
@@ -586,14 +598,14 @@ namespace TTD
 
     void TTDCompareMap::GetCompareValues(TTDCompareTag compareTag, TTD_PTR_ID h1PtrId, const NSSnapValues::FunctionBodyResolveInfo** val1, TTD_PTR_ID h2PtrId, const NSSnapValues::FunctionBodyResolveInfo** val2)
     {
-        AssertMsg(compareTag == TTDCompareTag::FunctionBody, "Should be a type");
+        TTDAssert(compareTag == TTDCompareTag::FunctionBody, "Should be a type");
         *val1 = this->H1FunctionBodyMap.Item(h1PtrId);
         *val2 = this->H2FunctionBodyMap.Item(h2PtrId);
     }
 
     void TTDCompareMap::GetCompareValues(TTDCompareTag compareTag, TTD_PTR_ID h1PtrId, const NSSnapObjects::SnapObject** val1, TTD_PTR_ID h2PtrId, const NSSnapObjects::SnapObject** val2)
     {
-        AssertMsg(compareTag == TTDCompareTag::SnapObject, "Should be a type");
+        TTDAssert(compareTag == TTDCompareTag::SnapObject, "Should be a type");
         *val1 = this->H1ObjectMap.Item(h1PtrId);
         *val2 = this->H2ObjectMap.Item(h2PtrId);
     }

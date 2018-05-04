@@ -5,6 +5,8 @@
 #pragma once
 
 #if defined(ENABLE_INTL_OBJECT) || defined(ENABLE_ES6_CHAR_CLASSIFIER)
+
+#ifdef INTL_WINGLOB
 #include "Windows.Globalization.h"
 #ifndef NTBUILD
 #include "windows.globalization.numberformatting.h"
@@ -12,12 +14,14 @@
 #include "Windows.Data.Text.h"
 #include "activation.h"
 using namespace ABI;
-#endif
+#endif // NTBUILD
+#endif // INTL_WINGLOB
 
 class ThreadContext;
 
 namespace Js
 {
+#ifdef INTL_WINGLOB
     class WindowsGlobalizationAdapter
     {
     private:
@@ -114,7 +118,14 @@ namespace Js
         HRESULT CreateIncrementNumberRounder(_In_ ScriptContext* scriptContext, Windows::Globalization::NumberFormatting::INumberRounder** numberRounder);
         HRESULT CreateSignificantDigitsRounder(_In_ ScriptContext* scriptContext, Windows::Globalization::NumberFormatting::INumberRounder** numberRounder);
         boolean ValidateAndCanonicalizeTimeZone(_In_ ScriptContext* scriptContext, _In_z_ PCWSTR timeZoneId, HSTRING* result);
-        void GetDefaultTimeZoneId(_In_ ScriptContext* scriptContext, HSTRING* result);
+        HRESULT GetDefaultTimeZoneId(_In_ ScriptContext* scriptContext, HSTRING* result);
+        HRESULT GetResolvedLanguage(_In_ Windows::Globalization::DateTimeFormatting::IDateTimeFormatter* formatter, HSTRING * locale);
+        HRESULT GetResolvedLanguage(_In_ Windows::Globalization::NumberFormatting::INumberFormatterOptions* formatter, HSTRING * locale);
+        HRESULT GetNumeralSystem(_In_ Windows::Globalization::DateTimeFormatting::IDateTimeFormatter* formatter, HSTRING * hNumeralSystem);
+        HRESULT GetNumeralSystem(_In_ Windows::Globalization::NumberFormatting::INumberFormatterOptions* formatter, HSTRING * hNumeralSystem);
+        HRESULT GetCalendar(_In_ Windows::Globalization::DateTimeFormatting::IDateTimeFormatter* formatter, HSTRING * hCalendar);
+        HRESULT GetClock(_In_ Windows::Globalization::DateTimeFormatting::IDateTimeFormatter* formatter, HSTRING * hClock);
+        HRESULT GetItemAt(_In_ Windows::Foundation::Collections::IVectorView<HSTRING>* vector, _In_ uint32 index, HSTRING * item);
         void ResetCommonFactoryObjects();
         void ResetTimeZoneFactoryObjects();
         void ResetDateTimeFormatFactoryObjects();
@@ -129,11 +140,12 @@ namespace Js
             return unicodeStatics;
         }
 #endif
-#ifdef ENABLE_INTL_OBJECT 
+#ifdef ENABLE_INTL_OBJECT
     private:
         HRESULT CreateTimeZoneOnCalendar(_In_ DelayLoadWindowsGlobalization *library, __out Windows::Globalization::ITimeZoneOnCalendar**  result);
+        static HRESULT VerifyResult(HSTRING * result, HRESULT errCode);
 #endif
     };
+#endif // INTL_WINGLOB
 }
-#endif
-
+#endif // defined(ENABLE_INTL_OBJECT) || defined(ENABLE_ES6_CHAR_CLASSIFIER)

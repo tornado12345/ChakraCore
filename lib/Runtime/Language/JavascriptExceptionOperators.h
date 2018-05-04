@@ -43,6 +43,27 @@ namespace Js
             ~AutoCatchHandlerExists();
         };
 
+        class TryCatchFrameAddrStack
+        {
+          private:
+            void * m_prevTryCatchFrameAddr;
+            ThreadContext* m_threadContext;
+
+          public:
+            TryCatchFrameAddrStack(ScriptContext* scriptContext, void *frameAddr);
+            ~TryCatchFrameAddrStack();
+        };
+
+        class PendingFinallyExceptionStack
+        {
+        private:
+            ThreadContext* m_threadContext;
+
+        public:
+            PendingFinallyExceptionStack(ScriptContext* scriptContext, Js::JavascriptExceptionObject *exceptionObj);
+            ~PendingFinallyExceptionStack();
+        };
+
         static void __declspec(noreturn) OP_Throw(Var object, ScriptContext* scriptContext);
         static void __declspec(noreturn) Throw(Var object, ScriptContext* scriptContext);
         static void __declspec(noreturn) ThrowExceptionObject(Js::JavascriptExceptionObject* exceptionObject, ScriptContext* scriptContext, bool considerPassingToDebugger = false, PVOID returnAddress = NULL, bool resetStack = false);
@@ -53,13 +74,16 @@ namespace Js
 
 #ifdef _M_X64
         static void *OP_TryCatch(void *try_, void *catch_, void *frame, size_t spillSize, size_t argsSize, int hasBailedOutOffset, ScriptContext *scriptContext);
-        static void *OP_TryFinally(void *try_, void *finally_, void *frame, size_t spillSize, size_t argsSize, ScriptContext *scriptContext);
+        static void *OP_TryFinally(void *try_, void *finally_, void *frame, size_t spillSize, size_t argsSize, int hasBailedOutOffset, ScriptContext *scriptContext);
+        static void *OP_TryFinallyNoOpt(void *try_, void *finally_, void *frame, size_t spillSize, size_t argsSize, ScriptContext *scriptContext);
 #elif defined(_M_ARM32_OR_ARM64)
         static void* OP_TryCatch(void* continuationAddr, void* handlerAddr, void* framePtr, void *localsPtr, size_t argsSize, int hasBailedOutOffset, ScriptContext* scriptContext);
-        static void* OP_TryFinally(void* continuationAddr, void* handlerAddr, void* framePtr, void *localsPtr, size_t argsSize, ScriptContext* scriptContext);
+        static void* OP_TryFinally(void* continuationAddr, void* handlerAddr, void* framePtr, void *localsPtr, size_t argsSize, int hasBailedOutOffset, ScriptContext* scriptContext);
+        static void* OP_TryFinallyNoOpt(void* continuationAddr, void* handlerAddr, void* framePtr, void *localsPtr, size_t argsSize, ScriptContext* scriptContext);
 #else
         static void* OP_TryCatch(void* continuationAddr, void* handlerAddr, void* framePtr, int hasBailedOutOffset, ScriptContext* scriptContext);
-        static void* OP_TryFinally(void* continuationAddr, void* handlerAddr, void* framePtr, ScriptContext* scriptContext);
+        static void* OP_TryFinally(void* continuationAddr, void* handlerAddr, void* framePtr, int hasBailedOutOffset, ScriptContext* scriptContext);
+        static void* OP_TryFinallyNoOpt(void* continuationAddr, void* handlerAddr, void* framePtr, ScriptContext* scriptContext);
 #endif
 #if defined(DBG) && defined(_M_IX86)
         static void DbgCheckEHChain();
@@ -69,6 +93,7 @@ namespace Js
         static Var OP_RuntimeTypeError(MessageId messageId, ScriptContext* scriptContext);
         static Var OP_RuntimeRangeError(MessageId messageId, ScriptContext* scriptContext);
         static Var OP_RuntimeReferenceError(MessageId messageId, ScriptContext* scriptContext);
+        static Var OP_WebAssemblyRuntimeError(MessageId messageId, ScriptContext* scriptContext);
         static void __declspec(noreturn) ThrowOutOfMemory(ScriptContext* scriptContext);
         static void __declspec(noreturn) ThrowStackOverflow(ScriptContext* scriptContext, PVOID returnAddress);
 
@@ -76,6 +101,9 @@ namespace Js
         static Var ThrowTypeErrorRestrictedPropertyAccessor(RecyclableObject* function, CallInfo callInfo, ...);
         static Var StackTraceAccessor(RecyclableObject* function, CallInfo callInfo, ...);
         static void WalkStackForExceptionContext(ScriptContext& scriptContext, JavascriptExceptionContext& exceptionContext, Var thrownObject, uint64 stackCrawlLimit, PVOID returnAddress, bool isThrownException = true, bool resetSatck = false);
+#if ENABLE_NATIVE_CODEGEN
+        static void WalkStackForCleaningUpInlineeInfo(ScriptContext *scriptContext, PVOID returnAddress, PVOID tryCatchFrameAddr);
+#endif
         static void AddStackTraceToObject(Var obj, JavascriptExceptionContext::StackTrace* stackTrace, ScriptContext& scriptContext, bool isThrownException = true, bool resetSatck = false);
         static uint64 StackCrawlLimitOnThrow(Var thrownObject, ScriptContext& scriptContext);
 
@@ -93,7 +121,7 @@ namespace Js
             uint64 stackCrawlLimit, PVOID returnAddress, bool isThrownException, bool resetStack = false);
 
         static void ThrowExceptionObjectInternal(Js::JavascriptExceptionObject * exceptionObject, ScriptContext* scriptContext, bool fillExceptionContext, bool considerPassingToDebugger, PVOID returnAddress, bool resetStack);
-        static BOOL GetCaller(JavascriptStackWalker& walker, JavascriptFunction*& jsFunc);
+        static BOOL GetCaller(JavascriptStackWalker& walker, _Out_opt_ JavascriptFunction*& jsFunc);
         static void DumpStackTrace(JavascriptExceptionContext& exceptionContext, bool isThrownException = true);
         static JavascriptExceptionContext::StackTrace* TrimStackTraceForThrownObject(JavascriptExceptionContext::StackTrace* stackTraceOriginal, Var thrownObject, ScriptContext& scriptContext);
         static void AppendExternalFrameToStackTrace(CompoundString* bs, LPCWSTR functionName, LPCWSTR fileName, ULONG lineNumber, LONG characterPosition);

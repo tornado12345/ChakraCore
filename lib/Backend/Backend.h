@@ -16,8 +16,6 @@
 #include "Language/AsmJsModule.h"
 #include "Language/ProfilingHelpers.h"
 #include "Language/FunctionCodeGenRuntimeData.h"
-#include "Language/ObjTypeSpecFldInfo.h"
-#include "Language/FunctionCodeGenJitTimeData.h"
 #include "Language/JavascriptMathOperators.h"
 #include "Language/JavascriptMathOperators.inl"
 #include "Language/JavascriptStackWalker.h"
@@ -32,8 +30,7 @@
 
 #include "Library/StackScriptFunction.h"
 
-// SIMD_JS
-#include "Library/SimdLib.h"
+// SIMD
 #include "Language/SimdOps.h"
 
 // =================
@@ -46,10 +43,6 @@
 //
 // Defines
 //
-
-// The shld optimization is bad for AMD hardware
-// The lack of it is ameliorated for Intel hardware by adding BTS optimization
-#undef SHIFTLOAD
 
 #define Fatal()     Js::Throw::FatalInternalError()
 
@@ -110,12 +103,9 @@ enum IRDumpFlags
 // BackEnd includes
 //
 
-#ifdef _WIN32
-#include "ChakraJIT.h"
-#endif
 #include "JITTimeProfileInfo.h"
 #include "JITRecyclableObject.h"
-#include "JITTimeFixedField.h"
+#include "FixedFieldInfo.h"
 #include "JITTimePolymorphicInlineCache.h"
 #include "JITTimePolymorphicInlineCacheInfo.h"
 #include "CodeGenWorkItemType.h"
@@ -123,10 +113,11 @@ enum IRDumpFlags
 #include "JITTimeConstructorCache.h"
 #include "JITTypeHandler.h"
 #include "JITType.h"
-#include "JITObjTypeSpecFldInfo.h"
+#include "EquivalentTypeSet.h"
+#include "ObjTypeSpecFldInfo.h"
+#include "FunctionCodeGenJitTimeData.h"
 #include "ServerScriptContext.h"
 #include "JITOutput.h"
-#include "JITTimeScriptContext.h"
 #include "AsmJsJITInfo.h"
 #include "FunctionJITRuntimeInfo.h"
 #include "JITTimeFunctionBody.h"
@@ -144,13 +135,17 @@ enum IRDumpFlags
 #include "SymTable.h"
 #include "IR.h"
 #include "Opnd.h"
+#include "IntConstMath.h"
 #include "IntOverflowDoesNotMatterRange.h"
 #include "IntConstantBounds.h"
 #include "ValueRelativeOffset.h"
 #include "IntBounds.h"
 #include "InductionVariable.h"
+#include "ValueInfo.h"
+#include "GlobOptBlockData.h"
 #include "GlobOpt.h"
 #include "GlobOptIntBounds.h"
+#include "GlobOptArrays.h"
 #include "QueuedFullJitWorkItem.h"
 #include "CodeGenWorkItem.h"
 #include "SimpleJitProfilingHelpers.h"
@@ -177,6 +172,7 @@ enum IRDumpFlags
 #include "Encoder.h"
 #include "EmitBuffer.h"
 #include "InterpreterThunkEmitter.h"
+#include "JITThunkEmitter.h"
 #include "InliningHeuristics.h"
 #include "InliningDecider.h"
 #include "Inline.h"

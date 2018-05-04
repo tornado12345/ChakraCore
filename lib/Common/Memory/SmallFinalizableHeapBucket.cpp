@@ -80,15 +80,15 @@ SmallFinalizableHeapBucketBaseT<TBlockType>::ResetMarks(ResetMarkFlags flags)
     }
 }
 
-#ifdef DUMP_FRAGMENTATION_STATS
+#if ENABLE_MEM_STATS
 template <class TBlockType>
 void
-SmallFinalizableHeapBucketBaseT<TBlockType>::AggregateBucketStats(HeapBucketStats& stats)
+SmallFinalizableHeapBucketBaseT<TBlockType>::AggregateBucketStats()
 {
-    __super::AggregateBucketStats(stats);
+    __super::AggregateBucketStats();
 
-    HeapBlockList::ForEach(pendingDisposeList, [&stats](TBlockType* heapBlock) {
-        heapBlock->AggregateBlockStats(stats);
+    HeapBlockList::ForEach(pendingDisposeList, [this](TBlockType* heapBlock) {
+        heapBlock->AggregateBlockStats(this->memStats);
     });
 }
 #endif
@@ -159,9 +159,7 @@ SmallFinalizableHeapBucketBaseT<TBlockType>::TransferDisposedObjects()
         HeapBlockList::ForEach(currentPendingDisposeList, [=](TBlockType * heapBlock)
         {
             heapBlock->TransferDisposedObjects();
-
-            // in pageheap, we actually always have free object
-            Assert(heapBlock->template HasFreeObject<false>());
+            Assert(heapBlock->HasFreeObject());
         });
 
         // For partial collect, dispose will modify the object, and we
@@ -241,6 +239,10 @@ SmallFinalizableHeapBucketBaseT<TBlockType>::VerifyMark()
 namespace Memory
 {
     template class SmallFinalizableHeapBucketBaseT<SmallFinalizableHeapBlock>;
+#ifdef RECYCLER_VISITED_HOST
+    template class SmallFinalizableHeapBucketBaseT<SmallRecyclerVisitedHostHeapBlock>;
+    template class SmallFinalizableHeapBucketBaseT<MediumRecyclerVisitedHostHeapBlock>;
+#endif
 #ifdef RECYCLER_WRITE_BARRIER
     template class SmallFinalizableHeapBucketBaseT<SmallFinalizableWithBarrierHeapBlock>;
 #endif

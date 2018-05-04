@@ -15,16 +15,20 @@ add_library (Chakra.Backend OBJECT
     EhFrame.cpp
     EmitBuffer.cpp
     Encoder.cpp
+    EquivalentTypeSet.cpp
+    FixedFieldInfo.cpp
     FlowGraph.cpp
     Func.cpp
+    FunctionCodeGenJitTimeData.cpp
     FunctionJITRuntimeInfo.cpp
     FunctionJITTimeInfo.cpp
     GlobOpt.cpp
+    GlobOptArrays.cpp
     GlobOptBailOut.cpp
+    GlobOptBlockData.cpp
     GlobOptExpr.cpp
     GlobOptFields.cpp
     GlobOptIntBounds.cpp
-    GlobOptSimd128.cpp
     IR.cpp
     IRBuilder.cpp
     IRBuilderAsmJs.cpp
@@ -36,16 +40,16 @@ add_library (Chakra.Backend OBJECT
     InliningDecider.cpp
     InliningHeuristics.cpp
     IntBounds.cpp
+    IntConstMath.cpp
     InterpreterThunkEmitter.cpp
-    JITObjTypeSpecFldInfo.cpp
+    JavascriptNativeOperators.cpp
+    JITThunkEmitter.cpp
     JITOutput.cpp
     JITTimeConstructorCache.cpp
-    JITTimeFixedField.cpp
     JITTimeFunctionBody.cpp
     JITTimePolymorphicInlineCache.cpp
     JITTimePolymorphicInlineCacheInfo.cpp
     JITTimeProfileInfo.cpp
-    JITTimeScriptContext.cpp
     JITTimeWorkItem.cpp
     JITType.cpp
     JITTypeHandler.cpp
@@ -56,8 +60,10 @@ add_library (Chakra.Backend OBJECT
     LowerMDSharedSimd128.cpp
     NativeCodeData.cpp
     NativeCodeGenerator.cpp
+    ObjTypeSpecFldInfo.cpp
     Opnd.cpp
     PDataManager.cpp
+    PageAllocatorPool.cpp
     Peeps.cpp
     PreLowerPeeps.cpp
     PrologEncoder.cpp
@@ -73,6 +79,7 @@ add_library (Chakra.Backend OBJECT
     Sym.cpp
     SymTable.cpp
     TempTracker.cpp
+    ValueInfo.cpp
     ValueRelativeOffset.cpp
     amd64/EncoderMD.cpp
     amd64/LinearScanMD.cpp

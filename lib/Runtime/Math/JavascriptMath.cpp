@@ -4,10 +4,6 @@
 //-------------------------------------------------------------------------------------------------------
 namespace Js
 {
-#ifdef SSE2MATH
-    namespace SSE2
-    {
-#endif
         Var JavascriptMath::Negate_Full(Var aRight, ScriptContext* scriptContext)
         {
             // Special case for zero. Must return -0
@@ -169,45 +165,38 @@ namespace Js
             Assert(aRight != nullptr);
             Assert(scriptContext != nullptr);
 
-            // If both sides are numbers, then we can do the addition directly, otherwise
-            // we need to call the helper.
-            if(JavascriptNumber::Is(aLeft))
+            Js::TypeId typeLeft = JavascriptOperators::GetTypeId(aLeft);
+            Js::TypeId typeRight = JavascriptOperators::GetTypeId(aRight);
+
+            if (typeRight == typeLeft)
             {
-                if(JavascriptNumber::Is(aRight))
+                // If both sides are numbers/string, then we can do the addition directly
+                if(typeLeft == TypeIds_Number)
                 {
                     double sum = JavascriptNumber::GetValue(aLeft) + JavascriptNumber::GetValue(aRight);
                     return JavascriptNumber::ToVarNoCheck(sum, scriptContext);
                 }
-                else if(TaggedInt::Is(aRight))
-                {
-                    double sum = TaggedInt::ToDouble(aRight) + JavascriptNumber::GetValue(aLeft);
-                    return JavascriptNumber::ToVarNoCheck(sum, scriptContext);
-                }
-            }
-            else if(JavascriptNumber::Is(aRight))
-            {
-                if(TaggedInt::Is(aLeft))
-                {
-                    double sum = TaggedInt::ToDouble(aLeft) + JavascriptNumber::GetValue(aRight);
-                    return JavascriptNumber::ToVarNoCheck(sum, scriptContext);
-                }
-            }
-            else if(TaggedInt::Is(aLeft))
-            {
-                if(TaggedInt::Is(aRight))
+                else if (typeLeft == TypeIds_Integer)
                 {
                     __int64 sum = TaggedInt::ToInt64(aLeft) + TaggedInt::ToInt64(aRight);
                     return JavascriptNumber::ToVar(sum, scriptContext);
                 }
+                else if (typeLeft == TypeIds_String)
+                {
+                    return JavascriptString::Concat(JavascriptString::UnsafeFromVar(aLeft), JavascriptString::UnsafeFromVar(aRight));
+                }
             }
-            else if (TaggedInt::Is(aRight))
+            else if(typeLeft == TypeIds_Number && typeRight == TypeIds_Integer)
             {
-                return Add_FullHelper_Wrapper(aLeft, aRight, scriptContext, nullptr, false);
+                double sum = JavascriptNumber::GetValue(aLeft) + TaggedInt::ToDouble(aRight);
+                return JavascriptNumber::ToVarNoCheck(sum, scriptContext);
             }
-            else if (RecyclableObject::FromVar(aLeft)->GetTypeId() == TypeIds_String && RecyclableObject::FromVar(aRight)->GetTypeId() == TypeIds_String)
+            else if(typeLeft == TypeIds_Integer && typeRight == TypeIds_Number)
             {
-                return JavascriptString::Concat(JavascriptString::FromVar(aLeft), JavascriptString::FromVar(aRight));
+                double sum = TaggedInt::ToDouble(aLeft) + JavascriptNumber::GetValue(aRight);
+                return JavascriptNumber::ToVarNoCheck(sum, scriptContext);
             }
+
             return Add_FullHelper_Wrapper(aLeft, aRight, scriptContext, nullptr, false);
          }
 #else
@@ -273,8 +262,8 @@ namespace Js
                 {
                     if( typeRight == TypeIds_String )
                     {
-                        JavascriptString* leftString = JavascriptString::FromVar(aLeft);
-                        JavascriptString* rightString = JavascriptString::FromVar(aRight);
+                        JavascriptString* leftString = JavascriptString::UnsafeFromVar(aLeft);
+                        JavascriptString* rightString = JavascriptString::UnsafeFromVar(aRight);
                         return JavascriptString::Concat(leftString, rightString);
                     }
                     break;
@@ -334,13 +323,13 @@ namespace Js
         {
             if (JavascriptOperators::GetTypeId(aLeft) == TypeIds_String)
             {
-                JavascriptString* leftString = JavascriptString::FromVar(aLeft);
+                JavascriptString* leftString = JavascriptString::UnsafeFromVar(aLeft);
                 JavascriptString* rightString;
                 TypeId rightType = JavascriptOperators::GetTypeId(aRight);
                 switch(rightType)
                 {
                     case TypeIds_String:
-                        rightString = JavascriptString::FromVar(aRight);
+                        rightString = JavascriptString::UnsafeFromVar(aRight);
 
 StringCommon:
                         return leftString->ConcatDestructive(rightString);
@@ -382,8 +371,8 @@ StringCommon:
 
         Var JavascriptMath::Add_FullHelper_Wrapper(Var aLeft, Var aRight, ScriptContext* scriptContext, JavascriptNumber* result, bool leftIsDead)
         {
-            Var aLeftToPrim = JavascriptConversion::ToPrimitive(aLeft, JavascriptHint::None, scriptContext);
-            Var aRightToPrim = JavascriptConversion::ToPrimitive(aRight, JavascriptHint::None, scriptContext);
+            Var aLeftToPrim = JavascriptConversion::ToPrimitive<JavascriptHint::None>(aLeft, scriptContext);
+            Var aRightToPrim = JavascriptConversion::ToPrimitive<JavascriptHint::None>(aRight, scriptContext);
             return Add_FullHelper(aLeftToPrim, aRightToPrim, scriptContext, result, leftIsDead);
         }
 
@@ -392,12 +381,12 @@ StringCommon:
             // If either side is a string, then the result is also a string
             if (JavascriptOperators::GetTypeId(primLeft) == TypeIds_String)
             {
-                JavascriptString* stringLeft = JavascriptString::FromVar(primLeft);
+                JavascriptString* stringLeft = JavascriptString::UnsafeFromVar(primLeft);
                 JavascriptString* stringRight = nullptr;
 
                 if (JavascriptOperators::GetTypeId(primRight) == TypeIds_String)
                 {
-                    stringRight = JavascriptString::FromVar(primRight);
+                    stringRight = JavascriptString::UnsafeFromVar(primRight);
                 }
                 else
                 {
@@ -414,7 +403,7 @@ StringCommon:
             if (JavascriptOperators::GetTypeId(primRight) == TypeIds_String)
             {
                 JavascriptString* stringLeft = JavascriptConversion::ToString(primLeft, scriptContext);
-                JavascriptString* stringRight = JavascriptString::FromVar(primRight);
+                JavascriptString* stringRight = JavascriptString::UnsafeFromVar(primRight);
 
                 if(leftIsDead)
                 {
@@ -914,7 +903,7 @@ StringCommon:
             TypeId typeId = JavascriptOperators::GetTypeId(arrayArg);
             if (!JavascriptNativeArray::Is(typeId) && !(TypedArrayBase::Is(typeId) && typeId != TypeIds_CharArray && typeId != TypeIds_BoolArray))
             {
-                if (JavascriptArray::IsVarArray(typeId) && JavascriptArray::FromVar(arrayArg)->GetLength() == 0)
+                if (JavascriptArray::IsVarArray(typeId) && JavascriptArray::UnsafeFromVar(arrayArg)->GetLength() == 0)
                 {
                     return scriptContext->GetLibrary()->GetNegativeInfinite();
                 }
@@ -926,15 +915,15 @@ StringCommon:
 #if ENABLE_COPYONACCESS_ARRAY
                 JavascriptLibrary::CheckAndConvertCopyOnAccessNativeIntArray<Var>(arrayArg);
 #endif
-                JavascriptNativeArray * argsArray = JavascriptNativeArray::FromVar(arrayArg);
+                JavascriptNativeArray * argsArray = JavascriptNativeArray::UnsafeFromVar(arrayArg);
                 uint len = argsArray->GetLength();
                 if (len == 0)
                 {
                     return scriptContext->GetLibrary()->GetNegativeInfinite();
                 }
 
-                if (((Js::SparseArraySegmentBase*)argsArray->GetHead())->next != nullptr || !argsArray->HasNoMissingValues() ||
-                    ((Js::SparseArraySegmentBase*)argsArray->GetHead())->length != len)
+                if (argsArray->GetHead()->next != nullptr || !argsArray->HasNoMissingValues() ||
+                    argsArray->GetHead()->length != len)
                 {
                     return JavascriptFunction::CalloutHelper<false>(function, thisArg, /* overridingNewTarget = */nullptr, arrayArg, scriptContext);
                 }
@@ -943,7 +932,7 @@ StringCommon:
             }
             else
             {
-                TypedArrayBase * argsArray = TypedArrayBase::FromVar(arrayArg);
+                TypedArrayBase * argsArray = TypedArrayBase::UnsafeFromVar(arrayArg);
                 uint len = argsArray->GetLength();
                 if (len == 0)
                 {
@@ -972,7 +961,7 @@ StringCommon:
             TypeId typeId = JavascriptOperators::GetTypeId(arrayArg);
             if (!JavascriptNativeArray::Is(typeId) && !(TypedArrayBase::Is(typeId) && typeId != TypeIds_CharArray && typeId != TypeIds_BoolArray))
             {
-                if (JavascriptArray::Is(typeId) && JavascriptArray::FromVar(arrayArg)->GetLength() == 0)
+                if (JavascriptArray::Is(typeId) && JavascriptArray::UnsafeFromVar(arrayArg)->GetLength() == 0)
                 {
                     return scriptContext->GetLibrary()->GetPositiveInfinite();
                 }
@@ -984,15 +973,15 @@ StringCommon:
 #if ENABLE_COPYONACCESS_ARRAY
                 JavascriptLibrary::CheckAndConvertCopyOnAccessNativeIntArray<Var>(arrayArg);
 #endif
-                JavascriptNativeArray * argsArray = JavascriptNativeArray::FromVar(arrayArg);
+                JavascriptNativeArray * argsArray = JavascriptNativeArray::UnsafeFromVar(arrayArg);
                 uint len = argsArray->GetLength();
                 if (len == 0)
                 {
                     return scriptContext->GetLibrary()->GetPositiveInfinite();
                 }
 
-                if (((Js::SparseArraySegmentBase*)argsArray->GetHead())->next != nullptr || !argsArray->HasNoMissingValues() ||
-                    ((Js::SparseArraySegmentBase*)argsArray->GetHead())->length != len)
+                if (argsArray->GetHead()->next != nullptr || !argsArray->HasNoMissingValues() ||
+                    argsArray->GetHead()->length != len)
                 {
                     return JavascriptFunction::CalloutHelper<false>(function, thisArg, /* overridingNewTarget = */nullptr, arrayArg, scriptContext);
                 }
@@ -1001,7 +990,7 @@ StringCommon:
             }
             else
             {
-                TypedArrayBase * argsArray = TypedArrayBase::FromVar(arrayArg);
+                TypedArrayBase * argsArray = TypedArrayBase::UnsafeFromVar(arrayArg);
                 uint len = argsArray->GetLength();
                 if (len == 0)
                 {
@@ -1160,7 +1149,4 @@ StringCommon:
 
             return JavascriptConversion::ToInt32_Full(aValue, scriptContext);
         }
-#ifdef SSE2MATH
-      }
-#endif
 }

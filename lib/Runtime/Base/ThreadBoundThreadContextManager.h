@@ -7,7 +7,8 @@ class ThreadContextManagerBase
 {
 protected:
 
-    static void ShutdownThreadContext(ThreadContext* threadContext);
+    static void ShutdownThreadContext(
+        ThreadContext* threadContext, bool deleteThreadContext = true);
 };
 
 class ThreadBoundThreadContextManager : public ThreadContextManagerBase
@@ -20,7 +21,7 @@ public:
     static ThreadContext * EnsureContextForCurrentThread();
     static void DestroyContextAndEntryForCurrentThread();
     static void DestroyAllContexts();
-    static void DestroyAllContextsAndEntries();
+    static void DestroyAllContextsAndEntries(bool shouldDeleteCurrentTlsEntry);
     static JsUtil::JobProcessor * GetSharedJobProcessor();
 private:
     static EntryList entries;

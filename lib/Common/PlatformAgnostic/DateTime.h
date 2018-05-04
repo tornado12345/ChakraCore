@@ -2,9 +2,7 @@
 // Copyright (C) Microsoft. All rights reserved.
 // Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.
 //-------------------------------------------------------------------------------------------------------
-
-#ifndef RUNTIME_PLATFORM_AGNOSTIC_COMMON_DATETIME
-#define RUNTIME_PLATFORM_AGNOSTIC_COMMON_DATETIME
+#pragma once
 
 #include "PlatformAgnostic/DateTimeInternal.h"
 
@@ -20,7 +18,7 @@ namespace DateTime
 
     public:
         double Now();
-        static double GetSystemTime();
+        double GetSystemTime();
 
         void Reset() { data.Reset(); }
     };
@@ -77,5 +75,3 @@ namespace DateTime
 
 } // namespace DateTime
 } // namespace PlatformAgnostic
-
-#endif // RUNTIME_PLATFORM_AGNOSTIC_COMMON_DATETIME

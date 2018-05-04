@@ -326,7 +326,7 @@ EncoderMD::EmitModRM(IR::Instr * instr, IR::Opnd *opnd, BYTE reg1)
         reg = this->GetRegEncode(regOpnd);
         this->EmitConst((Mod11 | reg1 | reg), 1);
 
-        if(this->IsExtendedRegister(regOpnd->GetReg()))
+        if (this->IsExtendedRegister(regOpnd->GetReg()))
         {
             return REXB;
         }
@@ -359,37 +359,49 @@ EncoderMD::EmitModRM(IR::Instr * instr, IR::Opnd *opnd, BYTE reg1)
     case IR::OpndKindIndir:
 
         indirOpnd = opnd->AsIndirOpnd();
-        AssertMsg(indirOpnd->GetBaseOpnd() != nullptr, "Expected base to be set in indirOpnd");
 
         baseOpnd = indirOpnd->GetBaseOpnd();
         indexOpnd = indirOpnd->GetIndexOpnd();
+
         AssertMsg(!indexOpnd || indexOpnd->GetReg() != RegRSP, "ESP cannot be the index of an indir.");
-
-        regBase = this->GetRegEncode(baseOpnd);
-
-        if (indexOpnd != nullptr)
+        if (baseOpnd == nullptr)
         {
+            Assert(indexOpnd != nullptr);
             regIndex = this->GetRegEncode(indexOpnd);
-            *(m_pc++) = (this->GetMod(indirOpnd, &dispSize) | reg1 | 0x4);
-            *(m_pc++) = (((indirOpnd->GetScale() & 3) << 6) | ((regIndex & 7) << 3) | (regBase & 7));
+            dispSize = 4;
+            *(m_pc++) = ( Mod00 | reg1 | 0x4);
+            *(m_pc++) = (((indirOpnd->GetScale() & 3) << 6) | ((regIndex & 7) << 3) | 0x5);
 
             rexEncoding |= this->GetRexByte(this->REXX, indexOpnd);
-            rexEncoding |= this->GetRexByte(this->REXB, baseOpnd);
-        }
-        else if (baseOpnd->GetReg() == RegR12 || baseOpnd->GetReg() == RegRSP)
-        {
-            //
-            // Using RSP/R12 as base requires the SIB byte even where there is no index.
-            //
-            *(m_pc++) = (this->GetMod(indirOpnd, &dispSize) | reg1 | regBase);
-            *(m_pc++) = (BYTE)(((regBase & 7) << 3) | (regBase & 7));
-
-            rexEncoding |= this->GetRexByte(this->REXB, baseOpnd);
         }
         else
         {
-            *(m_pc++) = (this->GetMod(indirOpnd, &dispSize) | reg1 | regBase);
-            rexEncoding |= this->GetRexByte(this->REXB, baseOpnd);
+            regBase = this->GetRegEncode(baseOpnd);
+
+            if (indexOpnd != nullptr)
+            {
+                regIndex = this->GetRegEncode(indexOpnd);
+                *(m_pc++) = (this->GetMod(indirOpnd, &dispSize) | reg1 | 0x4);
+                *(m_pc++) = (((indirOpnd->GetScale() & 3) << 6) | ((regIndex & 7) << 3) | (regBase & 7));
+
+                rexEncoding |= this->GetRexByte(this->REXX, indexOpnd);
+                rexEncoding |= this->GetRexByte(this->REXB, baseOpnd);
+            }
+            else if (baseOpnd->GetReg() == RegR12 || baseOpnd->GetReg() == RegRSP)
+            {
+                //
+                // Using RSP/R12 as base requires the SIB byte even where there is no index.
+                //
+                *(m_pc++) = (this->GetMod(indirOpnd, &dispSize) | reg1 | regBase);
+                *(m_pc++) = (BYTE)(((regBase & 7) << 3) | (regBase & 7));
+
+                rexEncoding |= this->GetRexByte(this->REXB, baseOpnd);
+            }
+            else
+            {
+                *(m_pc++) = (this->GetMod(indirOpnd, &dispSize) | reg1 | regBase);
+                rexEncoding |= this->GetRexByte(this->REXB, baseOpnd);
+            }
         }
         break;
 
@@ -580,8 +592,11 @@ EncoderMD::Encode(IR::Instr *instr, BYTE *pc, BYTE* beginCodeAddress)
                 }
             }
         }
-#if DBG_DUMP
-        if (instr->IsEntryInstr() && Js::Configuration::Global.flags.DebugBreak.Contains(m_func->GetFunctionNumber()))
+#if ENABLE_DEBUG_CONFIG_OPTIONS
+        if (instr->IsEntryInstr() && (
+            Js::Configuration::Global.flags.DebugBreak.Contains(m_func->GetFunctionNumber()) ||
+            PHASE_ON(Js::DebugBreakPhase, m_func)
+        ))
         {
             IR::Instr *int3 = IR::Instr::New(Js::OpCode::INT, m_func);
             int3->SetSrc1(IR::IntConstOpnd::New(3, TyInt32, m_func));
@@ -670,6 +685,12 @@ EncoderMD::Encode(IR::Instr *instr, BYTE *pc, BYTE* beginCodeAddress)
 
     instrRestart = instrStart = m_pc;
 
+    // Emit the lock byte first if needed
+    if (opdope & DLOCK)
+    {
+        *instrRestart++ = 0xf0;
+    }
+
     // put out 16bit override if any
     if (instrSize == 2 && (opdope & (DNO16 | DFLT)) == 0)
     {
@@ -711,7 +732,7 @@ EncoderMD::Encode(IR::Instr *instr, BYTE *pc, BYTE* beginCodeAddress)
     prexByte = instrRestart;
 
     // This is a heuristic to determine whether we really need to have the Rex bytes
-    // This heuristics is always correct for instrSize == 8
+    // This heuristics is almost always correct for instrSize == 8
     // For instrSize < 8, we might use extended registers and we will have to adjust in EmitRexByte
     bool reservedRexByte = (instrSize == 8);
     if (reservedRexByte)
@@ -964,7 +985,10 @@ EncoderMD::Encode(IR::Instr *instr, BYTE *pc, BYTE* beginCodeAddress)
                 }
                 break;
             }
-
+            case Js::OpCode::PEXTRD:
+            case Js::OpCode::PEXTRQ:
+                this->EmitModRM(instr, opr1, this->GetRegEncode(opr2->AsRegOpnd()));
+                break;
             case Js::OpCode::BT:
             case Js::OpCode::BTR:
             case Js::OpCode::BTS:
@@ -1007,6 +1031,25 @@ EncoderMD::Encode(IR::Instr *instr, BYTE *pc, BYTE* beginCodeAddress)
                     rexByte |= this->EmitModRM(instr, src1, this->GetRegEncode(src2->AsRegOpnd()));
                 }
                 break;
+
+            case Js::OpCode::CMPXCHG8B:
+            case Js::OpCode::LOCKCMPXCHG8B:
+            {
+                if (instrSize == 8)
+                {
+                    skipRexByte = true;
+                    Assert(!opr2);
+                    BYTE byte2 = (this->GetOpcodeByte2(instr) >> 3);
+                    this->EmitModRM(instr, opr1, byte2);
+                }
+                else
+                {
+                    Assert(instrSize == 16);
+                    continue;
+                }
+                break;
+            }
+
             case Js::OpCode::SHLD:
                 /*
                  *       0F A4   SHLD r/m32, r32, imm8
@@ -1147,6 +1190,7 @@ EncoderMD::Encode(IR::Instr *instr, BYTE *pc, BYTE* beginCodeAddress)
             case Js::OpCode::MOVAPS:
             case Js::OpCode::MOVUPS:
             case Js::OpCode::MOVHPD:
+            case Js::OpCode::MOVLPD:
                 if (!opr1->IsRegOpnd())
                 {
                     Assert(opr1->IsIndirOpnd() || opr1->IsMemRefOpnd() || opr1->IsSymOpnd());
@@ -1957,6 +2001,14 @@ bool EncoderMD::UsesConditionCode(IR::Instr *instr)
 bool EncoderMD::IsOPEQ(IR::Instr *instr)
 {
     return instr->IsLowered() && (EncoderMD::GetOpdope(instr) & DOPEQ);
+}
+
+bool EncoderMD::IsSHIFT(IR::Instr *instr)
+{
+    return (instr->IsLowered() && EncoderMD::GetInstrForm(instr) == FORM_SHIFT) ||
+        instr->m_opcode == Js::OpCode::PSLLDQ || instr->m_opcode == Js::OpCode::PSRLDQ ||
+        instr->m_opcode == Js::OpCode::PSLLW || instr->m_opcode == Js::OpCode::PSRLW ||
+        instr->m_opcode == Js::OpCode::PSLLD;
 }
 
 bool EncoderMD::IsMOVEncoding(IR::Instr *instr)

@@ -67,7 +67,7 @@ namespace Js
         bool InitializeLocation(InterpreterHaltState* pHaltState, bool fMatchWithCurrentScriptContext = true);
         void DestroyLocation();
 
-        bool ProbeContainer::GetNextUserStatementOffsetHelper(
+        bool GetNextUserStatementOffsetHelper(
             Js::FunctionBody* functionBody, int currentOffset, FunctionBody::StatementAdjustmentType adjType, int* nextStatementOffset);
 
 #ifdef ENABLE_MUTATION_BREAKPOINT
@@ -136,6 +136,9 @@ namespace Js
 
         // When on mutation breakpoint hit
         void DispatchMutationBreakpoint(InterpreterHaltState* pHaltState);
+
+        // When DOM mutation breakpoint hit
+        void DispatchDOMMutationBreakpoint();
 
         void UpdateStep(bool fDuringSetupDebugApp = false);
         void DeactivateStep();

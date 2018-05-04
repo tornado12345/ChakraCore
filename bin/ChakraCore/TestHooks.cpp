@@ -3,7 +3,21 @@
 // Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.
 //-------------------------------------------------------------------------------------------------------
 #include "Runtime.h"
+#include "Core/ConfigParser.h"
 #include "TestHooks.h"
+
+namespace PlatformAgnostic
+{
+namespace UnicodeText
+{
+namespace Internal
+{
+// this is in place of including PlatformAgnostic/UnicodeTextInternal.h, which has template
+// instantiations that upset Clang on macOS and Linux
+int LogicalStringCompareImpl(const char16* p1, const char16* p2);
+}
+}
+}
 
 #ifdef ENABLE_TEST_HOOKS
 
@@ -15,6 +29,13 @@ HRESULT __stdcall SetConfigFlags(__in int argc, __in_ecount(argc) LPWSTR argv[],
         return E_FAIL;
     }
 
+    return S_OK;
+}
+
+HRESULT __stdcall SetConfigFile(__in LPWSTR strConfigFile)
+{
+    CmdLineArgsParser parser;
+    ConfigParser::ParseCustomConfigFile(parser, strConfigFile);
     return S_OK;
 }
 
@@ -114,6 +135,7 @@ void __stdcall NotifyUnhandledException(PEXCEPTION_POINTERS exceptionInfo)
 #define FLAG_Phases(name)
 #define FLAG_NumberSet(name)
 #define FLAG_NumberPairSet(name)
+#define FLAG_NumberTrioSet(name)
 #define FLAG_NumberRange(name)
 #include "ConfigFlagsList.h"
 #undef FLAG
@@ -123,23 +145,28 @@ void __stdcall NotifyUnhandledException(PEXCEPTION_POINTERS exceptionInfo)
 #undef FLAG_Phases
 #undef FLAG_NumberSet
 #undef FLAG_NumberPairSet
+#undef FLAG_NumberTrioSet
 #undef FLAG_NumberRange
 
-HRESULT OnChakraCoreLoaded()
+HRESULT OnChakraCoreLoaded(OnChakraCoreLoadedPtr pfChakraCoreLoaded)
 {
-    typedef HRESULT(__stdcall *OnChakraCoreLoadedPtr)(TestHooks &testHooks);
-    OnChakraCoreLoadedPtr pfChakraCoreLoaded = (OnChakraCoreLoadedPtr)GetProcAddress(GetModuleHandle(NULL), "OnChakraCoreLoadedEntry");
     if (pfChakraCoreLoaded == nullptr)
     {
-        return S_OK;
+        pfChakraCoreLoaded = (OnChakraCoreLoadedPtr)GetProcAddress(GetModuleHandle(NULL), "OnChakraCoreLoadedEntry");
+        if (pfChakraCoreLoaded == nullptr)
+        {
+            return S_OK;
+        }
     }
 
     TestHooks testHooks =
     {
         SetConfigFlags,
+        SetConfigFile,
         PrintConfigFlagsUsageString,
         SetAssertToConsoleFlag,
         SetEnableCheckMemoryLeakOutput,
+        PlatformAgnostic::UnicodeText::Internal::LogicalStringCompareImpl,
 
 #define FLAG(type, name, description, defaultValue, ...) FLAG_##type##(name)
 #define FLAGINCLUDE(name) \
@@ -152,6 +179,7 @@ HRESULT OnChakraCoreLoaded()
 #define FLAG_Phases(name)
 #define FLAG_NumberSet(name)
 #define FLAG_NumberPairSet(name)
+#define FLAG_NumberTrioSet(name)
 #define FLAG_NumberRange(name)
 #include "ConfigFlagsList.h"
 #undef FLAG
@@ -161,13 +189,13 @@ HRESULT OnChakraCoreLoaded()
 #undef FLAG_Phases
 #undef FLAG_NumberSet
 #undef FLAG_NumberPairSet
+#undef FLAG_NumberTrioSet
 #undef FLAG_NumberRange
 #if ENABLE_NATIVE_CODEGEN && _WIN32
         ConnectJITServer,
 #endif
         NotifyUnhandledException
     };
-
     return pfChakraCoreLoaded(testHooks);
 }
 

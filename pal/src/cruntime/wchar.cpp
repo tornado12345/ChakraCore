@@ -33,14 +33,7 @@ Abstract:
 #include "config.h"
 #endif
 
-#if HAVE_COREFOUNDATION
-#define CF_EXCLUDE_CSTD_HEADERS
-#include <CoreFoundation/CoreFoundation.h>
-#include <wctype.h>
-#else
-#include <wctype.h>
-#endif
-
+#include "runtime_proxy.h"
 #include <errno.h>
 
 SET_DEFAULT_DEBUG_CHANNEL(CRT);
@@ -306,7 +299,7 @@ PAL_iswspace(char16_t c)
     PERF_ENTRY(iswspace);
     ENTRY("PAL_iswspace (c=%C)\n", c);
 
-    ret = iswspace(c);
+    ret = proxy_iswspace(c);
 
     LOGEXIT("PAL_iswspace returns int %d\n", ret);
     PERF_EXIT(iswspace);
@@ -892,51 +885,67 @@ char16_t
 __cdecl
 PAL_towlower( char16_t c )
 {
-#if HAVE_COREFOUNDATION
     PERF_ENTRY(towlower);
     ENTRY("towlower (c=%d)\n", c);
-    if (!PAL_iswlower(c))
-    {
-        CFMutableStringRef cfString = CFStringCreateMutable(
-                                            kCFAllocatorDefault, 1);
-        if (cfString != NULL)
+    if(c < 128)
+    {//fast path for ascii characters
+        if(c >= 'A' && c <= 'Z')
         {
-            CFStringAppendCharacters(cfString, (const UniChar*)&c, 1);
-            CFStringLowercase(cfString, NULL);
-            c = CFStringGetCharacterAtIndex(cfString, 0);
-            CFRelease(cfString);
+            c += ('a' - 'A');
+            PERF_EXIT(towlower);
+            LOGEXIT("towlower returns int %d\n", c );
+            return c;
         }
-    }
-    LOGEXIT("towlower returns int %d\n", c );
-    PERF_EXIT(towlower);
-    return c;
-#else   /* HAVE_COREFOUNDATION */
-    UnicodeDataRec dataRec;
-
-    PERF_ENTRY(towlower);
-    ENTRY("towlower (c=%d)\n", c);
-
-    if (!GetUnicodeData(c, &dataRec))
-    {
-        TRACE( "Unable to retrieve unicode data for the character %c.\n", c );
-        LOGEXIT("towlower returns int %d\n", c );
-        PERF_EXIT(towlower);
-        return c;
-    }
-
-    if ( (dataRec.C1_TYPE_FLAGS & C1_LOWER) || (dataRec.nOpposingCase ==  0 ))
-    {
-        LOGEXIT("towlower returns int %d\n", c );
-        PERF_EXIT(towlower);
-        return c;
+        else
+        {
+            PERF_EXIT(towlower);
+            LOGEXIT("towlower returns int %d\n", c );
+            return c;
+        }
     }
     else
     {
-        LOGEXIT("towlower returns int %d\n", dataRec.nOpposingCase );
+    #if HAVE_COREFOUNDATION
+        if (!PAL_iswlower(c))
+        {
+            CFMutableStringRef cfString = CFStringCreateMutable(
+                                                kCFAllocatorDefault, 1);
+            if (cfString != NULL)
+            {
+                CFStringAppendCharacters(cfString, (const UniChar*)&c, 1);
+                CFStringLowercase(cfString, NULL);
+                c = CFStringGetCharacterAtIndex(cfString, 0);
+                CFRelease(cfString);
+            }
+        }
+        LOGEXIT("towlower returns int %d\n", c );
         PERF_EXIT(towlower);
-        return dataRec.nOpposingCase;
+        return c;
+    #else   /* HAVE_COREFOUNDATION */
+        UnicodeDataRec dataRec;
+
+        if (!GetUnicodeData(c, &dataRec))
+        {
+            TRACE( "Unable to retrieve unicode data for the character %c.\n", c );
+            LOGEXIT("towlower returns int %d\n", c );
+            PERF_EXIT(towlower);
+            return c;
+        }
+
+        if ( (dataRec.C1_TYPE_FLAGS & C1_LOWER) || (dataRec.nOpposingCase ==  0 ))
+        {
+            LOGEXIT("towlower returns int %d\n", c );
+            PERF_EXIT(towlower);
+            return c;
+        }
+        else
+        {
+            LOGEXIT("towlower returns int %d\n", dataRec.nOpposingCase );
+            PERF_EXIT(towlower);
+            return dataRec.nOpposingCase;
+        }
+    #endif  /* HAVE_COREFOUNDATION */
     }
-#endif  /* HAVE_COREFOUNDATION */
 }
 
 
@@ -1138,7 +1147,7 @@ PAL_wcscat(
 
     ret = PAL_wcsncat( strDestination, strSource, PAL_wcslen( strSource ) );
 
-    LOGEXIT("wcscat returnng char16_t %p (%S)\n", ret, ret);
+    LOGEXIT("wcscat returning char16_t %p (%S)\n", ret, ret);
     PERF_EXIT(wcscat);
     return ret;
 }
@@ -1186,7 +1195,7 @@ PAL_wcscpy(
     }
 
     /* add terminating null */
-    *strDestination = '\0';
+    *strDestination = char16_t(0);
 
     LOGEXIT("wcscpy returning char16_t %p (%S)\n", start, start);
     PERF_EXIT(wcscpy);
@@ -1201,6 +1210,7 @@ Function:
 See MSDN or the man page for wcslen.
 
 --*/
+__attribute__((no_instrument_function))
 size_t
 __cdecl
 PAL_wcslen(
@@ -1208,22 +1218,18 @@ PAL_wcslen(
 {
     size_t nChar = 0;
 
-    PERF_ENTRY(wcslen);
-    ENTRY("wcslen (string=%p (%S))\n", string?string:W16_NULLSTRING, string?string:W16_NULLSTRING);
+    // no logging here. PAL's internal output also uses this method
 
     if ( !string )
     {
-        LOGEXIT("wcslen returning size_t %u\n", 0);
-        PERF_EXIT(wcslen);
         return 0;
     }
+
     while (*string++)
     {
         nChar++;
     }
 
-    LOGEXIT("wcslen returning size_t %u\n", nChar);
-    PERF_EXIT(wcslen);
     return nChar;
 }
 
@@ -1240,7 +1246,7 @@ PAL_wmemcmp(
         const char16_t *string2,
         size_t count)
 {
-    size_t i;
+    size_t i, wi = 0;
     int diff = 0;
 
     PERF_ENTRY(wmemcmp);
@@ -1249,7 +1255,15 @@ PAL_wmemcmp(
           string1?string1:W16_NULLSTRING, string2?string2:W16_NULLSTRING, string2?string2:W16_NULLSTRING,
           (unsigned long) count);
 
-    for (i = 0; i < count; i++)
+    if (string1 == string2) return diff;
+
+    constexpr size_t blockSize = sizeof(size_t) / sizeof(char16_t);
+    const     size_t *num1     = (const size_t*)(string1);
+    const     size_t *num2     = (const size_t*)(string2);
+
+    while( (count > blockSize * (wi + 1)) && num1[wi] == num2[wi] ) ++wi;
+
+    for (i = blockSize * wi; i < count; ++i)
     {
         diff = string1[i] - string2[i];
         if (diff != 0)
@@ -1257,6 +1271,7 @@ PAL_wmemcmp(
             break;
         }
     }
+
     LOGEXIT("wmemcmp returning int %d\n", diff);
     PERF_EXIT(wmemcmp);
     return diff;
@@ -1283,6 +1298,8 @@ PAL_wcsncmp(
           string1?string1:W16_NULLSTRING,
           string1?string1:W16_NULLSTRING, string2?string2:W16_NULLSTRING, string2?string2:W16_NULLSTRING,
           (unsigned long) count);
+
+    if (string1 == string2) return diff;
 
     for (i = 0; i < count; i++)
     {
@@ -1492,16 +1509,22 @@ PAL_wcsstr(
         i = 0;
         while (1)
         {
-            if (*(string + i) == 0 || *(strCharSet + i) == 0)
+            if (*(strCharSet + i) == 0)
             {
                 ret = (char16_t *) string;
+                goto leave;
+            }
+            else if (*(string + i) == 0)
+            {
+                ret = NULL;
                 goto leave;
             }
             if (*(string + i) != *(strCharSet + i))
             {
                 break;
             }
-        i++;
+
+            i++;
         }
         string++;
     }
@@ -1828,7 +1851,7 @@ PAL_iswdigit( char16_t c )
     }
     else
     {
-        TRACE( "No corresonding unicode record for character %d.\n", c );
+        TRACE( "No corresponding unicode record for character %d.\n", c );
     }
 #endif  /* HAVE_COREFOUNDATION */
     LOGEXIT("PAL_iswdigit returning %d\n", nRetVal);
@@ -1900,7 +1923,7 @@ PAL_iswprint( char16_t c )
     PERF_ENTRY(iswprint);
     ENTRY("PAL_iswprint (%#X)\n", c);
 
-    ret = iswprint(c);
+    ret = proxy_iswprint(c);
 
     LOGEXIT("PAL_iswprint returns %d\n", ret);
     PERF_EXIT(iswprint);

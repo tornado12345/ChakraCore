@@ -8,12 +8,12 @@
 _Must_inspect_result_
 _Ret_maybenull_ _Post_writable_byte_size_(size)
 void * __RPC_USER midl_user_allocate(
-#if defined(NTBUILD) || defined(_M_ARM)
-    _In_ // starting win8, _In_ is in the signature
+#if defined(_WIN32_WINNT_WIN10)
+    _In_ // starting win10, _In_ is in the signature
 #endif
     size_t size)
 {
-    return (HeapAlloc(GetProcessHeap(), 0, size));
+    return (HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, size));
 }
 
 void __RPC_USER midl_user_free(_Pre_maybenull_ _Post_invalid_ void * ptr)
@@ -30,17 +30,13 @@ JITManager::JITManager() :
     m_rpcBindingHandle(nullptr),
     m_oopJitEnabled(false),
     m_isJITServer(false),
-    m_targetHandle(nullptr),
+    m_failingHRESULT(S_OK),
     m_jitConnectionId()
 {
 }
 
 JITManager::~JITManager()
 {
-    if (m_targetHandle)
-    {
-        CleanupProcess();
-    }
     if (m_rpcBindingHandle)
     {
         RpcBindingFree(&m_rpcBindingHandle);
@@ -138,11 +134,7 @@ JITManager::CreateBinding(
         waitStatus = WaitForSingleObject(serverProcessHandle, sleepInterval);
         if (waitStatus == WAIT_OBJECT_0)
         {
-            DWORD exitCode = (DWORD)-1;
-
             // The server process died for some reason. No need to reattempt.
-            // We use -1 as the exit code if GetExitCodeProcess fails.
-            Assert(GetExitCodeProcess(serverProcessHandle, &exitCode));
             status = RPC_S_SERVER_UNAVAILABLE;
             break;
         }
@@ -152,6 +144,15 @@ JITManager::CreateBinding(
         }
         else
         {
+            Assert(waitStatus == WAIT_FAILED);
+#ifdef DBG
+            LPWSTR messageBuffer = nullptr;
+            DWORD errorNumber = GetLastError();
+            FormatMessageW(FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+                           NULL, errorNumber, MAKELANGID(LANG_NEUTRAL, SUBLANG_DEFAULT), (LPWSTR)&messageBuffer, 0, NULL);
+            Output::Print(_u("Last error was 0x%x (%s)"), errorNumber, messageBuffer);
+            LocalFree(messageBuffer);
+#endif
             // wait operation failed for an unknown reason.
             Assert(false);
             status = HRESULT_FROM_WIN32(waitStatus);
@@ -165,14 +166,9 @@ JITManager::CreateBinding(
         }
     } while (status != RPC_S_OK); // redundant check, but compiler would not allow true here.
 
-    if (status != RPC_S_OK)
-    {
-        RpcBindingFree(&localBindingHandle);
-        return HRESULT_FROM_WIN32(status);
-    }
-
     *bindingHandle = localBindingHandle;
-    return S_OK;
+
+    return HRESULT_FROM_WIN32(status);
 }
 
 bool
@@ -192,13 +188,33 @@ bool
 JITManager::IsConnected() const
 {
     Assert(IsOOPJITEnabled());
-    return m_rpcBindingHandle != nullptr && m_targetHandle != nullptr;
+    return m_rpcBindingHandle != nullptr && !HasJITFailed();
 }
 
 void
 JITManager::EnableOOPJIT()
 {
     m_oopJitEnabled = true;
+
+    if (CONFIG_FLAG(OOPCFGRegistration))
+    {
+        // Since this client has enabled OOPJIT, perform the one-way policy update
+        // that will disable SetProcessValidCallTargets from being invoked.
+        GlobalSecurityPolicy::DisableSetProcessValidCallTargets();
+    }
+}
+
+void
+JITManager::SetJITFailed(HRESULT hr)
+{
+    Assert(hr != S_OK);
+    m_failingHRESULT = hr;
+}
+
+bool
+JITManager::HasJITFailed() const
+{
+    return m_failingHRESULT != S_OK;
 }
 
 bool
@@ -207,68 +223,40 @@ JITManager::IsOOPJITEnabled() const
     return m_oopJitEnabled;
 }
 
-HANDLE
-JITManager::GetJITTargetHandle() const
-{
-    if (!IsOOPJITEnabled())
-    {
-        return GetCurrentProcess();
-    }
-    Assert(m_targetHandle != nullptr);
-    return m_targetHandle;
-}
-
 HRESULT
 JITManager::ConnectRpcServer(__in HANDLE jitProcessHandle, __in_opt void* serverSecurityDescriptor, __in UUID connectionUuid)
 {
+    // We might be trying to connect from multiple threads simultaneously
+    AutoCriticalSection cs(&m_cs);
+
     Assert(IsOOPJITEnabled());
-
-    HRESULT hr;
-    RPC_BINDING_HANDLE localBindingHandle;
-
-    if (IsConnected() && (connectionUuid != m_jitConnectionId))
+    if (m_rpcBindingHandle != nullptr)
     {
-        return E_FAIL;
+        return S_OK;
     }
-
-    hr = CreateBinding(jitProcessHandle, serverSecurityDescriptor, &connectionUuid, &localBindingHandle);
-
-    HANDLE targetHandle;
-    BOOL succeeded = DuplicateHandle(
-        GetCurrentProcess(), GetCurrentProcess(),
-        jitProcessHandle, &targetHandle,
-        NULL, FALSE, DUPLICATE_SAME_ACCESS);
-
-    if (!succeeded)
-    {
-        return HRESULT_FROM_WIN32(GetLastError());
-    }
-
-    m_targetHandle = targetHandle;
-    m_rpcBindingHandle = localBindingHandle;
-    m_jitConnectionId = connectionUuid;
-
-    return hr;
-}
-
-HRESULT
-JITManager::CleanupProcess()
-{
-    Assert(JITManager::IsOOPJITEnabled());
-    Assert(m_targetHandle != nullptr);
 
     HRESULT hr = E_FAIL;
-    RpcTryExcept
-    {
-        hr = ClientCleanupProcess(m_rpcBindingHandle, (intptr_t)m_targetHandle);
-    }
-    RpcExcept(RpcExceptionFilter(RpcExceptionCode()))
-    {
-        hr = HRESULT_FROM_WIN32(RpcExceptionCode());
-    }
-    RpcEndExcept;
 
-    m_targetHandle = nullptr;
+
+    hr = CreateBinding(jitProcessHandle, serverSecurityDescriptor, &connectionUuid, &m_rpcBindingHandle);
+    if (FAILED(hr))
+    {
+        goto FailureCleanup;
+    }
+
+    m_jitConnectionId = connectionUuid;
+
+    hr = ConnectProcess();
+    HandleServerCallResult(hr, RemoteCallType::StateUpdate);
+
+    return hr;
+
+FailureCleanup:
+    if (m_rpcBindingHandle)
+    {
+        RpcBindingFree(&m_rpcBindingHandle);
+        m_rpcBindingHandle = nullptr;
+    }
 
     return hr;
 }
@@ -281,8 +269,6 @@ JITManager::Shutdown()
     HRESULT hr = S_OK;
     Assert(IsOOPJITEnabled());
     Assert(m_rpcBindingHandle != nullptr);
-
-    CleanupProcess();
 
     RpcTryExcept
     {
@@ -300,17 +286,60 @@ JITManager::Shutdown()
 }
 
 HRESULT
+JITManager::ConnectProcess()
+{
+    Assert(IsOOPJITEnabled());
+
+#ifdef USE_RPC_HANDLE_MARSHALLING
+    HANDLE processHandle;
+    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(), &processHandle, 0, false, DUPLICATE_SAME_ACCESS))
+    {
+        return HRESULT_FROM_WIN32(GetLastError());
+    }
+#endif
+
+    HRESULT hr = E_FAIL;
+    RpcTryExcept
+    {
+        hr = ClientConnectProcess(
+            m_rpcBindingHandle,
+#ifdef USE_RPC_HANDLE_MARSHALLING
+            processHandle,
+#endif
+            (intptr_t)AutoSystemInfo::Data.GetChakraBaseAddr(),
+            (intptr_t)AutoSystemInfo::Data.GetCRTHandle());
+    }
+        RpcExcept(RpcExceptionFilter(RpcExceptionCode()))
+    {
+        hr = HRESULT_FROM_WIN32(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+#ifdef USE_RPC_HANDLE_MARSHALLING
+    CloseHandle(processHandle);
+#endif
+
+    return hr;
+}
+
+HRESULT
 JITManager::InitializeThreadContext(
     __in ThreadContextDataIDL * data,
     __out PPTHREADCONTEXT_HANDLE threadContextInfoAddress,
-    __out intptr_t * prereservedRegionAddr)
+    __out intptr_t * prereservedRegionAddr,
+    __out intptr_t * jitThunkAddr)
 {
     Assert(IsOOPJITEnabled());
 
     HRESULT hr = E_FAIL;
     RpcTryExcept
     {
-        hr = ClientInitializeThreadContext(m_rpcBindingHandle, data, threadContextInfoAddress, prereservedRegionAddr);
+        hr = ClientInitializeThreadContext(
+            m_rpcBindingHandle,
+            data,
+            threadContextInfoAddress,
+            prereservedRegionAddr,
+            jitThunkAddr);
     }
     RpcExcept(RpcExceptionFilter(RpcExceptionCode()))
     {
@@ -384,17 +413,38 @@ JITManager::SetIsPRNGSeeded(
 }
 
 HRESULT
-JITManager::NewInterpreterThunkBlock(
+JITManager::DecommitInterpreterBufferManager(
     __in PSCRIPTCONTEXT_HANDLE scriptContextInfoAddress,
-    __in boolean asmJsThunk,
-    __out InterpreterThunkInfoIDL * thunkInfo)
+    __in boolean asmJsThunk)
 {
     Assert(IsOOPJITEnabled());
 
     HRESULT hr = E_FAIL;
     RpcTryExcept
     {
-        hr = ClientNewInterpreterThunkBlock(m_rpcBindingHandle, scriptContextInfoAddress, asmJsThunk, thunkInfo);
+        hr = ClientDecommitInterpreterBufferManager(m_rpcBindingHandle, scriptContextInfoAddress, asmJsThunk);
+    }
+        RpcExcept(RpcExceptionFilter(RpcExceptionCode()))
+    {
+        hr = HRESULT_FROM_WIN32(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    return hr;
+}
+
+HRESULT
+JITManager::NewInterpreterThunkBlock(
+    __in PSCRIPTCONTEXT_HANDLE scriptContextInfoAddress,
+    __in InterpreterThunkInputIDL * thunkInput,
+    __out InterpreterThunkOutputIDL * thunkOutput)
+{
+    Assert(IsOOPJITEnabled());
+
+    HRESULT hr = E_FAIL;
+    RpcTryExcept
+    {
+        hr = ClientNewInterpreterThunkBlock(m_rpcBindingHandle, scriptContextInfoAddress, thunkInput, thunkOutput);
     }
     RpcExcept(RpcExceptionFilter(RpcExceptionCode()))
     {
@@ -454,14 +504,14 @@ JITManager::SetWellKnownHostTypeId(
 HRESULT
 JITManager::UpdatePropertyRecordMap(
     __in PTHREADCONTEXT_HANDLE threadContextInfoAddress,
-    __in UpdatedPropertysIDL * updatedProps)
+    __in_opt BVSparseNodeIDL * updatedPropsBVHead)
 {
     Assert(IsOOPJITEnabled());
 
     HRESULT hr = E_FAIL;
     RpcTryExcept
     {
-        hr = ClientUpdatePropertyRecordMap(m_rpcBindingHandle, threadContextInfoAddress, updatedProps);
+        hr = ClientUpdatePropertyRecordMap(m_rpcBindingHandle, threadContextInfoAddress, updatedPropsBVHead);
     }
     RpcExcept(RpcExceptionFilter(RpcExceptionCode()))
     {
@@ -537,14 +587,14 @@ JITManager::CloseScriptContext(
 HRESULT
 JITManager::FreeAllocation(
     __in PTHREADCONTEXT_HANDLE threadContextInfoAddress,
-    __in intptr_t address)
+    __in intptr_t codeAddress)
 {
     Assert(IsOOPJITEnabled());
 
     HRESULT hr = E_FAIL;
     RpcTryExcept
     {
-        hr = ClientFreeAllocation(m_rpcBindingHandle, threadContextInfoAddress, address);
+        hr = ClientFreeAllocation(m_rpcBindingHandle, threadContextInfoAddress, codeAddress);
     }
     RpcExcept(RpcExceptionFilter(RpcExceptionCode()))
     {
@@ -554,31 +604,6 @@ JITManager::FreeAllocation(
 
     return hr;
 }
-
-#if DBG
-HRESULT
-JITManager::IsInterpreterThunkAddr(
-    __in PSCRIPTCONTEXT_HANDLE scriptContextInfoAddress,
-    __in intptr_t address,
-    __in boolean asmjsThunk,
-    __out boolean * result)
-{
-    Assert(IsOOPJITEnabled());
-
-    HRESULT hr = E_FAIL;
-    RpcTryExcept
-    {
-        hr = ClientIsInterpreterThunkAddr(m_rpcBindingHandle, scriptContextInfoAddress, address, asmjsThunk, result);
-    }
-        RpcExcept(RpcExceptionFilter(RpcExceptionCode()))
-    {
-        hr = HRESULT_FROM_WIN32(RpcExceptionCode());
-    }
-    RpcEndExcept;
-
-    return hr;
-}
-#endif
 
 HRESULT
 JITManager::IsNativeAddr(
@@ -623,3 +648,151 @@ JITManager::RemoteCodeGenCall(
 
     return hr;
 }
+
+#if DBG
+HRESULT
+JITManager::IsInterpreterThunkAddr(
+    __in PSCRIPTCONTEXT_HANDLE scriptContextInfoAddress,
+    __in intptr_t address,
+    __in boolean asmjsThunk,
+    __out boolean * result)
+{
+    Assert(IsOOPJITEnabled());
+
+    HRESULT hr = E_FAIL;
+    RpcTryExcept
+    {
+        hr = ClientIsInterpreterThunkAddr(m_rpcBindingHandle, scriptContextInfoAddress, address, asmjsThunk, result);
+    }
+        RpcExcept(RpcExceptionFilter(RpcExceptionCode()))
+    {
+        hr = HRESULT_FROM_WIN32(RpcExceptionCode());
+    }
+    RpcEndExcept;
+
+    return hr;
+}
+#endif
+
+#ifdef ENABLE_DEBUG_CONFIG_OPTIONS
+HRESULT
+JITManager::DeserializeRPCData(
+    _In_reads_(bufferSize) const byte* buffer,
+    _In_ uint bufferSize,
+    _Out_ CodeGenWorkItemIDL **workItemData
+)
+{
+    RPC_STATUS status = RPC_S_OK;
+    handle_t marshalHandle = nullptr;
+    *workItemData = nullptr;
+    __try
+    {
+        RpcTryExcept
+        {
+            status = MesDecodeBufferHandleCreate((char*)buffer, bufferSize, &marshalHandle);
+            if (status != RPC_S_OK)
+            {
+                return HRESULT_FROM_WIN32(status);
+            }
+
+            pCodeGenWorkItemIDL_Decode(
+                marshalHandle,
+                workItemData);
+        }
+        RpcExcept(I_RpcExceptionFilter(RpcExceptionCode()))
+        {
+            status = RpcExceptionCode();
+        }
+        RpcEndExcept;
+    }
+    __finally
+    {
+        MesHandleFree(marshalHandle);
+    }
+    return HRESULT_FROM_WIN32(status);
+}
+
+HRESULT
+JITManager::SerializeRPCData(_In_ CodeGenWorkItemIDL *workItemData, _Out_ size_t* bufferSize, _Outptr_result_buffer_(*bufferSize) const byte** outBuffer)
+{
+    handle_t marshalHandle = nullptr;
+    *bufferSize = 0;
+    *outBuffer = nullptr;
+    RPC_STATUS status = RPC_S_OK;
+    __try
+    {
+        RpcTryExcept
+        {
+            char* data = nullptr;
+            unsigned long encodedSize;
+            status = MesEncodeDynBufferHandleCreate(
+                &data,
+                &encodedSize,
+                &marshalHandle);
+            if (status != RPC_S_OK)
+            {
+                return HRESULT_FROM_WIN32(status);
+            }
+
+            MIDL_ES_CODE encodeType = MES_ENCODE;
+#if TARGET_64
+            encodeType = MES_ENCODE_NDR64;
+            // We only support encode syntax NDR64, however MesEncodeDynBufferHandleCreate doesn't allow to specify it
+            status = MesBufferHandleReset(
+                marshalHandle,
+                MES_DYNAMIC_BUFFER_HANDLE,
+                encodeType,
+                &data,
+                0,
+                &encodedSize
+            );
+            if (status != RPC_S_OK)
+            {
+                return HRESULT_FROM_WIN32(status);
+            }
+#endif
+
+            // Calculate how big we need to create the buffer
+            size_t tmpBufSize = pCodeGenWorkItemIDL_AlignSize(marshalHandle, &workItemData);
+            size_t alignedBufSize = Math::Align<size_t>(tmpBufSize, 16);
+            data = HeapNewNoThrowArray(char, alignedBufSize);
+            if (!data)
+            {
+                // Ran out of memory
+                return E_OUTOFMEMORY;
+            }
+
+            // Reset the buffer handle to a fixed buffer
+            status = MesBufferHandleReset(
+                marshalHandle,
+                MES_FIXED_BUFFER_HANDLE,
+                encodeType,
+                &data,
+                (unsigned long)alignedBufSize,
+                &encodedSize
+            );
+            if (status != RPC_S_OK)
+            {
+                return HRESULT_FROM_WIN32(status);
+            }
+
+            pCodeGenWorkItemIDL_Encode(
+                marshalHandle,
+                &workItemData);
+            *bufferSize = alignedBufSize;
+            *outBuffer = (byte*)data;
+        }
+        RpcExcept(I_RpcExceptionFilter(RpcExceptionCode()))
+        {
+            status = RpcExceptionCode();
+        }
+        RpcEndExcept;
+    }
+    __finally
+    {
+        MesHandleFree(marshalHandle);
+    }
+
+    return HRESULT_FROM_WIN32(status);
+}
+#endif

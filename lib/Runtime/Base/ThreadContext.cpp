@@ -4,12 +4,13 @@
 //-------------------------------------------------------------------------------------------------------
 
 #include "RuntimeBasePch.h"
-#include "BackendApi.h"
 #include "ThreadServiceWrapper.h"
 #include "Types/TypePropertyCache.h"
+#ifdef ENABLE_SCRIPT_DEBUGGING
 #include "Debug/DebuggingFlags.h"
 #include "Debug/DiagProbe.h"
 #include "Debug/DebugManager.h"
+#endif
 #include "Chars.h"
 #include "CaseInsensitive.h"
 #include "CharSet.h"
@@ -22,9 +23,6 @@
 #include "Language/InterpreterStackFrame.h"
 #include "Language/JavascriptStackWalker.h"
 #include "Base/ScriptMemoryDumper.h"
-
-// SIMD_JS
-#include "Library/SimdLib.h"
 
 #if DBG
 #include "Memory/StressTest.h"
@@ -54,17 +52,6 @@ void DefaultInitializeAdditionalProperties(ThreadContext *threadContext)
  */
 void (*InitializeAdditionalProperties)(ThreadContext *threadContext) = DefaultInitializeAdditionalProperties;
 
-// To make sure the marker function doesn't get inlined, optimized away, or merged with other functions we disable optimization.
-// If this method ends up causing a perf problem in the future, we should replace it with asm versions which should be lighter.
-#pragma optimize("g", off)
-_NOINLINE extern "C" void* MarkerForExternalDebugStep()
-{
-    // We need to return something here to prevent this function from being merged with other empty functions by the linker.
-    static int __dummy;
-    return &__dummy;
-}
-#pragma optimize("", on)
-
 CriticalSection ThreadContext::s_csThreadContext;
 size_t ThreadContext::processNativeCodeSize = 0;
 ThreadContext * ThreadContext::globalListFirst = nullptr;
@@ -82,13 +69,18 @@ const Js::PropertyRecord * const ThreadContext::builtInPropertyRecords[] =
 };
 
 ThreadContext::RecyclableData::RecyclableData(Recycler *const recycler) :
+    pendingFinallyException(nullptr),
     soErrorObject(nullptr, nullptr, nullptr, true),
     oomErrorObject(nullptr, nullptr, nullptr, true),
     terminatedErrorObject(nullptr, nullptr, nullptr),
     typesWithProtoPropertyCache(recycler),
+#if ENABLE_NATIVE_CODEGEN
     propertyGuards(recycler, 128),
+#endif
     oldEntryPointInfo(nullptr),
+#ifdef ENABLE_SCRIPT_DEBUGGING
     returnedValueList(nullptr),
+#endif
     constructorCacheInvalidationCount(0)
 {
 }
@@ -99,6 +91,7 @@ ThreadContext::ThreadContext(AllocationPolicyManager * allocationPolicyManager, 
     stackProber(nullptr),
     isThreadBound(false),
     hasThrownPendingException(false),
+    hasBailedOutBitPtr(nullptr),
     noScriptScope(false),
     heapEnum(nullptr),
     threadContextFlags(ThreadContextFlagNoFlag),
@@ -107,7 +100,7 @@ ThreadContext::ThreadContext(AllocationPolicyManager * allocationPolicyManager, 
     threadService(threadServiceCallback),
     isOptimizedForManyInstances(Js::Configuration::Global.flags.OptimizeForManyInstances),
     bgJit(Js::Configuration::Global.flags.BgJit),
-    pageAllocator(allocationPolicyManager, PageAllocatorType_Thread, Js::Configuration::Global.flags, 0, PageAllocator::DefaultMaxFreePageCount,
+    pageAllocator(allocationPolicyManager, PageAllocatorType_Thread, Js::Configuration::Global.flags, 0, RecyclerHeuristic::Instance.DefaultMaxFreePageCount,
         false
 #if ENABLE_BACKGROUND_PAGE_FREEING
         , &backgroundPageQueue
@@ -130,6 +123,7 @@ ThreadContext::ThreadContext(AllocationPolicyManager * allocationPolicyManager, 
     entryExitRecord(nullptr),
     leafInterpreterFrame(nullptr),
     threadServiceWrapper(nullptr),
+    tryCatchFrameAddr(nullptr),
     temporaryArenaAllocatorCount(0),
     temporaryGuestArenaAllocatorCount(0),
     crefSContextForDiag(0),
@@ -150,13 +144,13 @@ ThreadContext::ThreadContext(AllocationPolicyManager * allocationPolicyManager, 
     inlineCacheThreadInfoAllocator(_u("TC-InlineCacheInfo"), GetPageAllocator(), Js::Throw::OutOfMemory),
     isInstInlineCacheThreadInfoAllocator(_u("TC-IsInstInlineCacheInfo"), GetPageAllocator(), Js::Throw::OutOfMemory),
     equivalentTypeCacheInfoAllocator(_u("TC-EquivalentTypeCacheInfo"), GetPageAllocator(), Js::Throw::OutOfMemory),
-    preReservedVirtualAllocator(GetCurrentProcess()),
-    protoInlineCacheByPropId(&inlineCacheThreadInfoAllocator, 512),
-    storeFieldInlineCacheByPropId(&inlineCacheThreadInfoAllocator, 256),
-    isInstInlineCacheByFunction(&isInstInlineCacheThreadInfoAllocator, 128),
+    protoInlineCacheByPropId(&inlineCacheThreadInfoAllocator, 521),
+    storeFieldInlineCacheByPropId(&inlineCacheThreadInfoAllocator, 293),
+    isInstInlineCacheByFunction(&isInstInlineCacheThreadInfoAllocator, 131),
     registeredInlineCacheCount(0),
     unregisteredInlineCacheCount(0),
-    prototypeChainEnsuredToHaveOnlyWritableDataPropertiesAllocator(_u("TC-ProtoWritableProp"), GetPageAllocator(), Js::Throw::OutOfMemory),
+    noSpecialPropertyRegistry(this->GetPageAllocator()),
+    onlyWritablePropertyRegistry(this->GetPageAllocator()),
     standardUTF8Chars(0),
     standardUnicodeChars(0),
     hasUnhandledException(FALSE),
@@ -166,16 +160,20 @@ ThreadContext::ThreadContext(AllocationPolicyManager * allocationPolicyManager, 
     caseInvariantPropertySet(nullptr),
     entryPointToBuiltInOperationIdCache(&threadAlloc, 0),
 #if ENABLE_NATIVE_CODEGEN
+    preReservedVirtualAllocator(),
 #if !FLOATVAR
     codeGenNumberThreadAllocator(nullptr),
     xProcNumberPageSegmentManager(nullptr),
 #endif
-    m_pendingJITProperties(nullptr),
-    m_reclaimedJITProperties(nullptr),
+    m_jitNumericProperties(nullptr),
+    m_jitNeedsPropertyUpdate(false),
 #if DYNAMIC_INTERPRETER_THUNK || defined(ASMJS_PLAT)
     thunkPageAllocators(allocationPolicyManager, /* allocXData */ false, /* virtualAllocator */ nullptr, GetCurrentProcess()),
 #endif
     codePageAllocators(allocationPolicyManager, ALLOC_XDATA, GetPreReservedVirtualAllocator(), GetCurrentProcess()),
+#if defined(_CONTROL_FLOW_GUARD) && !defined(_M_ARM)
+    jitThunkEmitter(this, &VirtualAllocWrapper::Instance , GetCurrentProcess()),
+#endif
 #endif
     dynamicObjectEnumeratorCacheMap(&HeapAllocator::Instance, 16),
     //threadContextFlags(ThreadContextFlagNoFlag),
@@ -186,22 +184,30 @@ ThreadContext::ThreadContext(AllocationPolicyManager * allocationPolicyManager, 
     jsrtRuntime(nullptr),
     propertyMap(nullptr),
     rootPendingClose(nullptr),
+    exceptionCode(0),
     isProfilingUserCode(true),
     loopDepth(0),
     redeferralState(InitialRedeferralState),
     gcSinceLastRedeferral(0),
     gcSinceCallCountsCollected(0),
     tridentLoadAddress(nullptr),
-    m_remoteThreadContextInfo(nullptr),
-    debugManager(nullptr)
+    m_remoteThreadContextInfo(nullptr)
+#ifdef ENABLE_SCRIPT_DEBUGGING
+    , debugManager(nullptr)
+#endif
 #if ENABLE_TTD
     , TTDContext(nullptr)
+    , TTDExecutionInfo(nullptr)
     , TTDLog(nullptr)
     , TTDRootNestingCount(0)
 #endif
 #ifdef ENABLE_DIRECTCALL_TELEMETRY
     , directCallTelemetry(this)
 #endif
+#if ENABLE_JS_REENTRANCY_CHECK
+    , noJsReentrancy(false)
+#endif
+    , emptyStringPropertyRecord(nullptr)
 {
     pendingProjectionContextCloseList = JsUtil::List<IProjectionContext*, ArenaAllocator>::New(GetThreadAlloc());
     hostScriptContextStack = Anew(GetThreadAlloc(), JsUtil::Stack<HostScriptContext*>, GetThreadAlloc());
@@ -220,19 +226,6 @@ ThreadContext::ThreadContext(AllocationPolicyManager * allocationPolicyManager, 
 #if ENABLE_NATIVE_CODEGEN
     this->bailOutRegisterSaveSpace = AnewArrayZ(this->GetThreadAlloc(), Js::Var, GetBailOutRegisterSaveSlotCount());
 #endif
-
-#if defined(ENABLE_SIMDJS) && ENABLE_NATIVE_CODEGEN
-    simdFuncInfoToOpcodeMap = Anew(this->GetThreadAlloc(), FuncInfoToOpcodeMap, this->GetThreadAlloc());
-    simdOpcodeToSignatureMap = AnewArrayZ(this->GetThreadAlloc(), SimdFuncSignature, Js::Simd128OpcodeCount());
-    {
-#define MACRO_SIMD_WMS(op, LayoutAsmJs, OpCodeAttrAsmJs, OpCodeAttr, ...) \
-    AddSimdFuncToMaps(Js::OpCode::##op, __VA_ARGS__);
-
-#define MACRO_SIMD_EXTEND_WMS(op, LayoutAsmJs, OpCodeAttrAsmJs, OpCodeAttr, ...) MACRO_SIMD_WMS(op, LayoutAsmJs, OpCodeAttrAsmJs, OpCodeAttr, __VA_ARGS__)
-
-#include "ByteCode/OpCodesSimd.h"
-    }
-#endif // defined(ENABLE_SIMDJS) && ENABLE_NATIVE_CODEGEN
 
 #if DBG_DUMP
     scriptSiteCount = 0;
@@ -266,6 +259,11 @@ ThreadContext::ThreadContext(AllocationPolicyManager * allocationPolicyManager, 
 #if DBG_DUMP
     this->projectionMemoryInformation = nullptr;
 #endif
+#endif
+
+#if DBG
+    arrayMutationSeed = (Js::Configuration::Global.flags.ArrayMutationTestSeed != 0) ? (uint)Js::Configuration::Global.flags.ArrayMutationTestSeed : (uint)time(NULL);
+    srand(arrayMutationSeed);
 #endif
 
     this->InitAvailableCommit();
@@ -324,7 +322,7 @@ ThreadContext::GetThreadStackLimitAddr() const
     return (intptr_t)GetAddressOfStackLimitForCurrentThread();
 }
 
-#if ENABLE_NATIVE_CODEGEN && defined(ENABLE_SIMDJS) && (defined(_M_IX86) || defined(_M_X64))
+#if ENABLE_NATIVE_CODEGEN && defined(ENABLE_WASM_SIMD)
 intptr_t
 ThreadContext::GetSimdTempAreaAddr(uint8 tempIndex) const
 {
@@ -395,6 +393,12 @@ ThreadContext::~ThreadContext()
         this->TTDContext = nullptr;
     }
 
+    if(this->TTDExecutionInfo != nullptr)
+    {
+        TT_HEAP_DELETE(TTD::ThreadContextTTD, this->TTDExecutionInfo);
+        this->TTDExecutionInfo = nullptr;
+    }
+
     if(this->TTDLog != nullptr)
     {
         TT_HEAP_DELETE(TTD::EventLog, this->TTDLog);
@@ -460,11 +464,13 @@ ThreadContext::~ThreadContext()
             this->recyclableData->symbolRegistrationMap = nullptr;
         }
 
+#ifdef ENABLE_SCRIPT_DEBUGGING
         if (this->recyclableData->returnedValueList != nullptr)
         {
             this->recyclableData->returnedValueList->Clear();
             this->recyclableData->returnedValueList = nullptr;
         }
+#endif
 
         if (this->propertyMap != nullptr)
         {
@@ -473,15 +479,10 @@ ThreadContext::~ThreadContext()
         }
 
 #if ENABLE_NATIVE_CODEGEN
-        if (this->m_pendingJITProperties != nullptr)
+        if (this->m_jitNumericProperties != nullptr)
         {
-            HeapDelete(this->m_pendingJITProperties);
-            this->m_pendingJITProperties = nullptr;
-        }
-        if (this->m_reclaimedJITProperties != nullptr)
-        {
-            HeapDelete(this->m_reclaimedJITProperties);
-            this->m_reclaimedJITProperties = nullptr;
+            HeapDelete(this->m_jitNumericProperties);
+            this->m_jitNumericProperties = nullptr;
         }
 #endif
         // Unpin the memory for leak report so we don't report this as a leak.
@@ -517,9 +518,9 @@ ThreadContext::~ThreadContext()
         }
 #endif
 #endif
-
+#ifdef ENABLE_SCRIPT_DEBUGGING
         Assert(this->debugManager == nullptr);
-
+#endif
         HeapDelete(recycler);
     }
 
@@ -550,7 +551,8 @@ ThreadContext::~ThreadContext()
     this->storeFieldInlineCacheByPropId.Reset();
     this->isInstInlineCacheByFunction.Reset();
     this->equivalentTypeCacheEntryPoints.Reset();
-    this->prototypeChainEnsuredToHaveOnlyWritableDataPropertiesScriptContext.Reset();
+    this->noSpecialPropertyRegistry.Reset();
+    this->onlyWritablePropertyRegistry.Reset();
 
     this->registeredInlineCacheCount = 0;
     this->unregisteredInlineCacheCount = 0;
@@ -595,7 +597,8 @@ ThreadContext::~ThreadContext()
 void
 ThreadContext::SetJSRTRuntime(void* runtime)
 {
-    Assert(jsrtRuntime == nullptr); jsrtRuntime = runtime;
+    Assert(jsrtRuntime == nullptr);
+    jsrtRuntime = runtime;
 #ifdef ENABLE_BASIC_TELEMETRY
     Telemetry::EnsureInitializeForJSRT();
 #endif
@@ -611,7 +614,6 @@ void ThreadContext::CloseForJSRT()
 #endif
     ShutdownThreads();
 }
-
 
 ThreadContext* ThreadContext::GetContextForCurrentThread()
 {
@@ -644,88 +646,6 @@ void ThreadContext::ValidateThreadContext()
 
 #endif
 }
-
-#if ENABLE_NATIVE_CODEGEN && defined(ENABLE_SIMDJS)
-void ThreadContext::AddSimdFuncToMaps(Js::OpCode op, ...)
-{
-    Assert(simdFuncInfoToOpcodeMap != nullptr);
-    Assert(simdOpcodeToSignatureMap != nullptr);
-
-    va_list arguments;
-    va_start(arguments, op);
-
-    int argumentsCount = va_arg(arguments, int);
-    AssertMsg(argumentsCount >= 0 && argumentsCount <= 20, "Invalid arguments count for SIMD opcode");
-    if (argumentsCount == 0)
-    {
-        // no info to add
-        return;
-    }
-    Js::FunctionInfo *funcInfo = va_arg(arguments, Js::FunctionInfo*);
-    AddSimdFuncInfo(op, funcInfo);
-
-    SimdFuncSignature simdFuncSignature;
-    simdFuncSignature.valid = true;
-    simdFuncSignature.argCount = argumentsCount - 2; // arg count to Simd func = argumentsCount - FuncInfo and return Type fields.
-    simdFuncSignature.returnType = va_arg(arguments, ValueType);
-    simdFuncSignature.args = AnewArrayZ(this->GetThreadAlloc(), ValueType, simdFuncSignature.argCount);
-    for (uint iArg = 0; iArg < simdFuncSignature.argCount; iArg++)
-    {
-        simdFuncSignature.args[iArg] = va_arg(arguments, ValueType);
-    }
-
-    simdOpcodeToSignatureMap[Js::SIMDUtils::SimdOpcodeAsIndex(op)] = simdFuncSignature;
-
-    va_end(arguments);
-}
-
-void ThreadContext::AddSimdFuncInfo(Js::OpCode op, Js::FunctionInfo *funcInfo)
-{
-    // primary funcInfo
-    simdFuncInfoToOpcodeMap->AddNew(funcInfo, op);
-    // Entry points of SIMD loads/stores of non-full width all map to the same opcode. This is not captured in the opcode table, so add additional entry points here.
-    switch (op)
-    {
-    case Js::OpCode::Simd128_LdArr_F4:
-        simdFuncInfoToOpcodeMap->AddNew(&Js::SIMDFloat32x4Lib::EntryInfo::Load1, op);
-        simdFuncInfoToOpcodeMap->AddNew(&Js::SIMDFloat32x4Lib::EntryInfo::Load2, op);
-        simdFuncInfoToOpcodeMap->AddNew(&Js::SIMDFloat32x4Lib::EntryInfo::Load3, op);
-        break;
-    case Js::OpCode::Simd128_StArr_F4:
-        simdFuncInfoToOpcodeMap->AddNew(&Js::SIMDFloat32x4Lib::EntryInfo::Store1, op);
-        simdFuncInfoToOpcodeMap->AddNew(&Js::SIMDFloat32x4Lib::EntryInfo::Store2, op);
-        simdFuncInfoToOpcodeMap->AddNew(&Js::SIMDFloat32x4Lib::EntryInfo::Store3, op);
-        break;
-    case Js::OpCode::Simd128_LdArr_I4:
-        simdFuncInfoToOpcodeMap->AddNew(&Js::SIMDInt32x4Lib::EntryInfo::Load1, op);
-        simdFuncInfoToOpcodeMap->AddNew(&Js::SIMDInt32x4Lib::EntryInfo::Load2, op);
-        simdFuncInfoToOpcodeMap->AddNew(&Js::SIMDInt32x4Lib::EntryInfo::Load3, op);
-        break;
-    case Js::OpCode::Simd128_StArr_I4:
-        simdFuncInfoToOpcodeMap->AddNew(&Js::SIMDInt32x4Lib::EntryInfo::Store1, op);
-        simdFuncInfoToOpcodeMap->AddNew(&Js::SIMDInt32x4Lib::EntryInfo::Store2, op);
-        simdFuncInfoToOpcodeMap->AddNew(&Js::SIMDInt32x4Lib::EntryInfo::Store3, op);
-        break;
-    }
-}
-
-Js::OpCode ThreadContext::GetSimdOpcodeFromFuncInfo(Js::FunctionInfo * funcInfo)
-{
-    Assert(simdFuncInfoToOpcodeMap != nullptr);
-    if (simdFuncInfoToOpcodeMap->ContainsKey(funcInfo))
-    {
-        return simdFuncInfoToOpcodeMap->Item(funcInfo);
-
-    }
-    return (Js::OpCode) 0;
-}
-
-void ThreadContext::GetSimdFuncSignatureFromOpcode(Js::OpCode op, SimdFuncSignature &funcSignature)
-{
-    Assert(simdOpcodeToSignatureMap != nullptr);
-    funcSignature = simdOpcodeToSignatureMap[Js::SIMDUtils::SimdOpcodeAsIndex(op)];
-}
-#endif
 
 class AutoRecyclerPtr : public AutoPtr<Recycler>
 {
@@ -777,7 +697,7 @@ Recycler* ThreadContext::EnsureRecycler()
         try
         {
 #ifdef RECYCLER_WRITE_BARRIER
-#ifdef _M_X64_OR_ARM64
+#ifdef TARGET_64
             if (!RecyclerWriteBarrierManager::OnThreadInit())
             {
                 Js::Throw::OutOfMemory();
@@ -872,12 +792,24 @@ ThreadContext::GetPropertyNameImpl(Js::PropertyId propertyId)
 void
 ThreadContext::FindPropertyRecord(Js::JavascriptString *pstName, Js::PropertyRecord const ** propertyRecord)
 {
-    LPCWSTR psz = pstName->GetSz();
-    FindPropertyRecord(psz, pstName->GetLength(), propertyRecord);
+    pstName->GetPropertyRecord(propertyRecord, true);
+    if (*propertyRecord != nullptr)
+    {
+        return;
+    }
+
+    // GetString is not guaranteed to be null-terminated, but we explicitly pass length to the next step
+    LPCWCH propertyName = pstName->GetString();
+    FindPropertyRecord(propertyName, pstName->GetLength(), propertyRecord);
+
+    if (*propertyRecord)
+    {
+        pstName->CachePropertyRecord(*propertyRecord);
+    }
 }
 
 void
-ThreadContext::FindPropertyRecord(__in LPCWSTR propertyName, __in int propertyNameLength, Js::PropertyRecord const ** propertyRecord)
+ThreadContext::FindPropertyRecord(__in LPCWCH propertyName, __in int propertyNameLength, Js::PropertyRecord const ** propertyRecord)
 {
     EnterPinnedScope((volatile void **)propertyRecord);
     *propertyRecord = FindPropertyRecord(propertyName, propertyNameLength);
@@ -899,19 +831,23 @@ ThreadContext::IsNumericProperty(Js::PropertyId propertyId)
 const Js::PropertyRecord *
 ThreadContext::FindPropertyRecord(const char16 * propertyName, int propertyNameLength)
 {
-    Js::PropertyRecord const * propertyRecord = nullptr;
-
-    if (IsDirectPropertyName(propertyName, propertyNameLength))
+    // IsDirectPropertyName == 1 char properties && GetEmptyStringPropertyRecord == 0 length
+    if (propertyNameLength < 2)
     {
-        propertyRecord = propertyNamesDirect[propertyName[0]];
-        Assert(propertyRecord == propertyMap->LookupWithKey(Js::HashedCharacterBuffer<char16>(propertyName, propertyNameLength)));
-    }
-    else
-    {
-        propertyRecord = propertyMap->LookupWithKey(Js::HashedCharacterBuffer<char16>(propertyName, propertyNameLength));
+        if (propertyNameLength == 0)
+        {
+            return this->GetEmptyStringPropertyRecord();
+        }
+
+        if (IsDirectPropertyName(propertyName, propertyNameLength))
+        {
+            Js::PropertyRecord const * propertyRecord = propertyNamesDirect[propertyName[0]];
+            Assert(propertyRecord == propertyMap->LookupWithKey(Js::HashedCharacterBuffer<char16>(propertyName, propertyNameLength)));
+            return propertyRecord;
+        }
     }
 
-    return propertyRecord;
+    return propertyMap->LookupWithKey(Js::HashedCharacterBuffer<char16>(propertyName, propertyNameLength));
 }
 
 Js::PropertyRecord const *
@@ -949,19 +885,6 @@ void ThreadContext::InitializePropertyMaps()
             HeapDelete(this->propertyMap);
         }
         this->propertyMap = nullptr;
-
-#if ENABLE_NATIVE_CODEGEN
-        if (this->m_pendingJITProperties != nullptr)
-        {
-            HeapDelete(this->m_pendingJITProperties);
-            this->m_pendingJITProperties = nullptr;
-        }
-        if (this->m_reclaimedJITProperties != nullptr)
-        {
-            HeapDelete(this->m_reclaimedJITProperties);
-            this->m_reclaimedJITProperties = nullptr;
-        }
-#endif
 
         this->caseInvariantPropertySet = nullptr;
         memset(propertyNamesDirect, 0, 128*sizeof(Js::PropertyRecord *));
@@ -1010,7 +933,7 @@ ThreadContext::UncheckedAddPropertyId(JsUtil::CharacterBuffer<WCHAR> const& prop
         if(this->TTDContext->GetActiveScriptContext() != nullptr && this->TTDContext->GetActiveScriptContext()->ShouldPerformReplayAction())
         {
             //We reload all properties that occour in the trace so they only way we get here in TTD mode is:
-            //(1) if the program is creating a new symbol (which always gets a fresh id) and we should recreate it or 
+            //(1) if the program is creating a new symbol (which always gets a fresh id) and we should recreate it or
             //(2) if it is forcing arguments in debug parse mode (instead of regular which we recorded in)
             Js::PropertyId propertyId = Js::Constants::NoProperty;
             this->TTDLog->ReplaySymbolCreationEvent(&propertyId);
@@ -1037,37 +960,18 @@ ThreadContext::UncheckedAddPropertyId(JsUtil::CharacterBuffer<WCHAR> const& prop
 
     int length = propertyName.GetLength();
     uint bytelength = sizeof(char16) * length;
-
-    uint32 indexVal = 0;
-
-    // Symbol properties cannot be numeric since their description is not to be used!
-    bool isNumeric = !isSymbol && Js::PropertyRecord::IsPropertyNameNumeric(propertyName.GetBuffer(), propertyName.GetLength(), &indexVal);
-
-    uint hash = JsUtil::CharacterBuffer<WCHAR>::StaticGetHashCode(propertyName.GetBuffer(), propertyName.GetLength());
-
-    size_t allocLength = bytelength + sizeof(char16) + (isNumeric ? sizeof(uint32) : 0);
+    size_t allocLength = bytelength + sizeof(char16) + ( (!isSymbol && length <= 10 && length > 0) ? sizeof(uint32) : 0);
 
     // If it's bound, create it in the thread arena, along with a fake weak ref
     Js::PropertyRecord * propertyRecord;
     if (bind)
     {
-        propertyRecord = AnewPlus(GetThreadAlloc(), allocLength, Js::PropertyRecord, bytelength, isNumeric, hash, isSymbol);
+        propertyRecord = AnewPlus(GetThreadAlloc(), allocLength, Js::PropertyRecord, propertyName.GetBuffer(), length, bytelength, isSymbol);
         propertyRecord->isBound = true;
     }
     else
     {
-        propertyRecord = RecyclerNewFinalizedLeafPlus(recycler, allocLength, Js::PropertyRecord, bytelength, isNumeric, hash, isSymbol);
-    }
-
-    // Copy string and numeric info
-    char16* buffer = (char16 *)(propertyRecord + 1);
-    js_memcpy_s(buffer, bytelength, propertyName.GetBuffer(), bytelength);
-    buffer[length] = _u('\0');
-
-    if (isNumeric)
-    {
-        *(uint32 *)(buffer + length + 1) = indexVal;
-        Assert(propertyRecord->GetNumericValue() == indexVal);
+        propertyRecord = RecyclerNewFinalizedLeafPlus(recycler, allocLength, Js::PropertyRecord, propertyName.GetBuffer(), length, bytelength, isSymbol);
     }
 
     Js::PropertyId propertyId = this->GetNextPropertyId();
@@ -1104,7 +1008,7 @@ ThreadContext::AddPropertyRecordInternal(const Js::PropertyRecord * propertyReco
 #if DBG
     // Only Assert we can't find the property if we are not adding a symbol.
     // For a symbol, the propertyName is not used and may collide with something in the map already.
-    if (!propertyRecord->IsSymbol())
+    if (propertyNameLength > 0 && !propertyRecord->IsSymbol())
     {
         Assert(FindPropertyRecord(propertyName, propertyNameLength) == nullptr);
     }
@@ -1121,15 +1025,12 @@ ThreadContext::AddPropertyRecordInternal(const Js::PropertyRecord * propertyReco
     propertyMap->Add(propertyRecord);
 
 #if ENABLE_NATIVE_CODEGEN
-    if (m_pendingJITProperties)
+    if (m_jitNumericProperties)
     {
-        Assert(m_reclaimedJITProperties);
         if (propertyRecord->IsNumeric())
         {
-            if (!m_reclaimedJITProperties->Remove(propertyRecord->GetPropertyId()))
-            {
-                m_pendingJITProperties->Prepend(propertyRecord->GetPropertyId());
-            }
+            m_jitNumericProperties->Set(propertyRecord->GetPropertyId());
+            m_jitNeedsPropertyUpdate = true;
         }
     }
 #endif
@@ -1156,7 +1057,7 @@ ThreadContext::AddPropertyRecordInternal(const Js::PropertyRecord * propertyReco
 #if DBG
     // Only Assert we can find the property if we are not adding a symbol.
     // For a symbol, the propertyName is not used and we won't be able to look the pid up via name.
-    if (!propertyRecord->IsSymbol())
+    if (propertyNameLength && !propertyRecord->IsSymbol())
     {
         Assert(FindPropertyRecord(propertyName, propertyNameLength) == propertyRecord);
     }
@@ -1207,12 +1108,12 @@ ThreadContext::BindPropertyRecord(const Js::PropertyRecord * propertyRecord)
     }
 }
 
-void ThreadContext::GetOrAddPropertyId(__in LPCWSTR propertyName, __in int propertyNameLength, Js::PropertyRecord const ** propertyRecord)
+void ThreadContext::GetOrAddPropertyId(_In_ LPCWSTR propertyName, _In_ int propertyNameLength, _Out_ Js::PropertyRecord const ** propertyRecord)
 {
     GetOrAddPropertyId(JsUtil::CharacterBuffer<WCHAR>(propertyName, propertyNameLength), propertyRecord);
 }
 
-void ThreadContext::GetOrAddPropertyId(JsUtil::CharacterBuffer<WCHAR> const& propertyName, Js::PropertyRecord const ** propRecord)
+void ThreadContext::GetOrAddPropertyId(_In_ JsUtil::CharacterBuffer<WCHAR> const& propertyName, _Out_ Js::PropertyRecord const ** propRecord)
 {
     EnterPinnedScope((volatile void **)propRecord);
     *propRecord = GetOrAddPropertyRecord(propertyName);
@@ -1254,6 +1155,11 @@ void ThreadContext::AddBuiltInPropertyRecord(const Js::PropertyRecord *propertyR
 
 BOOL ThreadContext::IsNumericPropertyId(Js::PropertyId propertyId, uint32* value)
 {
+    if (Js::IsInternalPropertyId(propertyId))
+    {
+        return false;
+    }
+
     Js::PropertyRecord const * propertyRecord = this->GetPropertyName(propertyId);
     Assert(propertyRecord != nullptr);
     if (propertyRecord == nullptr || !propertyRecord->IsNumeric())
@@ -1287,10 +1193,10 @@ void ThreadContext::InvalidatePropertyRecord(const Js::PropertyRecord * property
 {
     InternalInvalidateProtoTypePropertyCaches(propertyRecord->GetPropertyId());     // use the internal version so we don't check for active property id
 #if ENABLE_NATIVE_CODEGEN
-    if (propertyRecord->IsNumeric() && m_pendingJITProperties && !m_pendingJITProperties->Remove(propertyRecord->GetPropertyId()))
+    if (propertyRecord->IsNumeric() && m_jitNumericProperties)
     {
-        // if it wasn't pending, that means it was already sent to the jit, so add to list that jit needs to reclaim
-        m_reclaimedJITProperties->PrependNoThrow(&HeapAllocator::Instance, propertyRecord->GetPropertyId());
+        m_jitNumericProperties->Clear(propertyRecord->GetPropertyId());
+        m_jitNeedsPropertyUpdate = true;
     }
 #endif
     this->propertyMap->Remove(propertyRecord);
@@ -1596,9 +1502,14 @@ ThreadContext::SetForceOneIdleCollection()
 
 }
 
-BOOLEAN
+bool
 ThreadContext::IsOnStack(void const *ptr)
 {
+    if (IS_ASAN_FAKE_STACK_ADDR(ptr))
+    {
+        return true;
+    }
+
 #if defined(_M_IX86) && defined(_MSC_VER)
     return ptr < (void*)__readfsdword(0x4) && ptr >= (void*)__readfsdword(0xE0C);
 #elif defined(_M_AMD64) && defined(_MSC_VER)
@@ -1640,7 +1551,7 @@ ThreadContext::SetStackLimitForCurrentThread(size_t limit)
 
 _NOINLINE //Win8 947081: might use wrong _AddressOfReturnAddress() if this and caller are inlined
 bool
-ThreadContext::IsStackAvailable(size_t size)
+ThreadContext::IsStackAvailable(size_t size, bool* isInterrupt)
 {
     size_t sp = (size_t)_AddressOfReturnAddress();
     size_t stackLimit = this->GetStackLimitForCurrentThread();
@@ -1667,6 +1578,11 @@ ThreadContext::IsStackAvailable(size_t size)
             {
                 // Take down the process if we cant recover from the stack overflow
                 Js::Throw::FatalInternalError();
+            }
+
+            if (isInterrupt)
+            {
+                *isInterrupt = true;  // when stack not available, indicate if due to script interrupt
             }
         }
     }
@@ -1721,6 +1637,7 @@ ThreadContext::ProbeStackNoDispose(size_t size, Js::ScriptContext *scriptContext
         Js::Throw::StackOverflow(scriptContext, returnAddress);
     }
 
+#if defined(NTBUILD) || defined(__IOS__) || defined(__ANDROID__)
     // Use every Nth stack probe as a QC trigger.
     if (AutoSystemInfo::ShouldQCMoreFrequently() && this->HasInterruptPoller() && this->IsScriptActive())
     {
@@ -1731,15 +1648,6 @@ ThreadContext::ProbeStackNoDispose(size_t size, Js::ScriptContext *scriptContext
             this->CheckInterruptPoll();
         }
     }
-
-#if DBG
-    if (PHASE_STRESS1(Js::RedeferralPhase))
-    {
-        if (JsUtil::ExternalApi::IsScriptActiveOnCurrentThreadContext())
-        {
-            this->TryRedeferral();
-        }
-    }
 #endif
 }
 
@@ -1747,6 +1655,13 @@ void
 ThreadContext::ProbeStack(size_t size, Js::ScriptContext *scriptContext, PVOID returnAddress)
 {
     this->ProbeStackNoDispose(size, scriptContext, returnAddress);
+
+#if PERFMAP_TRACE_ENABLED
+    if (PlatformAgnostic::PerfTrace::mapsRequested)
+    {
+        PlatformAgnostic::PerfTrace::WritePerfMap();
+    }
+#endif
 
     // BACKGROUND-GC TODO: If we're stuck purely in JITted code, we should have the
     // background GC thread modify the threads stack limit to trigger the runtime stack probe
@@ -1864,7 +1779,8 @@ void ThreadContext::DisposeOnLeaveScript()
 {
     PHASE_PRINT_TRACE1(Js::DisposePhase, _u("[Dispose] NeedDispose in LeaveScriptStart: %d\n"), this->recycler->NeedDispose());
 
-    if (this->callDispose && this->recycler->NeedDispose())
+    if (this->callDispose && this->recycler->NeedDispose()
+        && !recycler->IsCollectionDisabled())
     {
         this->recycler->FinishDisposeObjectsNow<FinishDispose>();
     }
@@ -1970,31 +1886,26 @@ ThreadContext::SetJITConnectionInfo(HANDLE processHandle, void* serverSecurityDe
     Assert(JITManager::GetJITManager()->IsOOPJITEnabled());
     if (!JITManager::GetJITManager()->IsConnected())
     {
-        HRESULT hr = JITManager::GetJITManager()->ConnectRpcServer(processHandle, serverSecurityDescriptor, connectionId);
-        if (FAILED(hr))
-        {
-            // TODO: michhol OOP JIT is this correct?
-            Js::Throw::InternalError();
-        }
+        // TODO: return HRESULT
+        JITManager::GetJITManager()->ConnectRpcServer(processHandle, serverSecurityDescriptor, connectionId);
     }
 }
-void
+bool
 ThreadContext::EnsureJITThreadContext(bool allowPrereserveAlloc)
 {
 #if ENABLE_OOP_NATIVE_CODEGEN
     Assert(JITManager::GetJITManager()->IsOOPJITEnabled());
-    Assert(JITManager::GetJITManager()->IsConnected());
+    if (!JITManager::GetJITManager()->IsConnected())
+    {
+        return false;
+    }
 
     if (m_remoteThreadContextInfo)
     {
-        return;
+        return true;
     }
 
     ThreadContextDataIDL contextData;
-    contextData.processHandle = (intptr_t)JITManager::GetJITManager()->GetJITTargetHandle();
-
-    contextData.chakraBaseAddress = (intptr_t)AutoSystemInfo::Data.GetChakraBaseAddr();
-    contextData.crtBaseAddress = (intptr_t)GetModuleHandle(UCrtC99MathApis::LibraryName);
     contextData.threadStackLimitAddr = reinterpret_cast<intptr_t>(GetAddressOfStackLimitForCurrentThread());
     contextData.bailOutRegisterSaveSpaceAddr = (intptr_t)bailOutRegisterSaveSpace;
     contextData.disableImplicitFlagsAddr = (intptr_t)GetAddressOfDisableImplicitFlags();
@@ -2002,58 +1913,85 @@ ThreadContext::EnsureJITThreadContext(bool allowPrereserveAlloc)
     contextData.scriptStackLimit = GetScriptStackLimit();
     contextData.isThreadBound = IsThreadBound();
     contextData.allowPrereserveAlloc = allowPrereserveAlloc;
-#if defined(ENABLE_SIMDJS) && (_M_IX86 || _M_AMD64)
+#if defined(ENABLE_WASM_SIMD) && (_M_IX86 || _M_AMD64)
     contextData.simdTempAreaBaseAddr = (intptr_t)GetSimdTempArea();
 #endif
 
-    m_reclaimedJITProperties = HeapNew(PropertyList, &HeapAllocator::Instance);
-    m_pendingJITProperties = HeapNew(PropertyList, &HeapAllocator::Instance);
-    
+    m_jitNumericProperties = HeapNew(BVSparse<HeapAllocator>, &HeapAllocator::Instance);
+
     for (auto iter = propertyMap->GetIterator(); iter.IsValid(); iter.MoveNext())
     {
         if (iter.CurrentKey()->IsNumeric())
         {
-            m_pendingJITProperties->Prepend(iter.CurrentKey()->GetPropertyId());
+            m_jitNumericProperties->Set(iter.CurrentKey()->GetPropertyId());
+            m_jitNeedsPropertyUpdate = true;
         }
     }
 
-    HRESULT hr = JITManager::GetJITManager()->InitializeThreadContext(&contextData, &m_remoteThreadContextInfo, &m_prereservedRegionAddr);
-    JITManager::HandleServerCallResult(hr);
+    HRESULT hr = JITManager::GetJITManager()->InitializeThreadContext(
+        &contextData,
+        &m_remoteThreadContextInfo,
+        &m_prereservedRegionAddr,
+        &m_jitThunkStartAddr);
+    JITManager::HandleServerCallResult(hr, RemoteCallType::StateUpdate);
 
+    return m_remoteThreadContextInfo != nullptr;
 #endif
 }
 #endif
 
 #if ENABLE_TTD
-void ThreadContext::InitTimeTravel(ThreadContext* threadContext, void* runtimeHandle, size_t uriByteLength, const byte* ttdUri, uint32 snapInterval, uint32 snapHistoryLength)
+void ThreadContext::InitTimeTravel(ThreadContext* threadContext, void* runtimeHandle, uint32 snapInterval, uint32 snapHistoryLength)
 {
-    AssertMsg(!this->IsRuntimeInTTDMode(), "We should only init once.");
+    TTDAssert(!this->IsRuntimeInTTDMode(), "We should only init once.");
 
-    this->TTDContext = HeapNew(TTD::ThreadContextTTD, this, runtimeHandle, uriByteLength, ttdUri, snapInterval, snapHistoryLength);
+    this->TTDContext = HeapNew(TTD::ThreadContextTTD, this, runtimeHandle, snapInterval, snapHistoryLength);
     this->TTDLog = HeapNew(TTD::EventLog, this);
 }
 
-void ThreadContext::InitHostFunctionsAndTTData(bool record, bool replay, bool debug, 
-    TTD::TTDInitializeForWriteLogStreamCallback writeInitializefp,
-    TTD::TTDOpenResourceStreamCallback getResourceStreamfp, TTD::TTDReadBytesFromStreamCallback readBytesFromStreamfp,
+void ThreadContext::InitHostFunctionsAndTTData(bool record, bool replay, bool debug, size_t optTTUriLength, const char* optTTUri,
+    TTD::TTDOpenResourceStreamCallback openResourceStreamfp, TTD::TTDReadBytesFromStreamCallback readBytesFromStreamfp,
     TTD::TTDWriteBytesToStreamCallback writeBytesToStreamfp, TTD::TTDFlushAndCloseStreamCallback flushAndCloseStreamfp,
     TTD::TTDCreateExternalObjectCallback createExternalObjectfp,
-    TTD::TTDCreateJsRTContextCallback createJsRTContextCallbackfp, TTD::TTDSetActiveJsRTContext setActiveJsRTContextfp)
+    TTD::TTDCreateJsRTContextCallback createJsRTContextCallbackfp, TTD::TTDReleaseJsRTContextCallback releaseJsRTContextCallbackfp, TTD::TTDSetActiveJsRTContext setActiveJsRTContextfp)
 {
     AssertMsg(this->IsRuntimeInTTDMode(), "Need to call init first.");
 
-    this->TTDContext->TTDWriteInitializeFunction = writeInitializefp;
-    this->TTDContext->TTDStreamFunctions = { getResourceStreamfp, readBytesFromStreamfp, writeBytesToStreamfp, flushAndCloseStreamfp };
-    this->TTDContext->TTDExternalObjectFunctions = { createExternalObjectfp, createJsRTContextCallbackfp, setActiveJsRTContextfp };
+    this->TTDContext->TTDataIOInfo = { openResourceStreamfp, readBytesFromStreamfp, writeBytesToStreamfp, flushAndCloseStreamfp, 0, nullptr };
+    this->TTDContext->TTDExternalObjectFunctions = { createExternalObjectfp, createJsRTContextCallbackfp, releaseJsRTContextCallbackfp, setActiveJsRTContextfp };
 
     if(record)
     {
-        this->TTDLog->InitForTTDRecord();
+        TTDAssert(optTTUri == nullptr, "No URI is needed in record mode (the host explicitly provides it when writing.");
+
+        this->TTDLog->InitForTTDRecord(debug);
     }
-    else 
+    else
     {
-        this->TTDLog->InitForTTDReplay(this->TTDContext->TTDStreamFunctions, this->TTDContext->TTDUri.UriByteLength, this->TTDContext->TTDUri.UriBytes, debug);
+        TTDAssert(optTTUri != nullptr, "We need a URI in replay mode so we can initialize the log from it");
+
+        this->TTDLog->InitForTTDReplay(this->TTDContext->TTDataIOInfo, optTTUri, optTTUriLength, debug);
+        this->sourceInfoCount = this->TTDLog->GetSourceInfoCount();
     }
+
+#if !ENABLE_TTD_DIAGNOSTICS_TRACING
+    if(debug)
+    {
+#endif
+
+        TTD::TTInnerLoopLastStatementInfo lsi;
+        TTD::TTDebuggerSourceLocation dsl;
+        this->TTDLog->LoadLastSourceLineInfo(lsi, dsl);
+
+        this->TTDExecutionInfo = HeapNew(TTD::ExecutionInfoManager, lsi);
+        if(dsl.HasValue())
+        {
+            this->TTDExecutionInfo->SetPendingTTDToTarget(dsl);
+        }
+
+#if !ENABLE_TTD_DIAGNOSTICS_TRACING
+    }
+#endif
 }
 #endif
 
@@ -2067,7 +2005,7 @@ ThreadContext::ExecuteRecyclerCollectionFunction(Recycler * recycler, Collection
     }
 
     // Take etw rundown lock on this thread context. We can't collect entryPoints if we are in etw rundown.
-    AutoCriticalSection autocs(this->GetEtwRundownCriticalSection());
+    AutoCriticalSection autocs(this->GetFunctionBodyLock());
 
     // Disable calling dispose from leave script or the stack probe
     // while we're executing the recycler wrapper
@@ -2078,9 +2016,9 @@ ThreadContext::ExecuteRecyclerCollectionFunction(Recycler * recycler, Collection
 
 #if ENABLE_TTD
     //
-    //TODO: We lose any events that happen in the callbacks (such as JsRelease) which may be a problem in the future. 
+    //TODO: We lose any events that happen in the callbacks (such as JsRelease) which may be a problem in the future.
     //      It may be possible to defer the collection of these objects to an explicit collection at the yield loop (same for weak set/map).
-    //      We already indirectly do this for ScriptContext collection.
+    //      We already indirectly do this for ScriptContext collection (but that is buggy so needs to be fixed too).
     //
     if(this->IsRuntimeInTTDMode())
     {
@@ -2142,15 +2080,19 @@ ThreadContext::ExecuteRecyclerCollectionFunction(Recycler * recycler, Collection
 void
 ThreadContext::DisposeObjects(Recycler * recycler)
 {
-    if(this->IsDisableImplicitCall())
+    if (this->IsDisableImplicitCall())
     {
         // Don't dispose objects when implicit calls are disabled, since disposing may cause implicit calls. Objects will remain
         // in the dispose queue and will be disposed later when implicit calls are not disabled.
         return;
     }
 
-    // we shouldn't dispose in noscriptscope as it might lead to script execution.
-    Assert(!this->IsNoScriptScope());
+    // We shouldn't DisposeObjects in NoScriptScope as this might lead to script execution.
+    // Callers of DisposeObjects should ensure !IsNoScriptScope() before calling DisposeObjects.
+    if (this->IsNoScriptScope())
+    {
+        FromDOM_NoScriptScope_unrecoverable_error();
+    }
 
     if (!this->IsScriptActive())
     {
@@ -2185,10 +2127,17 @@ ThreadContext::PushEntryExitRecord(Js::ScriptEntryExitRecord * record)
         lastRecord->hasReentered = true;
         record->next = lastRecord;
 
-        // these are on stack, which grows down. if this condition doesn't hold, then the list somehow got messed up
-        if (!IsOnStack(lastRecord) || (uintptr_t)record >= (uintptr_t)lastRecord)
+        // these are on stack, which grows down. if this condition doesn't hold,
+        // then the list somehow got messed up
+        if (
+#if defined(JSRT_VERIFY_RUNTIME_STATE) || defined(DEBUG)
+            !IsOnStack(lastRecord) ||
+#endif
+            ((uintptr_t)record >= (uintptr_t)lastRecord
+                && !IS_ASAN_FAKE_STACK_ADDR(record)
+                && !IS_ASAN_FAKE_STACK_ADDR(lastRecord)))
         {
-            EntryExitRecord_Corrupted_fatal_error();
+            EntryExitRecord_Corrupted_unrecoverable_error();
         }
     }
 
@@ -2199,11 +2148,18 @@ void ThreadContext::PopEntryExitRecord(Js::ScriptEntryExitRecord * record)
 {
     AssertMsg(record && record == this->entryExitRecord, "Mismatch script entry/exit");
 
-    // these are on stack, which grows down. if this condition doesn't hold, then the list somehow got messed up
+    // these are on stack, which grows down. if this condition doesn't hold,
+    // then the list somehow got messed up
     Js::ScriptEntryExitRecord * next = this->entryExitRecord->next;
-    if (next && (!IsOnStack(next) || (uintptr_t)this->entryExitRecord >= (uintptr_t)next))
+    if (next && (
+#if defined(JSRT_VERIFY_RUNTIME_STATE) || defined(DEBUG)
+        !IsOnStack(next) ||
+#endif
+        ((uintptr_t)this->entryExitRecord >= (uintptr_t)next
+            && !IS_ASAN_FAKE_STACK_ADDR(this->entryExitRecord)
+            && !IS_ASAN_FAKE_STACK_ADDR(next))))
     {
-        EntryExitRecord_Corrupted_fatal_error();
+        EntryExitRecord_Corrupted_unrecoverable_error();
     }
 
     this->entryExitRecord = next;
@@ -2234,33 +2190,25 @@ Js::TypeId ThreadContext::CreateTypeId()
     return nextTypeId = (Js::TypeId)(nextTypeId + 1);
 }
 
-WellKnownHostType ThreadContext::GetWellKnownHostType(Js::TypeId typeId)
-{
-    if (this->wellKnownHostTypeHTMLAllCollectionTypeId == typeId)
-    {
-        return WellKnownHostType_HTMLAllCollection;
-    }
-
-    return WellKnownHostType_Invalid;
-}
-
 void ThreadContext::SetWellKnownHostTypeId(WellKnownHostType wellKnownType, Js::TypeId typeId)
 {
-    AssertMsg(WellKnownHostType_HTMLAllCollection == wellKnownType, "ThreadContext::SetWellKnownHostTypeId called on type other than HTMLAllCollection");
+    AssertMsg(wellKnownType <= WellKnownHostType_Last, "ThreadContext::SetWellKnownHostTypeId called on unknown type");
 
-    if (WellKnownHostType_HTMLAllCollection == wellKnownType)
+    if (wellKnownType >= 0 && wellKnownType <= WellKnownHostType_Last)
     {
-        this->wellKnownHostTypeHTMLAllCollectionTypeId = typeId;
+        this->wellKnownHostTypeIds[wellKnownType] = typeId;
 #if ENABLE_NATIVE_CODEGEN
-        if (this->m_remoteThreadContextInfo)
+        // The jit server really only needs to know about WellKnownHostType_HTMLAllCollection
+        if (this->m_remoteThreadContextInfo && wellKnownType == WellKnownHostType_HTMLAllCollection)
         {
             HRESULT hr = JITManager::GetJITManager()->SetWellKnownHostTypeId(this->m_remoteThreadContextInfo, (int)typeId);
-            JITManager::HandleServerCallResult(hr);
+            JITManager::HandleServerCallResult(hr, RemoteCallType::StateUpdate);
         }
 #endif
     }
 }
 
+#ifdef ENABLE_SCRIPT_DEBUGGING
 void ThreadContext::EnsureDebugManager()
 {
     if (this->debugManager == nullptr)
@@ -2294,7 +2242,7 @@ void ThreadContext::ReleaseDebugManager()
     }
 }
 
-
+#endif
 
 Js::TempArenaAllocatorObject *
 ThreadContext::GetTemporaryAllocator(LPCWSTR name)
@@ -2475,6 +2423,12 @@ ThreadContext::RegisterScriptContext(Js::ScriptContext *scriptContext)
     {
         scriptContext->ForceNoNative();
     }
+
+    if (NoDynamicThunks())
+    {
+        scriptContext->ForceNoDynamicThunks();
+    }
+
 #if DBG || defined(RUNTIME_DATA_COLLECTION)
     scriptContextCount++;
 #endif
@@ -2501,6 +2455,8 @@ ThreadContext::UnregisterScriptContext(Js::ScriptContext *scriptContext)
     {
         scriptContext->next->prev = scriptContext->prev;
     }
+    scriptContext->prev = nullptr;
+    scriptContext->next = nullptr;
 #if DBG || defined(RUNTIME_DATA_COLLECTION)
     scriptContextCount--;
 #endif
@@ -2536,8 +2492,9 @@ ThreadContext::PreCollectionCallBack(CollectionFlags flags)
     // script contexts with inline caches
     this->ClearScriptContextCaches();
 
-    // Clear up references to types to avoid keep them alive
-    this->ClearPrototypeChainEnsuredToHaveOnlyWritableDataPropertiesCaches();
+    // Clear up references to types to avoid keeping them alive
+    this->noSpecialPropertyRegistry.Clear();
+    this->onlyWritablePropertyRegistry.Clear();
 
     // Clean up unused memory before we start collecting
     this->CleanNoCasePropertyMap();
@@ -2581,7 +2538,7 @@ ThreadContext::PreSweepCallback()
 
     ClearEquivalentTypeCaches();
 
-    ClearForInCaches();
+    ClearEnumeratorCaches();
 
     this->dynamicObjectEnumeratorCacheMap.Clear();
 }
@@ -2626,19 +2583,23 @@ ThreadContext::PostCollectionCallBack()
                 scriptContext->CleanupWeakReferenceDictionaries();
             }
         }
-
-        if (this->DoTryRedeferral())
-        {
-            HRESULT hr = S_OK;
-            BEGIN_TRANSLATE_OOM_TO_HRESULT
-            {
-                this->TryRedeferral();
-            }
-            END_TRANSLATE_OOM_TO_HRESULT(hr);
-        }
-
-        this->UpdateRedeferralState();
     }
+}
+
+void
+ThreadContext::PostSweepRedeferralCallBack()
+{
+    if (this->DoTryRedeferral())
+    {
+        HRESULT hr = S_OK;
+        BEGIN_TRANSLATE_OOM_TO_HRESULT
+        {
+            this->TryRedeferral();
+        }
+        END_TRANSLATE_OOM_TO_HRESULT(hr);
+    }
+
+    this->UpdateRedeferralState();
 }
 
 bool
@@ -2674,6 +2635,13 @@ ThreadContext::DoTryRedeferral() const
 bool
 ThreadContext::DoRedeferFunctionBodies() const
 {
+#if ENABLE_TTD
+    if (this->IsRuntimeInTTDMode())
+    {
+        return false;
+    }
+#endif
+
     if (PHASE_FORCE1(Js::RedeferralPhase) || PHASE_STRESS1(Js::RedeferralPhase))
     {
         return true;
@@ -2757,7 +2725,7 @@ ThreadContext::TryRedeferral()
         this->recoveredBytes = 0;
 #endif
     }
-    
+
     uint inactiveThreshold = this->GetRedeferralInactiveThreshold();
     Js::ScriptContext *scriptContext;
     for (scriptContext = GetScriptContextList(); scriptContext; scriptContext = scriptContext->next)
@@ -2796,7 +2764,7 @@ ThreadContext::GetActiveFunctions(ActiveFunctionSet * pActiveFuncs)
         if (function->GetFunctionInfo()->HasBody())
         {
             Js::FunctionBody *body = function->GetFunctionInfo()->GetFunctionBody();
-            body->UpdateActiveFunctionSet(pActiveFuncs);
+            body->UpdateActiveFunctionSet(pActiveFuncs, nullptr);
         }
     }
 }
@@ -2839,6 +2807,12 @@ ThreadContext::UpdateRedeferralState()
         this->gcSinceCallCountsCollected++;
         this->gcSinceLastRedeferral++;
     }
+}
+
+void
+ThreadContext::PreDisposeObjectsCallBack()
+{
+    this->expirableObjectDisposeList->Clear();
 }
 
 #ifdef FAULT_INJECTION
@@ -2924,9 +2898,13 @@ ThreadContext::InExpirableCollectMode()
     // and when debugger is attaching, it might have set the function to deferredParse.
     return (expirableObjectList != nullptr &&
             numExpirableObjects > 0 &&
-            expirableCollectModeGcCount >= 0 &&
+            expirableCollectModeGcCount >= 0
+#ifdef ENABLE_SCRIPT_DEBUGGING
+        &&
             (this->GetDebugManager() != nullptr &&
-            !this->GetDebugManager()->IsDebuggerAttaching()));
+            !this->GetDebugManager()->IsDebuggerAttaching())
+#endif
+        );
 }
 
 void
@@ -2971,7 +2949,7 @@ ThreadContext::TryEnterExpirableCollectMode()
             Js::JavascriptFunction* javascriptFunction = nullptr;
             while (walker.GetCallerWithoutInlinedFrames(&javascriptFunction))
             {
-                if (javascriptFunction != nullptr && Js::ScriptFunction::Is(javascriptFunction))
+                if (javascriptFunction != nullptr && Js::ScriptFunction::Test(javascriptFunction))
                 {
                     Js::ScriptFunction* scriptFunction = (Js::ScriptFunction*) javascriptFunction;
                     Js::FunctionEntryPointInfo* entryPointInfo =  scriptFunction->GetFunctionEntryPointInfo();
@@ -3005,9 +2983,8 @@ ThreadContext::UnregisterExpirableObject(ExpirableObject* object)
 {
     Assert(this->expirableObjectList);
     Assert(object->registrationHandle != nullptr);
-    Assert(this->expirableObjectList->HasElement((ExpirableObject* const *) object->registrationHandle));
 
-    ExpirableObject** registrationData = (ExpirableObject**) object->registrationHandle;
+    ExpirableObject** registrationData = (ExpirableObject**)PointerValue(object->registrationHandle);
     Assert(*registrationData == object);
 
     this->expirableObjectList->MoveElementTo(registrationData, this->expirableObjectDisposeList);
@@ -3016,16 +2993,6 @@ ThreadContext::UnregisterExpirableObject(ExpirableObject* object)
     numExpirableObjects--;
 }
 
-void
-ThreadContext::DisposeExpirableObject(ExpirableObject* object)
-{
-    Assert(this->expirableObjectDisposeList);
-    Assert(object->registrationHandle == nullptr);
-
-    this->expirableObjectDisposeList->Remove(object);
-
-    OUTPUT_VERBOSE_TRACE(Js::ExpirableCollectPhase, _u("Disposed 0x%p\n"), object);
-}
 #pragma endregion
 
 void
@@ -3041,33 +3008,45 @@ ThreadContext::ClearScriptContextCaches()
 void
 ThreadContext::ClearInlineCachesWithDeadWeakRefs()
 {
+#if ENABLE_DEBUG_CONFIG_OPTIONS || defined(ENABLE_JS_ETW)
+    size_t allocatedSize = 0;
+    size_t preClearFreeListSize = 0;
+    size_t freeListSize = 0;
+    size_t polyInlineCacheSize = 0;
+    uint scriptContextCount = 0;
+
+    // Note: this event is not meaningful for MemGC, only Chakra
+    JS_ETW(EventWriteJSCRIPT_GC_CLEAR_INLINECACHE_START());
+#endif
+
     for (Js::ScriptContext *scriptContext = scriptContextList; scriptContext != nullptr; scriptContext = scriptContext->next)
     {
+#if ENABLE_DEBUG_CONFIG_OPTIONS || defined(ENABLE_JS_ETW)
+        scriptContextCount++;
+        allocatedSize += scriptContext->GetInlineCacheAllocator()->AllocatedSize();
+        preClearFreeListSize += scriptContext->GetInlineCacheAllocator()->FreeListSize();
+#endif
+
         scriptContext->ClearInlineCachesWithDeadWeakRefs();
+
+#if ENABLE_DEBUG_CONFIG_OPTIONS || defined(ENABLE_JS_ETW)
+        freeListSize += scriptContext->GetInlineCacheAllocator()->FreeListSize();;
+        polyInlineCacheSize += scriptContext->GetInlineCacheAllocator()->GetPolyInlineCacheSize();
+#endif
     }
 
+    JS_ETW(EventWriteJSCRIPT_GC_CLEAR_INLINECACHE_STOP(this, scriptContextCount, (uint) allocatedSize, (uint) preClearFreeListSize, (uint) freeListSize, (uint) polyInlineCacheSize));
+
+#if ENABLE_DEBUG_CONFIG_OPTIONS
     if (PHASE_TRACE1(Js::InlineCachePhase))
     {
-        size_t size = 0;
-        size_t freeListSize = 0;
-        size_t polyInlineCacheSize = 0;
-        uint scriptContextCount = 0;
-        for (Js::ScriptContext *scriptContext = scriptContextList;
-            scriptContext;
-            scriptContext = scriptContext->next)
-        {
-            scriptContextCount++;
-            size += scriptContext->GetInlineCacheAllocator()->AllocatedSize();
-            freeListSize += scriptContext->GetInlineCacheAllocator()->FreeListSize();
-#ifdef POLY_INLINE_CACHE_SIZE_STATS
-            polyInlineCacheSize += scriptContext->GetInlineCacheAllocator()->GetPolyInlineCacheSize();
-#endif
-        };
-        printf("Inline cache arena: total = %5I64u KB, free list = %5I64u KB, poly caches = %5I64u KB, script contexts = %u\n",
-            static_cast<uint64>(size / 1024), static_cast<uint64>(freeListSize / 1024), static_cast<uint64>(polyInlineCacheSize / 1024), scriptContextCount);
+        Output::Print(_u("Inline cache arena: total = %5I64u KB, free list = %5I64u KB, poly caches = %5I64u KB, script contexts = %u\n"),
+            static_cast<uint64>(allocatedSize / 1024), static_cast<uint64>(freeListSize / 1024), static_cast<uint64>(polyInlineCacheSize / 1024), scriptContextCount);
     }
+#endif
 }
 
+#if ENABLE_NATIVE_CODEGEN
 void
 ThreadContext::ClearInvalidatedUniqueGuards()
 {
@@ -3100,6 +3079,7 @@ ThreadContext::ClearInvalidatedUniqueGuards()
         });
     });
 }
+#endif
 
 void
 ThreadContext::ClearInlineCaches()
@@ -3111,7 +3091,7 @@ ThreadContext::ClearInlineCaches()
         size_t polyInlineCacheSize = 0;
         uint scriptContextCount = 0;
         for (Js::ScriptContext *scriptContext = scriptContextList;
-        scriptContext;
+            scriptContext;
             scriptContext = scriptContext->next)
         {
             scriptContextCount++;
@@ -3121,7 +3101,7 @@ ThreadContext::ClearInlineCaches()
             polyInlineCacheSize += scriptContext->GetInlineCacheAllocator()->GetPolyInlineCacheSize();
 #endif
         };
-        printf("Inline cache arena: total = %5I64u KB, free list = %5I64u KB, poly caches = %5I64u KB, script contexts = %u\n",
+        Output::Print(_u("Inline cache arena: total = %5I64u KB, free list = %5I64u KB, poly caches = %5I64u KB, script contexts = %u\n"),
             static_cast<uint64>(size / 1024), static_cast<uint64>(freeListSize / 1024), static_cast<uint64>(polyInlineCacheSize / 1024), scriptContextCount);
     }
 
@@ -3156,12 +3136,12 @@ ThreadContext::ClearIsInstInlineCaches()
 }
 
 void
-ThreadContext::ClearForInCaches()
+ThreadContext::ClearEnumeratorCaches()
 {
     Js::ScriptContext *scriptContext = this->scriptContextList;
     while (scriptContext != nullptr)
     {
-        scriptContext->ClearForInCaches();
+        scriptContext->ClearEnumeratorCaches();
         scriptContext = scriptContext->next;
     }
 }
@@ -3370,7 +3350,7 @@ ThreadContext::CompactInlineCacheList(InlineCacheList* inlineCacheList)
     {
         if (inlineCache == nullptr)
         {
-            iterator.RemoveCurrent(&this->inlineCacheThreadInfoAllocator);
+            iterator.RemoveCurrent();
             cacheCount++;
         }
     }
@@ -3442,7 +3422,7 @@ ThreadContext::PropertyGuardEntry*
 ThreadContext::EnsurePropertyGuardEntry(const Js::PropertyRecord* propertyRecord, bool& foundExistingEntry)
 {
     PropertyGuardDictionary &guards = this->recyclableData->propertyGuards;
-    PropertyGuardEntry* entry;
+    PropertyGuardEntry* entry = nullptr;
 
     foundExistingEntry = guards.TryGetValue(propertyRecord, &entry);
     if (!foundExistingEntry)
@@ -3615,11 +3595,11 @@ ThreadContext::InvalidatePropertyGuardEntry(const Js::PropertyRecord* propertyRe
     if (entry->entryPoints && entry->entryPoints->Count() > 0)
     {
         Js::JavascriptStackWalker stackWalker(this->GetScriptContextList());
-        Js::JavascriptFunction* caller;
+        Js::JavascriptFunction* caller = nullptr;
         while (stackWalker.GetCaller(&caller, /*includeInlineFrames*/ false))
         {
             // If the current frame is already from a bailout - we do not need to do on stack invalidation
-            if (caller != nullptr && Js::ScriptFunction::Is(caller) && !stackWalker.GetCurrentFrameFromBailout())
+            if (caller != nullptr && Js::ScriptFunction::Test(caller) && !stackWalker.GetCurrentFrameFromBailout())
             {
                 BYTE dummy;
                 Js::FunctionEntryPointInfo* functionEntryPoint = caller->GetFunctionBody()->GetDefaultFunctionEntryPointInfo();
@@ -3647,7 +3627,7 @@ ThreadContext::InvalidatePropertyGuards(Js::PropertyId propertyId)
 {
     const Js::PropertyRecord* propertyRecord = GetPropertyName(propertyId);
     PropertyGuardDictionary &guards = this->recyclableData->propertyGuards;
-    PropertyGuardEntry* entry;
+    PropertyGuardEntry* entry = nullptr;
     if (guards.TryGetValueAndRemove(propertyRecord, &entry))
     {
         InvalidatePropertyGuardEntry(propertyRecord, entry, false);
@@ -3905,7 +3885,7 @@ void ThreadContext::RegisterTypeWithProtoPropertyCache(const Js::PropertyId prop
     Assert(type);
 
     PropertyIdToTypeHashSetDictionary &typesWithProtoPropertyCache = recyclableData->typesWithProtoPropertyCache;
-    TypeHashSet *typeHashSet;
+    TypeHashSet *typeHashSet = nullptr;
     if(!typesWithProtoPropertyCache.TryGetValue(propertyId, &typeHashSet))
     {
         typeHashSet = RecyclerNew(recycler, TypeHashSet, recycler);
@@ -3927,7 +3907,7 @@ void ThreadContext::InternalInvalidateProtoTypePropertyCaches(const Js::Property
     // Get the hash set of registered types associated with the property ID, invalidate each type in the hash set, and
     // remove the property ID and its hash set from the map
     PropertyIdToTypeHashSetDictionary &typesWithProtoPropertyCache = recyclableData->typesWithProtoPropertyCache;
-    TypeHashSet *typeHashSet;
+    TypeHashSet *typeHashSet = nullptr;
     if(typesWithProtoPropertyCache.Count() != 0 && typesWithProtoPropertyCache.TryGetValueAndRemove(propertyId, &typeHashSet))
     {
         DoInvalidateProtoTypePropertyCaches(propertyId, typeHashSet);
@@ -3957,38 +3937,6 @@ void ThreadContext::DoInvalidateProtoTypePropertyCaches(const Js::PropertyId pro
         {
             type->GetPropertyCache()->ClearIfPropertyIsOnAPrototype(propertyId);
         });
-}
-
-Js::ScriptContext **
-ThreadContext::RegisterPrototypeChainEnsuredToHaveOnlyWritableDataPropertiesScriptContext(Js::ScriptContext * scriptContext)
-{
-    return prototypeChainEnsuredToHaveOnlyWritableDataPropertiesScriptContext.PrependNode(&prototypeChainEnsuredToHaveOnlyWritableDataPropertiesAllocator, scriptContext);
-}
-
-void
-ThreadContext::UnregisterPrototypeChainEnsuredToHaveOnlyWritableDataPropertiesScriptContext(Js::ScriptContext ** scriptContext)
-{
-    prototypeChainEnsuredToHaveOnlyWritableDataPropertiesScriptContext.RemoveElement(&prototypeChainEnsuredToHaveOnlyWritableDataPropertiesAllocator, scriptContext);
-}
-
-void
-ThreadContext::ClearPrototypeChainEnsuredToHaveOnlyWritableDataPropertiesCaches()
-{
-    bool hasItem = false;
-    FOREACH_DLISTBASE_ENTRY(Js::ScriptContext *, scriptContext, &prototypeChainEnsuredToHaveOnlyWritableDataPropertiesScriptContext)
-    {
-        scriptContext->ClearPrototypeChainEnsuredToHaveOnlyWritableDataPropertiesCaches();
-        hasItem = true;
-    }
-    NEXT_DLISTBASE_ENTRY;
-
-    if (!hasItem)
-    {
-        return;
-    }
-
-    prototypeChainEnsuredToHaveOnlyWritableDataPropertiesScriptContext.Reset();
-    prototypeChainEnsuredToHaveOnlyWritableDataPropertiesAllocator.Reset();
 }
 
 BOOL ThreadContext::HasPreviousHostScriptContext()
@@ -4086,9 +4034,27 @@ void DumpRecyclerObjectGraph()
 #endif
 
 #if ENABLE_NATIVE_CODEGEN
-BOOL ThreadContext::IsNativeAddress(void * pCodeAddr)
+bool ThreadContext::IsNativeAddressHelper(void * pCodeAddr, Js::ScriptContext* currentScriptContext)
 {
-    boolean result;
+    bool isNativeAddr = false;
+    if (currentScriptContext && currentScriptContext->GetJitFuncRangeCache() != nullptr)
+    {
+        isNativeAddr = currentScriptContext->GetJitFuncRangeCache()->IsNativeAddr(pCodeAddr);
+    }
+
+    for (Js::ScriptContext *scriptContext = scriptContextList; scriptContext && !isNativeAddr; scriptContext = scriptContext->next)
+    {
+        if (scriptContext == currentScriptContext || scriptContext->GetJitFuncRangeCache() == nullptr)
+        {
+            continue;
+        }
+        isNativeAddr = scriptContext->GetJitFuncRangeCache()->IsNativeAddr(pCodeAddr);
+    }
+    return isNativeAddr;
+}
+
+BOOL ThreadContext::IsNativeAddress(void * pCodeAddr, Js::ScriptContext* currentScriptContext)
+{
 #if ENABLE_OOP_NATIVE_CODEGEN
     if (JITManager::GetJITManager()->IsOOPJITEnabled())
     {
@@ -4105,11 +4071,15 @@ BOOL ThreadContext::IsNativeAddress(void * pCodeAddr)
             return false;
         }
 
+#if DBG
+        boolean result;
         HRESULT hr = JITManager::GetJITManager()->IsNativeAddr(this->m_remoteThreadContextInfo, (intptr_t)pCodeAddr, &result);
-
-        // TODO: OOP JIT, can we throw here?
-        JITManager::HandleServerCallResult(hr);
-        return result;
+#endif
+        bool isNativeAddr = IsNativeAddressHelper(pCodeAddr, currentScriptContext);
+#if DBG
+        Assert(FAILED(hr) || result == (isNativeAddr? TRUE:FALSE));
+#endif
+        return isNativeAddr;
     }
     else
 #endif
@@ -4122,8 +4092,14 @@ BOOL ThreadContext::IsNativeAddress(void * pCodeAddr)
 
         if (!this->IsAllJITCodeInPreReservedRegion())
         {
-            CustomHeap::CodePageAllocators::AutoLock autoLock(&this->codePageAllocators);
-            return this->codePageAllocators.IsInNonPreReservedPageAllocator(pCodeAddr);
+#if DBG
+            AutoCriticalSection autoLock(&this->codePageAllocators.cs);
+#endif
+            bool isNativeAddr = IsNativeAddressHelper(pCodeAddr, currentScriptContext);
+#if DBG
+            Assert(this->codePageAllocators.IsInNonPreReservedPageAllocator(pCodeAddr) == isNativeAddr);
+#endif
+            return isNativeAddr;
         }
         return FALSE;
     }
@@ -4148,7 +4124,7 @@ Js::SourceDynamicProfileManager* ThreadContext::GetSourceDynamicProfileManager(_
 {
       EnsureSourceProfileManagersByUrlMap();
       Js::SourceDynamicProfileManager* profileManager = nullptr;
-      SourceDynamicProfileManagerCache* managerCache;
+      SourceDynamicProfileManagerCache* managerCache = nullptr;
       bool newCache = false;
       if(!this->recyclableData->sourceProfileManagersByUrl->TryGetValue(url, &managerCache))
       {
@@ -4233,11 +4209,13 @@ void ThreadContext::EnsureSymbolRegistrationMap()
     }
 }
 
-const Js::PropertyRecord* ThreadContext::GetSymbolFromRegistrationMap(const char16* stringKey)
+const Js::PropertyRecord* ThreadContext::GetSymbolFromRegistrationMap(const char16* stringKey, charcount_t stringLength)
 {
     this->EnsureSymbolRegistrationMap();
 
-    return this->recyclableData->symbolRegistrationMap->Lookup(stringKey, nullptr);
+    Js::HashedCharacterBuffer<char16> propertyName = Js::HashedCharacterBuffer<char16>(stringKey, stringLength);
+
+    return this->recyclableData->symbolRegistrationMap->LookupWithKey(&propertyName, nullptr);
 }
 
 const Js::PropertyRecord* ThreadContext::AddSymbolToRegistrationMap(const char16* stringKey, charcount_t stringLength)
@@ -4248,12 +4226,25 @@ const Js::PropertyRecord* ThreadContext::AddSymbolToRegistrationMap(const char16
 
     Assert(propertyRecord);
 
-    // The key is the PropertyRecord's buffer (the PropertyRecord itself) which is being pinned as long as it's in this map.
-    // If that's ever not the case, we'll need to duplicate the key here and put that in the map instead.
-    this->recyclableData->symbolRegistrationMap->Add(propertyRecord->GetBuffer(), propertyRecord);
+    // We need to support null characters in the Symbol names. For e.g. "A\0Z" is a valid symbol name and is different than "A\0Y".
+    // However, as the key contains a null character we need to hash the symbol name past the null character. The default implementation terminates
+    // at the null character, so we use the Js::HashedCharacterBuffer as key. We allocate the key in the recycler memory as it needs to be around
+    // for the lifetime of the map.
+    Js::HashedCharacterBuffer<char16> * propertyName = RecyclerNew(GetRecycler(), Js::HashedCharacterBuffer<char16>, propertyRecord->GetBuffer(), propertyRecord->GetLength());
+    this->recyclableData->symbolRegistrationMap->Add(propertyName, propertyRecord);
 
     return propertyRecord;
 }
+
+#if ENABLE_TTD
+JsUtil::BaseDictionary<Js::HashedCharacterBuffer<char16>*, const Js::PropertyRecord*, Recycler, PowerOf2SizePolicy, Js::PropertyRecordStringHashComparer>* ThreadContext::GetSymbolRegistrationMap_TTD()
+{
+    //This adds a little memory but makes simplifies other logic -- maybe revise later
+    this->EnsureSymbolRegistrationMap();
+
+    return this->recyclableData->symbolRegistrationMap;
+}
+#endif
 
 void ThreadContext::ClearImplicitCallFlags()
 {
@@ -4359,7 +4350,7 @@ void ThreadContext::RemoveExternalWeakReferenceCache(ExternalWeakReferenceCache 
 
 void ThreadContext::MarkExternalWeakReferencedObjects(bool inPartialCollect)
 {
-    SListBase<ExternalWeakReferenceCache *>::Iterator iteratorWeakRefCache(&this->externalWeakReferenceCacheList);
+    SListBase<ExternalWeakReferenceCache *, HeapAllocator>::Iterator iteratorWeakRefCache(&this->externalWeakReferenceCacheList);
     while (iteratorWeakRefCache.Next())
     {
         iteratorWeakRefCache.Data()->MarkNow(recycler, inPartialCollect);
@@ -4368,7 +4359,7 @@ void ThreadContext::MarkExternalWeakReferencedObjects(bool inPartialCollect)
 
 void ThreadContext::ResolveExternalWeakReferencedObjects()
 {
-    SListBase<ExternalWeakReferenceCache *>::Iterator iteratorWeakRefCache(&this->externalWeakReferenceCacheList);
+    SListBase<ExternalWeakReferenceCache *, HeapAllocator>::Iterator iteratorWeakRefCache(&this->externalWeakReferenceCacheList);
     while (iteratorWeakRefCache.Next())
     {
         iteratorWeakRefCache.Data()->ResolveNow(recycler);
@@ -4467,7 +4458,7 @@ void ThreadContext::CheckInterruptPoll()
 void *
 ThreadContext::GetDynamicObjectEnumeratorCache(Js::DynamicType const * dynamicType)
 {
-    void * data;
+    void * data = nullptr;
     return this->dynamicObjectEnumeratorCacheMap.TryGetValue(dynamicType, &data)? data : nullptr;
 }
 
@@ -4587,6 +4578,7 @@ Js::DelayLoadWinRtRoParameterizedIID* ThreadContext::GetWinRTRoParameterizedIIDL
 #endif
 
 #if defined(ENABLE_INTL_OBJECT) || defined(ENABLE_ES6_CHAR_CLASSIFIER)
+#ifdef INTL_WINGLOB
 Js::WindowsGlobalizationAdapter* ThreadContext::GetWindowsGlobalizationAdapter()
 {
     return &windowsGlobalizationAdapter;
@@ -4598,6 +4590,7 @@ Js::DelayLoadWindowsGlobalization* ThreadContext::GetWindowsGlobalizationLibrary
 
     return &delayLoadWindowsGlobalizationLibrary;
 }
+#endif // INTL_WINGLOB
 #endif
 
 #ifdef ENABLE_FOUNDATION_OBJECT
@@ -4710,3 +4703,61 @@ AutoTagNativeLibraryEntry::~AutoTagNativeLibraryEntry()
     Assert(threadContext->PeekNativeLibraryEntry() == &entry);
     threadContext->PopNativeLibraryEntry();
 }
+
+#if ENABLE_JS_REENTRANCY_CHECK
+#if DBG
+
+void JsReentLock::setObjectForMutation(Js::Var object)
+{
+    m_arrayObject = nullptr;
+
+    if (object != nullptr && Js::DynamicObject::IsAnyArray(object))
+    {
+        m_arrayObject = object;
+    }
+
+    // Don't care about any other objects for now
+}
+
+void JsReentLock::setSecondObjectForMutation(Js::Var object)
+{
+    m_arrayObject2 = nullptr;
+
+    if (object != nullptr && Js::DynamicObject::IsAnyArray(object))
+    {
+        m_arrayObject2 = object;
+    }
+
+    // Don't care about any other objects for now
+}
+
+void JsReentLock::MutateArrayObject(Js::Var arrayObject)
+{
+    if (arrayObject)
+    {
+        Js::JavascriptArray *arr = Js::JavascriptArray::FromAnyArray(arrayObject);
+        uint32 random = static_cast<unsigned int>(rand());
+
+        if (random % 20 == 0)
+        {
+            arr->DoTypeMutation();
+        }
+        else if (random % 20 == 1)
+        {
+            // TODO : modify the length of the current array
+            //       Or other opportunities
+        }
+    }
+}
+
+void JsReentLock::MutateArrayObject()
+{
+    if (CONFIG_FLAG(EnableArrayTypeMutation))
+    {
+        JsReentLock::MutateArrayObject(m_arrayObject);
+        JsReentLock::MutateArrayObject(m_arrayObject2);
+    }
+}
+
+#endif
+#endif

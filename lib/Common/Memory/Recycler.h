@@ -29,6 +29,47 @@ struct RecyclerMemoryData;
 
 namespace Memory
 {
+// NOTE: There is perf lab test infrastructure that takes a dependency on the events in this enumeration. Any modifications may cause
+// errors in ETL analysis or report incorrect numbers. Please verify that the GC events are analyzed correctly with your changes.
+    enum ETWEventGCActivationKind : unsigned
+    {
+        ETWEvent_GarbageCollect                         = 0,      // force in-thread GC
+        ETWEvent_ThreadCollect                          = 1,      // thread GC with wait
+        ETWEvent_ConcurrentCollect                      = 2,
+        ETWEvent_PartialCollect                         = 3,
+
+        ETWEvent_ConcurrentMark                         = 11,
+        ETWEvent_ConcurrentRescan                       = 12,
+        ETWEvent_ConcurrentSweep                        = 13,
+        ETWEvent_ConcurrentTransferSwept                = 14,
+        ETWEvent_ConcurrentFinishMark                   = 15,
+        ETWEvent_ConcurrentSweep_TwoPassSweepPreCheck   = 16,     // Check whether we should do a 2-pass concurrent sweep.
+
+        // The following events are only relevant to the 2-pass concurrent sweep and should not be seen otherwise.
+        ETWEvent_ConcurrentSweep_Pass1                  = 17,     // Concurrent sweep Pass1 of the blocks not getting allocated from during concurrent sweep.
+        ETWEvent_ConcurrentSweep_FinishSweepPrep        = 18,     // Stop allocations and remove all blocks from SLIST so we can finish Pass1 of the remaining blocks.
+        ETWEvent_ConcurrentSweep_FinishPass1            = 19,     // Concurrent sweep Pass1 of the blocks that were set aside for allocations during concurrent sweep.
+        ETWEvent_ConcurrentSweep_Pass2                  = 20,     // Concurrent sweep Pass1 of the blocks not getting allocated from during concurrent sweep.
+        ETWEvent_ConcurrentSweep_FinishTwoPassSweep     = 21,     // Drain the SLIST at the end of the 2-pass concurrent sweep and begin normal allocations.
+    };
+
+#define IS_UNKNOWN_GC_TRIGGER(v)    (v == ETWEvent_GC_Trigger_Unknown)
+
+    enum ETWEventGCActivationTrigger : unsigned
+    {
+        ETWEvent_GC_Trigger_Unknown                                    = 0,
+        ETWEvent_GC_Trigger_IdleCollect                                = 1,
+        ETWEvent_GC_Trigger_Partial_GC_AllocSize_Heuristic             = 2,
+        ETWEvent_GC_Trigger_TimeAndAllocSize_Heuristic                 = 3,
+        ETWEvent_GC_Trigger_TimeAndAllocSizeIfScriptActive_Heuristic   = 4,
+        ETWEvent_GC_Trigger_TimeAndAllocSizeIfInScript_Heuristic       = 5,
+        ETWEvent_GC_Trigger_NoHeuristic                                = 6,
+        ETWEvent_GC_Trigger_Status_Completed                           = 7,
+        ETWEvent_GC_Trigger_Status_StartedConcurrent                   = 8,
+        ETWEvent_GC_Trigger_Status_Failed                              = 9,
+        ETWEvent_GC_Trigger_Status_FailedTimeout                       = 10
+    };
+
 template <typename T> class RecyclerRootPtr;
 
 class AutoBooleanToggle
@@ -113,56 +154,80 @@ private:
 template<ObjectInfoBits infoBits>
 struct InfoBitsWrapper{};
 
+
 // Allocation macro
+
 #define RecyclerNew(recycler,T,...) AllocatorNewBase(Recycler, recycler, AllocInlined, T, __VA_ARGS__)
 #define RecyclerNewPlus(recycler,size,T,...) AllocatorNewPlus(Recycler, recycler, size, T, __VA_ARGS__)
-#define RecyclerNewPlusLeaf(recycler,size,T,...) AllocatorNewPlusLeaf(Recycler, recycler, size, T, __VA_ARGS__)
 #define RecyclerNewPlusZ(recycler,size,T,...) AllocatorNewPlusZ(Recycler, recycler, size, T, __VA_ARGS__)
-#define RecyclerNewPlusLeafZ(recycler,size,T,...) AllocatorNewPlusLeafZ(Recycler, recycler, size, T, __VA_ARGS__)
 #define RecyclerNewZ(recycler,T,...) AllocatorNewBase(Recycler, recycler, AllocZeroInlined, T, __VA_ARGS__)
 #define RecyclerNewStruct(recycler,T) AllocatorNewStructBase(Recycler, recycler, AllocInlined, T)
 #define RecyclerNewStructZ(recycler,T) AllocatorNewStructBase(Recycler, recycler, AllocZeroInlined, T)
 #define RecyclerNewStructPlus(recycler,size,T) AllocatorNewStructPlus(Recycler, recycler, size, T)
-#define RecyclerNewStructLeaf(recycler,T) AllocatorNewStructBase(Recycler, recycler, AllocLeafInlined, T)
-#define RecyclerNewStructLeafZ(recycler,T) AllocatorNewStructBase(Recycler, recycler, AllocLeafZeroInlined, T)
-#define RecyclerNewLeaf(recycler,T,...) AllocatorNewBase(Recycler, recycler, AllocLeafInlined, T, __VA_ARGS__)
-#define RecyclerNewLeafZ(recycler,T,...) AllocatorNewBase(Recycler, recycler, AllocLeafZeroInlined, T, __VA_ARGS__)
-#define RecyclerNewArrayLeafZ(recycler,T,count) AllocatorNewArrayBase(Recycler, recycler, AllocLeafZero, T, count)
 #define RecyclerNewArray(recycler,T,count) AllocatorNewArrayBase(Recycler, recycler, Alloc, T, count)
 #define RecyclerNewArrayZ(recycler,T,count) AllocatorNewArrayBase(Recycler, recycler, AllocZero, T, count)
-#define RecyclerNewArrayLeaf(recycler,T,count) AllocatorNewArrayBase(Recycler, recycler, AllocLeaf, T, count)
-// Use static_cast to make sure the finalized and tracked object have the right base class
 #define RecyclerNewFinalized(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocFinalizedInlined, T, __VA_ARGS__)))
-#define RecyclerNewFinalizedLeaf(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocFinalizedLeafInlined, T, __VA_ARGS__)))
 #define RecyclerNewFinalizedPlus(recycler, size, T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewPlusBase(Recycler, recycler, AllocFinalized, size, T, __VA_ARGS__)))
-#define RecyclerNewFinalizedLeafPlus(recycler, size, T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewPlusBase(Recycler, recycler, AllocFinalizedLeaf, size, T, __VA_ARGS__)))
 #define RecyclerNewTracked(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocTrackedInlined, T, __VA_ARGS__)))
-#define RecyclerNewTrackedLeaf(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocTrackedLeafInlined, T, __VA_ARGS__)))
-#define RecyclerNewTrackedLeafPlusZ(recycler,size,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewPlusBase(Recycler, recycler, AllocZeroTrackedLeafInlined, size, T, __VA_ARGS__)))
-#define RecyclerNewEnumClass(recycler, enumClass, T, ...) new (TRACK_ALLOC_INFO(static_cast<Recycler *>(recycler), T, Recycler, 0, (size_t)-1), enumClass) T(__VA_ARGS__)
+#define RecyclerNewEnumClass(recycler, enumClass, T, ...) new (TRACK_ALLOC_INFO(static_cast<Recycler *>(recycler), T, Recycler, 0, (size_t)-1), InfoBitsWrapper<enumClass>()) T(__VA_ARGS__)
 #define RecyclerNewWithInfoBits(recycler, infoBits, T, ...) new (TRACK_ALLOC_INFO(static_cast<Recycler *>(recycler), T, Recycler, 0, (size_t)-1), InfoBitsWrapper<infoBits>()) T(__VA_ARGS__)
 #define RecyclerNewFinalizedClientTracked(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocFinalizedClientTrackedInlined, T, __VA_ARGS__)))
 
-#ifdef RECYCLER_WRITE_BARRIER_ALLOC
+#if defined(RECYCLER_WRITE_BARRIER_ALLOC)
 #define RecyclerNewWithBarrier(recycler,T,...) AllocatorNewBase(Recycler, recycler, AllocWithBarrier, T, __VA_ARGS__)
 #define RecyclerNewWithBarrierPlus(recycler,size,T,...) AllocatorNewPlusBase(Recycler, recycler, AllocWithBarrier, size, T, __VA_ARGS__)
 #define RecyclerNewWithBarrierPlusZ(recycler,size,T,...) AllocatorNewPlusBase(Recycler, recycler, AllocZeroWithBarrier, size, T, __VA_ARGS__)
-#define RecyclerNewWithBarrierArray(recycler,T,count) AllocatorNewArrayBase(Recycler, recycler, AllocWithBarrier, T, count)
-#define RecyclerNewWithBarrierArrayZ(recycler,T,count) AllocatorNewArrayBase(Recycler, recycler, AllocZeroWithBarrier, T, count)
+#define RecyclerNewWithBarrierZ(recycler,T,...) AllocatorNewBase(Recycler, recycler, AllocZeroWithBarrier, T, __VA_ARGS__)
 #define RecyclerNewWithBarrierStruct(recycler,T) AllocatorNewStructBase(Recycler, recycler, AllocWithBarrier, T)
 #define RecyclerNewWithBarrierStructZ(recycler,T) AllocatorNewStructBase(Recycler, recycler, AllocZeroWithBarrier, T)
+#define RecyclerNewWithBarrierStructPlus(recycler,size,T) AllocatorNewStructPlusBase(Recycler, recycler, AllocWithBarrier, size, T)
+#define RecyclerNewWithBarrierArray(recycler,T,count) AllocatorNewArrayBase(Recycler, recycler, AllocWithBarrier, T, count)
+#define RecyclerNewWithBarrierArrayZ(recycler,T,count) AllocatorNewArrayBase(Recycler, recycler, AllocZeroWithBarrier, T, count)
 #define RecyclerNewWithBarrierFinalized(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocFinalizedWithBarrierInlined, T, __VA_ARGS__)))
 #define RecyclerNewWithBarrierFinalizedPlus(recycler, size, T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewPlusBase(Recycler, recycler, AllocFinalizedWithBarrier, size, T, __VA_ARGS__)))
-#else
-#define RecyclerNewWithBarrier RecyclerNew
-#define RecyclerNewWithBarrierPlus RecyclerNewPlus
-#define RecyclerNewWithBarrierPlusZ RecyclerNewPlusZ
-#define RecyclerNewWithBarrierArray RecyclerNewArray
-#define RecyclerNewWithBarrierArrayZ RecyclerNewArrayZ
-#define RecyclerNewWithBarrierStruct RecyclerNewStruct
-#define RecyclerNewWithBarrierStructZ RecyclerNewStructZ
-#define RecyclerNewWithBarrierFinalized RecyclerNewFinalized
-#define RecyclerNewWithBarrierFinalizedPlus RecyclerNewFinalizedPlus
+#define RecyclerNewWithBarrierTracked(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocTrackedWithBarrierInlined, T, __VA_ARGS__)))
+#define RecyclerNewWithBarrierEnumClass(recycler, enumClass, T, ...) new (TRACK_ALLOC_INFO(static_cast<Recycler *>(recycler), T, Recycler, 0, (size_t)-1), InfoBitsWrapper<(ObjectInfoBits)(enumClass | WithBarrierBit)>()) T(__VA_ARGS__)
+#define RecyclerNewWithBarrierWithInfoBits(recycler, infoBits, T, ...) new (TRACK_ALLOC_INFO(static_cast<Recycler *>(recycler), T, Recycler, 0, (size_t)-1), InfoBitsWrapper<(ObjectInfoBits)(infoBits | WithBarrierBit)>()) T(__VA_ARGS__)
+#define RecyclerNewWithBarrierFinalizedClientTracked(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocFinalizedClientTrackedWithBarrierInlined, T, __VA_ARGS__)))
+#endif
+
+#ifndef RECYCLER_WRITE_BARRIER
+#define RecyclerNewWithBarrier                          RecyclerNew
+#define RecyclerNewWithBarrierPlus                      RecyclerNewPlus
+#define RecyclerNewWithBarrierPlusZ                     RecyclerNewPlusZ
+#define RecyclerNewWithBarrierZ                         RecyclerNewZ
+#define RecyclerNewWithBarrierStruct                    RecyclerNewStruct
+#define RecyclerNewWithBarrierStructZ                   RecyclerNewStructZ
+#define RecyclerNewWithBarrierStructPlus                RecyclerNewStructPlus
+#define RecyclerNewWithBarrierArray                     RecyclerNewArray
+#define RecyclerNewWithBarrierArrayZ                    RecyclerNewArrayZ
+#define RecyclerNewWithBarrierFinalized                 RecyclerNewFinalized
+#define RecyclerNewWithBarrierFinalizedPlus             RecyclerNewFinalizedPlus
+#define RecyclerNewWithBarrierTracked                   RecyclerNewTracked
+#define RecyclerNewWithBarrierEnumClass                 RecyclerNewEnumClass
+#define RecyclerNewWithBarrierWithInfoBits              RecyclerNewWithInfoBits
+#define RecyclerNewWithBarrierFinalizedClientTracked    RecyclerNewFinalizedClientTracked
+#endif
+
+// Leaf allocators
+#define RecyclerNewLeaf(recycler,T,...) AllocatorNewBase(Recycler, recycler, AllocLeafInlined, T, __VA_ARGS__)
+#define RecyclerNewLeafZ(recycler,T,...) AllocatorNewBase(Recycler, recycler, AllocLeafZeroInlined, T, __VA_ARGS__)
+#define RecyclerNewPlusLeaf(recycler,size,T,...) AllocatorNewPlusLeaf(Recycler, recycler, size, T, __VA_ARGS__)
+#define RecyclerNewPlusLeafZ(recycler,size,T,...) AllocatorNewPlusLeafZ(Recycler, recycler, size, T, __VA_ARGS__)
+#define RecyclerNewStructLeaf(recycler,T) AllocatorNewStructBase(Recycler, recycler, AllocLeafInlined, T)
+#define RecyclerNewStructLeafZ(recycler,T) AllocatorNewStructBase(Recycler, recycler, AllocLeafZeroInlined, T)
+#define RecyclerNewArrayLeafZ(recycler,T,count) AllocatorNewArrayBase(Recycler, recycler, AllocLeafZero, T, count)
+#define RecyclerNewArrayLeaf(recycler,T,count) AllocatorNewArrayBase(Recycler, recycler, AllocLeaf, T, count)
+#define RecyclerNewFinalizedLeaf(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocFinalizedLeafInlined, T, __VA_ARGS__)))
+#define RecyclerNewFinalizedLeafPlus(recycler, size, T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewPlusBase(Recycler, recycler, AllocFinalizedLeaf, size, T, __VA_ARGS__)))
+#define RecyclerNewTrackedLeaf(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocTrackedLeafInlined, T, __VA_ARGS__)))
+#define RecyclerNewTrackedLeafPlusZ(recycler,size,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewPlusBase(Recycler, recycler, AllocZeroTrackedLeafInlined, size, T, __VA_ARGS__)))
+
+#ifdef RECYCLER_VISITED_HOST
+#define RecyclerAllocVisitedHostTracedAndFinalizedZero(recycler,size) recycler->AllocVisitedHost<RecyclerVisitedHostTracedFinalizableBits>(size)
+#define RecyclerAllocVisitedHostFinalizedZero(recycler,size) recycler->AllocVisitedHost<RecyclerVisitedHostFinalizableBits>(size)
+#define RecyclerAllocVisitedHostTracedZero(recycler,size) recycler->AllocVisitedHost<RecyclerVisitedHostTracedBits>(size)
+#define RecyclerAllocLeafZero(recycler,size) recycler->AllocVisitedHost<LeafBit>(size)
 #endif
 
 #ifdef TRACE_OBJECT_LIFETIME
@@ -173,7 +238,6 @@ struct InfoBitsWrapper{};
 #define RecyclerNewArrayTrace(recycler,T,count) AllocatorNewArrayBase(Recycler, recycler, AllocTrace, T, count)
 #define RecyclerNewArrayZTrace(recycler,T,count) AllocatorNewArrayBase(Recycler, recycler, AllocZeroTrace, T, count)
 #define RecyclerNewArrayLeafTrace(recycler,T,count) AllocatorNewArrayBase(Recycler, recycler, AllocLeafTrace, T, count)
-// Use static_cast to make sure the finalized and tracked object have the right base class
 #define RecyclerNewFinalizedTrace(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocFinalizedTrace, T, __VA_ARGS__)))
 #define RecyclerNewFinalizedLeafTrace(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocFinalizedLeafTrace, T, __VA_ARGS__)))
 #define RecyclerNewFinalizedPlusTrace(recycler, size, T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewPlusBase(Recycler, recycler, AllocFinalizedTrace, size, T, __VA_ARGS__)))
@@ -281,9 +345,10 @@ enum CollectionFlags
 
     FinishConcurrentOnIdle          = CollectMode_Concurrent | CollectOverride_DisableIdleFinish,
     FinishConcurrentOnIdleAtRoot    = CollectMode_Concurrent | CollectOverride_DisableIdleFinish | CollectOverride_SkipStack,
-    FinishConcurrentOnExitScript    = CollectMode_Concurrent | CollectOverride_DisableIdleFinish | CollectOverride_BackgroundFinishMark,
-    FinishConcurrentOnEnterScript   = CollectMode_Concurrent | CollectOverride_DisableIdleFinish | CollectOverride_BackgroundFinishMark,
-    FinishConcurrentOnAllocation    = CollectMode_Concurrent | CollectOverride_DisableIdleFinish | CollectOverride_BackgroundFinishMark,
+    FinishConcurrentDefault         = CollectMode_Concurrent | CollectOverride_DisableIdleFinish | CollectOverride_BackgroundFinishMark,
+    FinishConcurrentOnExitScript    = FinishConcurrentDefault,
+    FinishConcurrentOnEnterScript   = FinishConcurrentDefault,
+    FinishConcurrentOnAllocation    = FinishConcurrentDefault,
     FinishDispose                   = CollectOverride_AllowDispose,
     FinishDisposeTimed              = CollectOverride_AllowDispose | CollectHeuristic_TimeIfScriptActive,
     ForceFinishCollection           = CollectOverride_ForceFinish | CollectOverride_ForceInThread,
@@ -329,11 +394,14 @@ public:
     virtual void PostCollectionCallBack() = 0;
     virtual BOOL ExecuteRecyclerCollectionFunction(Recycler * recycler, CollectionFunction function, CollectionFlags flags) = 0;
     virtual uint GetRandomNumber() = 0;
+    virtual bool DoSpecialMarkOnScanStack() = 0;
+    virtual void PostSweepRedeferralCallBack() = 0;
 
 #ifdef FAULT_INJECTION
     virtual void DisposeScriptContextByFaultInjectionCallBack() = 0;
 #endif
     virtual void DisposeObjects(Recycler * recycler) = 0;
+    virtual void PreDisposeObjectsCallBack() = 0;
 #ifdef ENABLE_PROJECTION
     virtual void MarkExternalWeakReferencedObjects(bool inPartialCollect) = 0;
     virtual void ResolveExternalWeakReferencedObjects() = 0;
@@ -376,10 +444,13 @@ public:
     virtual void PostCollectionCallBack() override {}
     virtual BOOL ExecuteRecyclerCollectionFunction(Recycler * recycler, CollectionFunction function, CollectionFlags flags) override;
     virtual uint GetRandomNumber() override { return 0; }
+    virtual bool DoSpecialMarkOnScanStack() override { return false; }
+    virtual void PostSweepRedeferralCallBack() override {}
 #ifdef FAULT_INJECTION
     virtual void DisposeScriptContextByFaultInjectionCallBack() override {};
 #endif
     virtual void DisposeObjects(Recycler * recycler) override;
+    virtual void PreDisposeObjectsCallBack() override {};
 
 #ifdef ENABLE_PROJECTION
     virtual void MarkExternalWeakReferencedObjects(bool inPartialCollect) override {};
@@ -527,42 +598,6 @@ struct CollectionParam
 
 #include "RecyclerObjectGraphDumper.h"
 
-#ifdef RECYCLER_WRITE_BARRIER_ALLOC_SEPARATE_PAGE
-// Macro to be used within the recycler
-#define ForRecyclerPageAllocator(action) { \
-    this->recyclerPageAllocator.##action; \
-    this->recyclerLargeBlockPageAllocator.##action; \
-    this->recyclerWithBarrierPageAllocator.##action; \
-    this->threadPageAllocator->##action; \
-}
-
-// Macro that external objects referencing the recycler can use
-#define ForEachRecyclerPageAllocatorIn(recycler, action) { \
-    recycler->GetRecyclerPageAllocator()->##action; \
-    recycler->GetRecyclerLargeBlockPageAllocator()->##action; \
-    recycler->GetRecyclerWithBarrierPageAllocator()->##action; \
-    recycler->GetRecyclerLeafPageAllocator()->##action; \
-}
-
-#else
-
-// Macro to be used within the recycler
-#define ForRecyclerPageAllocator(action) { \
-    this->recyclerPageAllocator.##action; \
-    this->recyclerLargeBlockPageAllocator.##action; \
-    this->threadPageAllocator->##action; \
-}
-
-// Macro that external objects referencing the recycler can use
-#define ForEachRecyclerPageAllocatorIn(recycler, action) { \
-    recycler->GetRecyclerPageAllocator()->##action; \
-    recycler->GetRecyclerLargeBlockPageAllocator()->##action; \
-    recycler->GetRecyclerLeafPageAllocator()->##action; \
-}
-
-#endif
-
-
 #if ENABLE_CONCURRENT_GC
 class RecyclerParallelThread
 {
@@ -621,11 +656,11 @@ private:
 };
 #endif
 
-
 class Recycler
 {
     friend class RecyclerScanMemoryCallback;
     friend class RecyclerSweep;
+    friend class RecyclerSweepManager;
     friend class MarkContext;
     friend class HeapBlock;
     friend class HeapBlockMap32;
@@ -647,8 +682,10 @@ class Recycler
     friend class ActiveScriptProfilerHeapEnum;
 #endif
     friend class ScriptEngineBase;  // This is for disabling GC for certain Host operations.
+#if !FLOATVAR
     friend class ::CodeGenNumberThreadAllocator;
     friend struct ::XProcNumberPageSegmentManager;
+#endif
 public:
     static const uint ConcurrentThreadStackSize = 300000;
     static const bool FakeZeroLengthArray = true;
@@ -656,10 +693,15 @@ public:
 #ifdef RECYCLER_PAGE_HEAP
     // Keeping as constant in case we want to tweak the value here
     // Set to 0 so that the tool can do the filtering instead of the runtime
+#if DBG
+    static const int s_numFramesToSkipForPageHeapAlloc = 10;
+    static const int s_numFramesToSkipForPageHeapFree = 0;
+    static const int s_numFramesToCaptureForPageHeap = 32;
+#else
     static const int s_numFramesToSkipForPageHeapAlloc = 0;
     static const int s_numFramesToSkipForPageHeapFree = 0;
-
     static const int s_numFramesToCaptureForPageHeap = 32;
+#endif
 #endif
 
     uint Cookie;
@@ -710,15 +752,17 @@ private:
         CollectionState _exitState;
     };
 
-    CollectionState collectionState;
-    IdleDecommitPageAllocator * threadPageAllocator;
-#ifdef RECYCLER_WRITE_BARRIER_ALLOC_SEPARATE_PAGE
-    RecyclerPageAllocator recyclerWithBarrierPageAllocator;
+#if defined(ENABLE_JS_ETW)
+    uint collectionStartReason;
+    CollectionFlags collectionStartFlags;
+    uint collectionFinishReason;
 #endif
-    RecyclerPageAllocator recyclerPageAllocator;
-    RecyclerPageAllocator recyclerLargeBlockPageAllocator;
 
+    CollectionState collectionState;
     JsUtil::ThreadService *threadService;
+#if ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP
+    bool allowAllocationsDuringConcurrentSweepForCollection;
+#endif
 
     HeapBlockMap heapBlockMap;
 
@@ -757,8 +801,8 @@ private:
     uint weakReferenceCleanupId;
 
     void * transientPinnedObject;
-#ifdef STACK_BACK_TRACE
 #if defined(CHECK_MEMORY_LEAK) || defined(LEAK_REPORT)
+#ifdef STACK_BACK_TRACE
     StackBackTrace * transientPinnedObjectStackBackTrace;
 #endif
 #endif
@@ -773,15 +817,15 @@ private:
     };
     DListBase<GuestArenaAllocator> guestArenaList;
     DListBase<ArenaData*> externalGuestArenaList;    // guest arenas are scanned for roots
-#ifdef RECYCLER_PAGE_HEAP
 
-    inline bool IsPageHeapEnabled() const { return isPageHeapEnabled; }
-    template<ObjectInfoBits attributes>
-    bool IsPageHeapEnabled(size_t size);
-    inline bool ShouldCapturePageHeapAllocStack() const { return capturePageHeapAllocStack; }
+#ifdef RECYCLER_PAGE_HEAP
     bool isPageHeapEnabled;
     bool capturePageHeapAllocStack;
     bool capturePageHeapFreeStack;
+
+    inline bool IsPageHeapEnabled() const { return isPageHeapEnabled; }
+    inline bool ShouldCapturePageHeapAllocStack() const { return capturePageHeapAllocStack; }
+    void VerifyPageHeapFillAfterAlloc(char* memBlock, size_t size, ObjectInfoBits attributes);
 #else
     inline const bool IsPageHeapEnabled() const { return false; }
     inline bool ShouldCapturePageHeapAllocStack() const { return false; }
@@ -805,6 +849,8 @@ private:
     // We add one because there is a small amount of the page reserved for page pool metadata
     // so we need to allocate an additional page to be sure
     // Currently, this works out to 2 pages on 32-bit and 5 pages on 64-bit
+    // NOTE: We have reduced the PageCount for small blocks to 1. This brought down the number of pages reserved for x64 from 5 to 2. This has not shown
+    // any adverse impact.
     static const int PrimaryMarkStackReservedPageCount =
         ((SmallAllocationBlockAttributes::PageCount * MarkContext::MarkCandidateSize) / SmallAllocationBlockAttributes::MinObjectSize) + 1;
 
@@ -838,7 +884,7 @@ private:
 #elif _M_ARM
         static const int NumRegistersToSave = 13;
 #elif _M_ARM64
-        static const int NumRegistersToSave = 13;
+        static const int NumRegistersToSave = 27;
 #elif _M_AMD64
         static const int NumRegistersToSave = 16;
 #endif
@@ -866,12 +912,18 @@ private:
 
     SavedRegisterState savedThreadContext;
 
+#if __has_feature(address_sanitizer)
+    void* savedAsanFakeStack;
+#define SAVE_THREAD_ASAN_FAKE_STACK() \
+        this->savedAsanFakeStack = __asan_get_current_fake_stack()
+#else
+#define SAVE_THREAD_ASAN_FAKE_STACK()
+#endif
+
     bool inDispose;
 
-#if DBG
-    uint collectionCount;
-#endif
 #if DBG || defined RECYCLER_TRACE
+    uint collectionCount;
     bool inResolveExternalWeakReferences;
 #endif
 
@@ -880,7 +932,6 @@ private:
     bool needOOMRescan;
     bool hasDisposableObject;
     DWORD tickCountNextDispose;
-    bool hasPendingTransferDisposedObjects;
     bool inExhaustiveCollection;
     bool hasExhaustiveCandidate;
     bool inCacheCleanupCollection;
@@ -980,14 +1031,14 @@ private:
 #endif
 
     Js::ConfigFlagsTable&  recyclerFlagsTable;
-    RecyclerSweep recyclerSweepInstance;
-    RecyclerSweep * recyclerSweep;
+    RecyclerSweepManager recyclerSweepManagerInstance;
+    RecyclerSweepManager * recyclerSweepManager;
 
     static const uint tickDiffToNextCollect = 300;
 
 #ifdef IDLE_DECOMMIT_ENABLED
     HANDLE concurrentIdleDecommitEvent;
-    DWORD needIdleDecommitSignal;
+    LONG needIdleDecommitSignal;
 #endif
 
 #if ENABLE_PARTIAL_GC
@@ -1018,7 +1069,19 @@ private:
 #endif
 
     // destruct autoHeap after backgroundProfilerPageAllocator;
-    HeapInfo autoHeap;
+    HeapInfoManager autoHeap;   
+
+    template <ObjectInfoBits attributes>
+    HeapInfo * GetHeapInfoForAllocation()
+    {
+        return this->GetHeapInfo<attributes>();
+    }
+
+    template <ObjectInfoBits attributes>
+    HeapInfo * GetHeapInfo()
+    {
+        return this->autoHeap.GetDefaultHeap();
+    }
 
 #ifdef PROFILE_MEM
     RecyclerMemoryData * memoryData;
@@ -1049,6 +1112,7 @@ private:
 #endif
 #ifdef RECYCLER_TRACE
     CollectionParam collectionParam;
+    void PrintBlockStatus(HeapBucket * heapBucket, HeapBlock * heapBlock, char16 const * name);
 #endif
 #ifdef RECYCLER_MEMORY_VERIFY
     uint verifyPad;
@@ -1076,70 +1140,23 @@ public:
 
     Js::ConfigFlagsTable& GetRecyclerFlagsTable() const { return this->recyclerFlagsTable; }
     void SetMemProtectMode();
-
-    bool IsMemProtectMode()
-    {
-        return this->enableScanImplicitRoots;
-    }
-
-    size_t GetUsedBytes()
-    {
-        size_t usedBytes = threadPageAllocator->usedBytes;
-#ifdef RECYCLER_WRITE_BARRIER_ALLOC_SEPARATE_PAGE
-        usedBytes += recyclerWithBarrierPageAllocator.usedBytes;
-#endif
-        usedBytes += recyclerPageAllocator.usedBytes;
-        usedBytes += recyclerLargeBlockPageAllocator.usedBytes;
-        return usedBytes;
-    }
-
+    bool IsMemProtectMode();
+    size_t GetUsedBytes();
     void LogMemProtectHeapSize(bool fromGC);
-
     char* Realloc(void* buffer, DECLSPEC_GUARD_OVERFLOW size_t existingBytes, DECLSPEC_GUARD_OVERFLOW size_t requestedBytes, bool truncate = true);
 #ifdef NTBUILD
     void SetTelemetryBlock(RecyclerWatsonTelemetryBlock * telemetryBlock) { this->telemetryBlock = telemetryBlock; }
 #endif
 
     void Prime();
-
     void* GetOwnerContext() { return (void*) this->collectionWrapper; }
-    PageAllocator * GetPageAllocator() { return threadPageAllocator; }
-
-    bool NeedOOMRescan() const
-    {
-        return this->needOOMRescan;
-    }
-
-    void SetNeedOOMRescan()
-    {
-        this->needOOMRescan = true;
-    }
-
-    void ClearNeedOOMRescan()
-    {
-        this->needOOMRescan = false;
-        markContext.GetPageAllocator()->ResetDisableAllocationOutOfMemory();
-        parallelMarkContext1.GetPageAllocator()->ResetDisableAllocationOutOfMemory();
-        parallelMarkContext2.GetPageAllocator()->ResetDisableAllocationOutOfMemory();
-        parallelMarkContext3.GetPageAllocator()->ResetDisableAllocationOutOfMemory();
-    }
-
+    bool NeedOOMRescan() const;
+    void SetNeedOOMRescan();
+    void ClearNeedOOMRescan();
     BOOL RequestConcurrentWrapperCallback();
-
-    BOOL CollectionInProgress() const
-    {
-        return collectionState != CollectionStateNotCollecting;
-    }
-
-    BOOL IsExiting() const
-    {
-        return (collectionState == Collection_Exit);
-    }
-
-    BOOL IsSweeping() const
-    {
-        return ((collectionState & Collection_Sweep) == Collection_Sweep);
-    }
+    BOOL CollectionInProgress() const;
+    BOOL IsExiting() const;
+    BOOL IsSweeping() const;
 
 #ifdef RECYCLER_PAGE_HEAP
     inline bool ShouldCapturePageHeapFreeStack() const { return capturePageHeapFreeStack; }
@@ -1148,46 +1165,10 @@ public:
 #endif
 
     void SetIsThreadBound();
-    void SetIsScriptActive(bool isScriptActive)
-    {
-        Assert(this->isInScript);
-        Assert(this->isScriptActive != isScriptActive);
-        this->isScriptActive = isScriptActive;
-        if (isScriptActive)
-        {
-            this->tickCountNextDispose = ::GetTickCount() + RecyclerHeuristic::TickCountFinishCollection;
-        }
-    }
-    void SetIsInScript(bool isInScript)
-    {
-        Assert(this->isInScript != isInScript);
-        this->isInScript = isInScript;
-    }
-
+    void SetIsScriptActive(bool isScriptActive);
+    void SetIsInScript(bool isInScript);
     bool ShouldIdleCollectOnExit();
     void ScheduleNextCollection();
-
-    IdleDecommitPageAllocator * GetRecyclerLeafPageAllocator()
-    {
-        return this->threadPageAllocator;
-    }
-
-    IdleDecommitPageAllocator * GetRecyclerPageAllocator()
-    {
-        return &this->recyclerPageAllocator;
-    }
-
-    IdleDecommitPageAllocator * GetRecyclerLargeBlockPageAllocator()
-    {
-        return &this->recyclerLargeBlockPageAllocator;
-    }
-
-#ifdef RECYCLER_WRITE_BARRIER_ALLOC_SEPARATE_PAGE
-    IdleDecommitPageAllocator * GetRecyclerWithBarrierPageAllocator()
-    {
-        return &this->recyclerWithBarrierPageAllocator;
-    }
-#endif
 
     BOOL IsShuttingDown() const { return this->isShuttingDown; }
 #if ENABLE_CONCURRENT_GC
@@ -1223,51 +1204,40 @@ public:
     void ClearCacheCleanupCollection() { Assert(inCacheCleanupCollection); inCacheCleanupCollection = false; }
 
     // Finalizer support
-    void SetExternalRootMarker(ExternalRootMarker fn, void * context)
-    {
-        externalRootMarker = fn;
-        externalRootMarkerContext = context;
-    }
-
-    HeapInfo* CreateHeap();
-    void DestroyHeap(HeapInfo* heapInfo);
-
+    void SetExternalRootMarker(ExternalRootMarker fn, void * context);
     ArenaAllocator * CreateGuestArena(char16 const * name, void (*outOfMemoryFunc)());
     void DeleteGuestArena(ArenaAllocator * arenaAllocator);
-
     ArenaData ** RegisterExternalGuestArena(ArenaData* guestArena)
     {
         return externalGuestArenaList.PrependNode(&NoThrowHeapAllocator::Instance, guestArena);
     }
-
     void UnregisterExternalGuestArena(ArenaData* guestArena)
     {
         externalGuestArenaList.Remove(&NoThrowHeapAllocator::Instance, guestArena);
+
+        // Any time a root is removed during a GC, it indicates that an exhaustive
+        // collection is likely going to have work to do so trigger an exhaustive
+        // candidate GC to indicate this fact
+        this->CollectNow<CollectExhaustiveCandidate>();
     }
 
     void UnregisterExternalGuestArena(ArenaData** guestArena)
     {
         externalGuestArenaList.RemoveElement(&NoThrowHeapAllocator::Instance, guestArena);
+
+        // Any time a root is removed during a GC, it indicates that an exhaustive
+        // collection is likely going to have work to do so trigger an exhaustive
+        // candidate GC to indicate this fact
+        this->CollectNow<CollectExhaustiveCandidate>();
     }
 
 #ifdef RECYCLER_TEST_SUPPORT
     void SetCheckFn(BOOL(*checkFn)(char* addr, size_t size));
 #endif
 
-    void SetCollectionWrapper(RecyclerCollectionWrapper * wrapper)
-    {
-        this->collectionWrapper = wrapper;
-#if LARGEHEAPBLOCK_ENCODING
-        this->Cookie = wrapper->GetRandomNumber();
-#else
-        this->Cookie = 0;
-#endif
-    }
-
+    void SetCollectionWrapper(RecyclerCollectionWrapper * wrapper);
     static size_t GetAlignedSize(size_t size) { return HeapInfo::GetAlignedSize(size); }
-
-    HeapInfo* GetAutoHeap() { return &autoHeap; }
-
+    HeapInfo* GetDefaultHeapInfo() { return autoHeap.GetDefaultHeap(); }
     template <CollectionFlags flags>
     BOOL CollectNow();
 
@@ -1277,17 +1247,16 @@ public:
 
     void AddExternalMemoryUsage(size_t size);
 
-    bool NeedDispose()
-    {
-        return this->hasDisposableObject;
-    }
+    bool NeedDispose() { return this->hasDisposableObject; }
 
     template <CollectionFlags flags>
     bool FinishDisposeObjectsNow();
-
-    BOOL ReportExternalMemoryAllocation(size_t size);
+    bool RequestExternalMemoryAllocation(size_t size);
     void ReportExternalMemoryFailure(size_t size);
     void ReportExternalMemoryFree(size_t size);
+    // ExternalAllocFunc returns true when allocation succeeds
+    template <typename ExternalAllocFunc>
+    bool DoExternalAllocation(size_t size, ExternalAllocFunc externalAllocFunc);
 
 #ifdef TRACE_OBJECT_LIFETIME
 #define DEFINE_RECYCLER_ALLOC_TRACE(AllocFunc, AllocWithAttributesFunc, attributes) \
@@ -1326,34 +1295,42 @@ public:
 #define DEFINE_RECYCLER_NOTHROW_ALLOC(AllocFunc, attributes) DEFINE_RECYCLER_NOTHROW_ALLOC_BASE(AllocFunc, AllocWithAttributes, attributes)
 #define DEFINE_RECYCLER_NOTHROW_ALLOC_ZERO(AllocFunc, attributes) DEFINE_RECYCLER_NOTHROW_ALLOC_BASE(AllocFunc, AllocZeroWithAttributes, attributes)
 
+#if GLOBAL_ENABLE_WRITE_BARRIER
+    DEFINE_RECYCLER_ALLOC(Alloc, WithBarrierBit);
+    DEFINE_RECYCLER_ALLOC_ZERO(AllocZero, WithBarrierBit);
+    DEFINE_RECYCLER_ALLOC(AllocFinalized, FinalizableWithBarrierObjectBits);
+    DEFINE_RECYCLER_ALLOC(AllocTracked, ClientTrackableObjectWithBarrierBits);
+    DEFINE_RECYCLER_ALLOC(AllocFinalizedClientTracked, ClientTrackableObjectWithBarrierBits);
+#else
     DEFINE_RECYCLER_ALLOC(Alloc, NoBit);
+    DEFINE_RECYCLER_ALLOC_ZERO(AllocZero, NoBit);
+    DEFINE_RECYCLER_ALLOC(AllocFinalized, FinalizableObjectBits);
+    DEFINE_RECYCLER_ALLOC(AllocTracked, ClientTrackableObjectBits);
+    DEFINE_RECYCLER_ALLOC(AllocFinalizedClientTracked, ClientFinalizableObjectBits);
+#endif
+
 #ifdef RECYCLER_WRITE_BARRIER_ALLOC
     DEFINE_RECYCLER_ALLOC(AllocWithBarrier, WithBarrierBit);
+    DEFINE_RECYCLER_ALLOC_ZERO(AllocZeroWithBarrier, WithBarrierBit);
     DEFINE_RECYCLER_ALLOC(AllocFinalizedWithBarrier, FinalizableWithBarrierObjectBits);
+    DEFINE_RECYCLER_ALLOC(AllocTrackedWithBarrier, ClientTrackableObjectWithBarrierBits);
+    DEFINE_RECYCLER_ALLOC(AllocFinalizedClientTrackedWithBarrier, ClientFinalizableObjectWithBarrierBits);
 #endif
-    DEFINE_RECYCLER_ALLOC(AllocFinalized, FinalizableObjectBits);
-    DEFINE_RECYCLER_ALLOC(AllocFinalizedClientTracked, ClientFinalizableObjectBits);
-    // All trackable object are client trackable
-    DEFINE_RECYCLER_ALLOC(AllocTracked, ClientTrackableObjectBits);
+
     DEFINE_RECYCLER_ALLOC(AllocLeaf, LeafBit);
     DEFINE_RECYCLER_ALLOC(AllocFinalizedLeaf, FinalizableLeafBits);
     DEFINE_RECYCLER_ALLOC(AllocTrackedLeaf, ClientTrackableLeafBits);
-    DEFINE_RECYCLER_ALLOC_ZERO(AllocZero, NoBit);
-#ifdef RECYCLER_WRITE_BARRIER_ALLOC
-    DEFINE_RECYCLER_ALLOC_ZERO(AllocZeroWithBarrier, WithBarrierBit);
-#endif
     DEFINE_RECYCLER_ALLOC_ZERO(AllocLeafZero, LeafBit);
-
     DEFINE_RECYCLER_ALLOC_ZERO(AllocZeroTrackedLeaf, ClientTrackableLeafBits);
-
     DEFINE_RECYCLER_NOTHROW_ALLOC_ZERO(AllocImplicitRootLeaf, ImplicitRootLeafBits);
+
     DEFINE_RECYCLER_NOTHROW_ALLOC_ZERO(AllocImplicitRoot, ImplicitRootBit);
 
     template <ObjectInfoBits enumClass>
     char * AllocEnumClass(DECLSPEC_GUARD_OVERFLOW size_t size)
     {
         Assert((enumClass & EnumClassMask) != 0);
-        Assert((enumClass & ~EnumClassMask) == 0);
+        //Assert((enumClass & ~EnumClassMask & ~WithBarrierBit) == 0);
         return AllocWithAttributes<(ObjectInfoBits)(enumClass), /* nothrow = */ false>(size);
     }
 
@@ -1361,6 +1338,11 @@ public:
     char * AllocWithInfoBits(DECLSPEC_GUARD_OVERFLOW size_t size)
     {
         return AllocWithAttributes<infoBits, /* nothrow = */ false>(size);
+    }
+    template <ObjectInfoBits infoBits>
+    char * AllocVisitedHost(DECLSPEC_GUARD_OVERFLOW size_t size)
+    {
+        return AllocZeroWithAttributes<infoBits, /* nothrow = */ true>(size);
     }
 
     template<typename T>
@@ -1377,21 +1359,21 @@ public:
     char* GetAddressOfAllocator(size_t sizeCat)
     {
         Assert(HeapInfo::IsAlignedSmallObjectSize(sizeCat));
-        return (char*)this->autoHeap.GetBucket<attributes>(sizeCat).GetAllocator();
+        return (char*)this->GetHeapInfo<attributes>()->template GetBucket<(ObjectInfoBits)(attributes & GetBlockTypeBitMask)>(sizeCat).GetAllocator();
     }
 
     template <ObjectInfoBits attributes>
     uint32 GetEndAddressOffset(size_t sizeCat)
     {
         Assert(HeapInfo::IsAlignedSmallObjectSize(sizeCat));
-        return this->autoHeap.GetBucket<attributes>(sizeCat).GetAllocator()->GetEndAddressOffset();
+        return this->GetHeapInfo<attributes>()->template GetBucket<(ObjectInfoBits)(attributes & GetBlockTypeBitMask)>(sizeCat).GetAllocator()->GetEndAddressOffset();
     }
 
     template <ObjectInfoBits attributes>
     uint32 GetFreeObjectListOffset(size_t sizeCat)
     {
         Assert(HeapInfo::IsAlignedSmallObjectSize(sizeCat));
-        return this->autoHeap.GetBucket<attributes>(sizeCat).GetAllocator()->GetFreeObjectListOffset();
+        return this->GetHeapInfo<attributes>()->template GetBucket<(ObjectInfoBits)(attributes & GetBlockTypeBitMask)>(sizeCat).GetAllocator()->GetFreeObjectListOffset();
     }
 
     void GetNormalHeapBlockAllocatorInfoForNativeAllocation(size_t sizeCat, void*& allocatorAddress, uint32& endAddressOffset, uint32& freeListOffset, bool allowBumpAllocation, bool isOOPJIT);
@@ -1479,6 +1461,7 @@ public:
 #endif
 #ifdef RECYCLER_ZERO_MEM_CHECK
     void VerifyZeroFill(void * address, size_t size);
+    void VerifyLargeAllocZeroFill(void * address, size_t size, ObjectInfoBits attributes);
 #endif
 #ifdef RECYCLER_DUMP_OBJECT_GRAPH
     bool DumpObjectGraph(RecyclerObjectGraphDumper::Param * param = nullptr);
@@ -1493,10 +1476,7 @@ public:
     void CheckLeaksOnProcessDetach(char16 const * header);
 #endif
 #ifdef RECYCLER_TRACE
-    void SetDomCollect(bool isDomCollect)
-    {
-        collectionParam.domCollect = isDomCollect;
-    }
+    void SetDomCollect(bool isDomCollect) { collectionParam.domCollect = isDomCollect; }
     void CaptureCollectionParam(CollectionFlags flags, bool repeat = false);
 #endif
 
@@ -1557,10 +1537,6 @@ private:
     {
         return AllocWithAttributes<WeakReferenceEntryBits, /* nothrow = */ false>(size);
     }
-#if DBG
-    template <ObjectInfoBits attributes>
-    void VerifyPageHeapFillAfterAlloc(char* memBlock, size_t size);
-#endif
 
     bool NeedDisposeTimed()
     {
@@ -1594,7 +1570,9 @@ private:
     size_t TryMarkArenaMemoryBlockList(ArenaMemoryBlock * memoryBlocks);
     size_t TryMarkBigBlockList(BigBlock * memoryBlocks);
 #if ENABLE_CONCURRENT_GC
+#if FALSE // REVIEW: remove this code since not using
     size_t TryMarkBigBlockListWithWriteWatch(BigBlock * memoryBlocks);
+#endif
 #endif
 
     // Mark
@@ -1637,9 +1615,17 @@ private:
 
     inline void ScanObjectInline(void ** obj, size_t byteCount);
     inline void ScanObjectInlineInterior(void ** obj, size_t byteCount);
-    inline void ScanMemoryInline(void ** obj, size_t byteCount);
-    void ScanMemory(void ** obj, size_t byteCount) { if (byteCount != 0) { ScanMemoryInline(obj, byteCount); } }
-    bool AddMark(void * candidate, size_t byteCount);
+
+    template <bool doSpecialMark, bool forceInterior = false>
+    inline void ScanMemoryInline(void ** obj, size_t byteCount
+        ADDRESS_SANITIZER_APPEND(RecyclerScanMemoryType scanMemoryType = RecyclerScanMemoryType::General));
+
+    template <bool doSpecialMark>
+    void ScanMemory(void ** obj, size_t byteCount) { if (byteCount != 0) { ScanMemoryInline<doSpecialMark>(obj, byteCount); } }
+    bool AddMark(void * candidate, size_t byteCount) throw();
+#ifdef RECYCLER_VISITED_HOST
+    bool AddPreciselyTracedMark(IRecyclerVisitedObject * candidate) throw();
+#endif
 
     // Sweep
 #if ENABLE_PARTIAL_GC
@@ -1648,8 +1634,15 @@ private:
     bool Sweep(bool concurrent = false);
 #endif
     void SweepWeakReference();
-    void SweepHeap(bool concurrent, RecyclerSweep& recyclerSweep);
-    void FinishSweep(RecyclerSweep& recyclerSweep);
+    void SweepHeap(bool concurrent, RecyclerSweepManager& recyclerSweepManager);
+    void FinishSweep(RecyclerSweepManager& recyclerSweepManager);
+
+#if ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP
+    void DoTwoPassConcurrentSweepPreCheck();
+    void FinishSweepPrep();
+    void FinishConcurrentSweepPass1();
+    void FinishConcurrentSweep();
+#endif
 
     bool FinishDisposeObjects();
     template <CollectionFlags flags>
@@ -1676,10 +1669,10 @@ private:
 #if ENABLE_PARTIAL_GC
     void ProcessClientTrackedObjects();
     bool PartialCollect(bool concurrent);
-    void FinishPartialCollect(RecyclerSweep * recyclerSweep = nullptr);
+    void FinishPartialCollect(RecyclerSweepManager * recyclerSweep = nullptr);
     void ClearPartialCollect();
 #if ENABLE_CONCURRENT_GC
-    void BackgroundFinishPartialCollect(RecyclerSweep * recyclerSweep);
+    void BackgroundFinishPartialCollect(RecyclerSweepManager * recyclerSweep);
 #endif
 
 #endif
@@ -1691,6 +1684,10 @@ private:
     void ProcessTrackedObjects();
 #endif
 
+    BOOL IsAllocatableCallbackState()
+    {
+        return (collectionState & (Collection_PostSweepRedeferralCallback | Collection_PostCollectionCallback));
+    }
 #if ENABLE_CONCURRENT_GC
     // Concurrent GC
     BOOL IsConcurrentEnabled() const { return this->enableConcurrentMark || this->enableParallelMark || this->enableConcurrentSweep; }
@@ -1700,11 +1697,21 @@ private:
     BOOL IsConcurrentFindRootState() const;
     BOOL IsConcurrentExecutingState() const;
     BOOL IsConcurrentSweepExecutingState() const;
+    BOOL IsConcurrentSweepSetupState() const;
+    BOOL IsConcurrentSweepState() const;
     BOOL IsConcurrentState() const;
     BOOL InConcurrentSweep()
     {
         return ((collectionState & Collection_ConcurrentSweep) == Collection_ConcurrentSweep);
     }
+
+#if ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP
+    bool AllowAllocationsDuringConcurrentSweep()
+    {
+        return this->allowAllocationsDuringConcurrentSweepForCollection;
+    }
+#endif
+
 #if DBG
     BOOL IsConcurrentFinishedState() const;
 #endif // DBG
@@ -1731,8 +1738,8 @@ private:
     template <CollectionFlags flags>
     BOOL TryFinishConcurrentCollect();
     BOOL WaitForConcurrentThread(DWORD waitTime);
-    void FlushBackgroundPages();
     BOOL FinishConcurrentCollect(CollectionFlags flags);
+    void FinishTransferSwept(CollectionFlags flags);
     BOOL FinishConcurrentCollectWrapped(CollectionFlags flags);
     void BackgroundMark();
     void BackgroundResetMarks();
@@ -1747,10 +1754,10 @@ private:
 
     char* GetScriptThreadStackTop();
 
-    void SweepPendingObjects(RecyclerSweep& recyclerSweep);
-    void ConcurrentTransferSweptObjects(RecyclerSweep& recyclerSweep);
+    void SweepPendingObjects(RecyclerSweepManager& recyclerSweepManager);
+    void ConcurrentTransferSweptObjects(RecyclerSweepManager& recyclerSweepManager);
 #if ENABLE_PARTIAL_GC
-    void ConcurrentPartialTransferSweptObjects(RecyclerSweep& recyclerSweep);
+    void ConcurrentPartialTransferSweptObjects(RecyclerSweepManager& recyclerSweepManager);
 #endif // ENABLE_PARTIAL_GC
 #endif // ENABLE_CONCURRENT_GC
 
@@ -1781,8 +1788,12 @@ private:
     template <class TBlockAttributes> friend class SmallNormalHeapBlockT;
     template <class TBlockAttributes> friend class SmallLeafHeapBlockT;
     template <class TBlockAttributes> friend class SmallFinalizableHeapBlockT;
+#ifdef RECYCLER_VISITED_HOST
+    template <class TBlockAttributes> friend class SmallRecyclerVisitedHostHeapBlockT;
+#endif
     friend class LargeHeapBlock;
     friend class HeapInfo;
+    friend class HeapInfoManager;
     friend class LargeHeapBucket;
 
     template <typename TBlockType>
@@ -1802,7 +1813,8 @@ private:
     void VerifyMarkArena(ArenaData * arena);
     void VerifyMarkBigBlockList(BigBlock * memoryBlocks);
     void VerifyMarkArenaMemoryBlockList(ArenaMemoryBlock * memoryBlocks);
-    void VerifyMark(void * address);
+    bool VerifyMark(void * objectAddress, void * target);
+    bool VerifyMark(void * target);
 #endif
 #if DBG_DUMP
     bool forceTraceMark;
@@ -1894,7 +1906,7 @@ private:
     typedef JsUtil::BaseDictionary<void *, TrackerData *, NoCheckHeapAllocator, PrimeSizePolicy, RecyclerPointerComparer, JsUtil::SimpleDictionaryEntry, JsUtil::NoResizeLock> PointerToTrackerDataMap;
 
     TypeInfotoTrackerItemMap * trackerDictionary;
-    CRITICAL_SECTION trackerCriticalSection;
+    CriticalSection * trackerCriticalSection;
 #endif
     TrackAllocData nextAllocData;
 #endif
@@ -1970,8 +1982,10 @@ public:
     bool IsPostEnumHeapValidationInProgress() const { return pfPostHeapEnumScanCallback != NULL; }
 #endif
 
-private:
+public:
     void* GetRealAddressFromInterior(void* candidate);
+
+private:
     void BeginNonCollectingMark();
     void EndNonCollectingMark();
 
@@ -2027,6 +2041,36 @@ private:
     } objectBeforeCollectCallbackState;
 
     bool ProcessObjectBeforeCollectCallbacks(bool atShutdown = false);
+
+#if GLOBAL_ENABLE_WRITE_BARRIER
+private:
+    typedef JsUtil::BaseDictionary<void *, size_t, HeapAllocator, PrimeSizePolicy, RecyclerPointerComparer, JsUtil::SimpleDictionaryEntry, JsUtil::AsymetricResizeLock> PendingWriteBarrierBlockMap;
+
+    PendingWriteBarrierBlockMap pendingWriteBarrierBlockMap;
+public:
+    void RegisterPendingWriteBarrierBlock(void* address, size_t bytes);
+    void UnRegisterPendingWriteBarrierBlock(void* address);
+#endif
+
+#if DBG && GLOBAL_ENABLE_WRITE_BARRIER
+private:
+    static Recycler* recyclerList;
+    static CriticalSection recyclerListLock;
+    Recycler* next;
+public:
+    static void WBSetBitJIT(char* addr)
+    {
+        return WBSetBit(addr);
+    }
+    static void WBSetBit(char* addr);
+    static void WBSetBitRange(char* addr, uint length);
+    static void WBVerifyBitIsSet(char* addr, char* target);
+    static bool WBCheckIsRecyclerAddress(char* addr);
+#endif
+
+#ifdef RECYCLER_FINALIZE_CHECK
+    void VerifyFinalize();
+#endif
 };
 
 
@@ -2056,9 +2100,14 @@ public:
     void* GetObjectAddress() const { return m_address; }
 
 #ifdef RECYCLER_PAGE_HEAP
-    bool IsPageHeapAlloc()
+    bool IsPageHeapAlloc() const
     {
         return isUsingLargeHeapBlock && ((LargeHeapBlock*)m_heapBlock)->InPageHeapMode();
+    }
+    void PageHeapLockPages() const
+    {
+        Assert(IsPageHeapAlloc());
+        ((LargeHeapBlock*)m_heapBlock)->PageHeapLockPages();
     }
 #endif
 
@@ -2130,8 +2179,6 @@ public:
         Recycler* recycler = this->m_recycler;
         if (recycler->IsPageHeapEnabled() && recycler->ShouldCapturePageHeapFreeStack())
         {
-            Assert(recycler->IsPageHeapEnabled());
-
 #ifdef STACK_BACK_TRACE
             if (this->isUsingLargeHeapBlock)
             {
@@ -2197,18 +2244,26 @@ public:
 class CollectedRecyclerWeakRefHeapBlock : public HeapBlock
 {
 public:
+#if DBG && GLOBAL_ENABLE_WRITE_BARRIER
+    virtual void WBVerifyBitIsSet(char* addr) override { Assert(false); }
+    virtual void WBSetBit(char* addr) override { Assert(false); }
+    virtual void WBSetBitRange(char* addr, uint count) override { Assert(false); }
+    virtual void WBClearBit(char* addr) override { Assert(false); }
+    virtual void WBClearObject(char* addr) override { Assert(false); }
+#endif
+
 #if DBG
+    virtual HeapInfo * GetHeapInfo() const override { Assert(false); return nullptr; }
     virtual BOOL IsFreeObject(void* objectAddress) override { Assert(false); return false; }
 #endif
     virtual BOOL IsValidObject(void* objectAddress) override { Assert(false); return false; }
     virtual byte* GetRealAddressFromInterior(void* interiorAddress) override { Assert(false); return nullptr; }
-    virtual size_t GetObjectSize(void* object) override { Assert(false); return 0; }
+    virtual size_t GetObjectSize(void* object) const override { Assert(false); return 0; }
     virtual bool FindHeapObject(void* objectAddress, Recycler * recycler, FindHeapObjectFlags flags, RecyclerHeapObjectInfo& heapObject) override { Assert(false); return false; }
     virtual bool TestObjectMarkedBit(void* objectAddress) override { Assert(false); return false; }
     virtual void SetObjectMarkedBit(void* objectAddress) override { Assert(false); }
-
 #ifdef RECYCLER_VERIFY_MARK
-    virtual void VerifyMark(void * objectAddress) override { Assert(false); }
+    virtual bool VerifyMark(void * objectAddress, void * target) override { Assert(false); return false; }
 #endif
 #ifdef RECYCLER_PERF_COUNTERS
     virtual void UpdatePerfCountersOnFree() override { Assert(false); }
@@ -2241,26 +2296,30 @@ template <typename SmallHeapBlockAllocatorType>
 void
 Recycler::AddSmallAllocator(SmallHeapBlockAllocatorType * allocator, size_t sizeCat)
 {
-    autoHeap.AddSmallAllocator(allocator, sizeCat);
+    this->GetDefaultHeapInfo()->AddSmallAllocator(allocator, sizeCat);
 }
 
 template <typename SmallHeapBlockAllocatorType>
 void
 Recycler::RemoveSmallAllocator(SmallHeapBlockAllocatorType * allocator, size_t sizeCat)
 {
-    autoHeap.RemoveSmallAllocator(allocator, sizeCat);
+    this->GetDefaultHeapInfo()->RemoveSmallAllocator(allocator, sizeCat);
 }
 
 template <ObjectInfoBits attributes, typename SmallHeapBlockAllocatorType>
 char *
 Recycler::SmallAllocatorAlloc(SmallHeapBlockAllocatorType * allocator, DECLSPEC_GUARD_OVERFLOW size_t sizeCat, size_t size)
 {
-    return autoHeap.SmallAllocatorAlloc<attributes>(this, allocator, sizeCat, size);
+    return this->GetDefaultHeapInfo()->SmallAllocatorAlloc<attributes>(this, allocator, sizeCat, size);
 }
 
 // Dummy recycler allocator policy classes to choose the allocation function
 class _RecyclerLeafPolicy;
 class _RecyclerNonLeafPolicy;
+
+#ifdef RECYCLER_WRITE_BARRIER
+class _RecyclerWriteBarrierPolicy;
+#endif
 
 template <typename Policy>
 class _RecyclerAllocatorFunc
@@ -2312,22 +2371,81 @@ public:
     }
 };
 
+#ifdef RECYCLER_WRITE_BARRIER
+template <>
+class _RecyclerAllocatorFunc<_RecyclerWriteBarrierPolicy>
+{
+public:
+    typedef char * (Recycler::*AllocFuncType)(size_t);
+    typedef bool (Recycler::*FreeFuncType)(void*, size_t);
+
+    static AllocFuncType GetAllocFunc()
+    {
+        return &Recycler::AllocWithBarrier;
+    }
+
+    static AllocFuncType GetAllocZeroFunc()
+    {
+        return &Recycler::AllocZeroWithBarrier;
+    }
+
+    static FreeFuncType GetFreeFunc()
+    {
+        return &Recycler::ExplicitFreeNonLeaf;
+    }
+};
+#endif
+
 // This is used by the compiler; when T is NOT a pointer i.e. a value type - it causes leaf allocation
 template <typename T>
 class TypeAllocatorFunc<Recycler, T> : public _RecyclerAllocatorFunc<_RecyclerLeafPolicy>
 {
 };
 
+#if GLOBAL_ENABLE_WRITE_BARRIER
+template <typename T>
+class TypeAllocatorFunc<Recycler, T *> : public _RecyclerAllocatorFunc<_RecyclerWriteBarrierPolicy>
+{
+};
+#else
 // Partial template specialization; applies to T when it is a pointer
 template <typename T>
 class TypeAllocatorFunc<Recycler, T *> : public _RecyclerAllocatorFunc<_RecyclerNonLeafPolicy>
 {
 };
+#endif
+
+// Dummy class to choose the allocation function
+class RecyclerLeafAllocator
+{
+public:
+    static const bool FakeZeroLengthArray = true;
+};
+class RecyclerNonLeafAllocator
+{
+public:
+    static const bool FakeZeroLengthArray = true;
+};
+class RecyclerWriteBarrierAllocator
+{
+public:
+    static const bool FakeZeroLengthArray = true;
+};
+
+// Choose RecyclerLeafAllocator / RecyclerNonLeafAllocator based on "bool isLeaf"
+template <bool isLeaf>
+struct _RecyclerLeaf { typedef RecyclerLeafAllocator AllocatorType; };
+template <>
+struct _RecyclerLeaf<false> { typedef RecyclerNonLeafAllocator AllocatorType; };
 
 template <bool isLeaf>
 class ListTypeAllocatorFunc<Recycler, isLeaf>
 {
 public:
+    // RecyclerLeafAllocator / RecyclerNonLeafAllocator based on "bool isLeaf"
+    // used by write barrier type traits
+    typedef typename _RecyclerLeaf<isLeaf>::AllocatorType EffectiveAllocatorType;
+
     typedef char * (Recycler::*AllocFuncType)(size_t);
     typedef bool (Recycler::*FreeFuncType)(void*, size_t);
 
@@ -2349,15 +2467,23 @@ public:
     }
 };
 
-// Dummy class to choose the allocation function
-class RecyclerLeafAllocator;
-class RecyclerNonLeafAllocator;
-
 // Partial template specialization to allocate as non leaf
 template <typename T>
-class TypeAllocatorFunc<RecyclerNonLeafAllocator, T> : public _RecyclerAllocatorFunc<_RecyclerNonLeafPolicy>
+class TypeAllocatorFunc<RecyclerNonLeafAllocator, T> :
+#if GLOBAL_ENABLE_WRITE_BARRIER
+    public _RecyclerAllocatorFunc<_RecyclerWriteBarrierPolicy>
+#else
+    public _RecyclerAllocatorFunc<_RecyclerNonLeafPolicy>
+#endif
 {
 };
+
+#ifdef RECYCLER_WRITE_BARRIER
+template <typename T>
+class TypeAllocatorFunc<RecyclerWriteBarrierAllocator, T> : public _RecyclerAllocatorFunc<_RecyclerWriteBarrierPolicy>
+{
+};
+#endif
 
 template <typename T>
 class TypeAllocatorFunc<RecyclerLeafAllocator, T> : public _RecyclerAllocatorFunc<_RecyclerLeafPolicy>
@@ -2378,6 +2504,14 @@ struct AllocatorInfo<RecyclerNonLeafAllocator, TAllocType>
     typedef Recycler AllocatorType;
     typedef TypeAllocatorFunc<RecyclerNonLeafAllocator, TAllocType> AllocatorFunc;
     typedef TypeAllocatorFunc<RecyclerNonLeafAllocator, TAllocType> InstAllocatorFunc; // Same as TypeAllocatorFunc
+};
+
+template <typename TAllocType>
+struct AllocatorInfo<RecyclerWriteBarrierAllocator, TAllocType>
+{
+    typedef Recycler AllocatorType;
+    typedef TypeAllocatorFunc<RecyclerWriteBarrierAllocator, TAllocType> AllocatorFunc;
+    typedef TypeAllocatorFunc<RecyclerWriteBarrierAllocator, TAllocType> InstAllocatorFunc; // Same as TypeAllocatorFunc
 };
 
 template <typename TAllocType>
@@ -2413,7 +2547,7 @@ struct ForceLeafAllocator<RecyclerNonLeafAllocator>
 };
 
 // TODO: enable -profile for GC phases.
-// access the same profiler object from multiple GC threads which shares one recyler object,
+// access the same profiler object from multiple GC threads which shares one recycler object,
 // but profiler object is not thread safe
 #if defined(PROFILE_EXEC) && 0
 #define RECYCLER_PROFILE_EXEC_BEGIN(recycler, phase) if (recycler->profiler != nullptr) { recycler->profiler->Begin(phase); }
@@ -2452,26 +2586,71 @@ operator delete(void * obj, Recycler * alloc, HeapInfo * heapInfo)
     alloc->HeapFree(heapInfo, obj);
 }
 
-_Ret_notnull_ inline void * __cdecl
-operator new(DECLSPEC_GUARD_OVERFLOW size_t byteSize, Recycler * recycler, ObjectInfoBits enumClassBits)
-{
-    AssertCanHandleOutOfMemory();
-    Assert(byteSize != 0);
-    Assert(enumClassBits == EnumClass_1_Bit);
-    void * buffer = recycler->AllocEnumClass<EnumClass_1_Bit>(byteSize);
-    // All of our allocation should throw on out of memory
-    Assume(buffer != nullptr);
-    return buffer;
-}
-
 template<ObjectInfoBits infoBits>
 _Ret_notnull_ inline void * __cdecl
 operator new(DECLSPEC_GUARD_OVERFLOW size_t byteSize, Recycler * recycler, const InfoBitsWrapper<infoBits>&)
 {
     AssertCanHandleOutOfMemory();
     Assert(byteSize != 0);
-    void * buffer = recycler->AllocWithInfoBits<infoBits>(byteSize);
+    void * buffer;
+
+    if (infoBits & EnumClass_1_Bit)
+    {
+        buffer = recycler->AllocEnumClass<infoBits>(byteSize);
+    }
+    else
+    {
+        buffer = recycler->AllocWithInfoBits<infoBits>(byteSize);
+    }
     // All of our allocation should throw on out of memory
     Assume(buffer != nullptr);
     return buffer;
+}
+
+#if DBG && defined(RECYCLER_VERIFY_MARK)
+extern bool IsLikelyRuntimeFalseReference(
+    char* objectStartAddress, size_t offset, const char* typeName);
+#define DECLARE_RECYCLER_VERIFY_MARK_FRIEND() \
+    private: \
+        friend bool ::IsLikelyRuntimeFalseReference( \
+            char* objectStartAddress, size_t offset, const char* typeName);
+#define IMPLEMENT_STUB_IsLikelyRuntimeFalseReference() \
+    bool IsLikelyRuntimeFalseReference( \
+            char* objectStartAddress, size_t offset, const char* typeName) \
+    {  return false; }
+#else
+#define DECLARE_RECYCLER_VERIFY_MARK_FRIEND()
+#define IMPLEMENT_STUB_IsLikelyRuntimeFalseReference()
+#endif
+
+template <typename ExternalAllocFunc>
+bool Recycler::DoExternalAllocation(size_t size, ExternalAllocFunc externalAllocFunc)
+{
+    // Request external memory allocation
+    if (!RequestExternalMemoryAllocation(size))
+    {
+        // Attempt to free some memory then try again
+        CollectNow<CollectOnTypedArrayAllocation>();
+        if (!RequestExternalMemoryAllocation(size))
+        {
+            return false;
+        }
+    }
+    struct AutoExternalAllocation
+    {
+        bool allocationSucceeded = false;
+        Recycler* recycler;
+        size_t size;
+        AutoExternalAllocation(Recycler* recycler, size_t size): recycler(recycler), size(size) {}
+        // In case the externalAllocFunc throws or fails, the destructor will report the failure
+        ~AutoExternalAllocation() { if (!allocationSucceeded) recycler->ReportExternalMemoryFailure(size); }
+    };
+    AutoExternalAllocation externalAllocation(this, size);
+    if (externalAllocFunc())
+    {
+        this->AddExternalMemoryUsage(size);
+        externalAllocation.allocationSucceeded = true;
+        return true;
+    }
+    return false;
 }

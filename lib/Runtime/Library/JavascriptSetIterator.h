@@ -15,9 +15,9 @@ namespace Js
     class JavascriptSetIterator : public DynamicObject
     {
     private:
-        JavascriptSet*                          m_set;
-        JavascriptSet::SetDataList::Iterator    m_setIterator;
-        JavascriptSetIteratorKind               m_kind;
+        Field(JavascriptSet*)                          m_set;
+        Field(JavascriptSet::SetDataList::Iterator)    m_setIterator;
+        Field(JavascriptSetIteratorKind)               m_kind;
 
     protected:
         DEFINE_VTABLE_CTOR(JavascriptSetIterator, DynamicObject);
@@ -28,6 +28,7 @@ namespace Js
 
         static bool Is(Var aValue);
         static JavascriptSetIterator* FromVar(Var aValue);
+        static JavascriptSetIterator* UnsafeFromVar(Var aValue);
 
         class EntryInfo
         {

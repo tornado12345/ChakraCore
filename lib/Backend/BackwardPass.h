@@ -37,11 +37,9 @@ private:
     void ProcessTransfers(IR::Instr * instr);
     void ProcessFieldKills(IR::Instr * instr);
     template<typename T> void ClearBucketsOnFieldKill(IR::Instr *instr, HashTable<T> *table);
-    void ProcessFieldHoistKills(IR::Instr * instr);
-    bool ProcessBailOutInfo(IR::Instr * instr, bool preOpBailout);
     bool ProcessBailOutInfo(IR::Instr * instr);
-    void ProcessPendingPreOpBailOutInfo(IR::Instr *const currentInstr);
     void ProcessBailOutInfo(IR::Instr * instr, BailOutInfo * bailOutInfo);
+    void ProcessPendingPreOpBailOutInfo(IR::Instr *const currentInstr);
     void ProcessBailOutArgObj(BailOutInfo * bailOutInfo, BVSparse<JitArenaAllocator> * byteCodeUpwardExposedUsed);
     void ProcessBailOutConstants(BailOutInfo * bailOutInfo, BVSparse<JitArenaAllocator> * byteCodeUpwardExposedUsed, BVSparse<JitArenaAllocator>* argSymsBv);
     void ProcessBailOutCopyProps(BailOutInfo * bailOutInfo, BVSparse<JitArenaAllocator> * byteCodeUpwardExposedUsed, BVSparse<JitArenaAllocator>* argSymsBv);
@@ -102,13 +100,12 @@ private:
     void DeadStoreImplicitCallBailOut(IR::Instr * instr, bool hasLiveFields);
     void DeadStoreTypeCheckBailOut(IR::Instr * instr);
     bool IsImplicitCallBailOutCurrentlyNeeded(IR::Instr * instr, bool mayNeedImplicitCallBailOut, bool hasLiveFields);
+    bool NeedBailOutOnImplicitCallsForTypedArrayStore(IR::Instr* instr);
     bool TrackNoImplicitCallInlinees(IR::Instr *instr);
     bool ProcessBailOnNoProfile(IR::Instr *instr, BasicBlock *block);
 
     bool DoByteCodeUpwardExposedUsed() const;
     void DoSetDead(IR::Opnd * opnd, bool isDead) const;
-    bool DoFieldHoistCandidates() const;
-    bool DoFieldHoistCandidates(Loop * loop) const;
     bool DoMarkTempObjects() const;
     bool DoMarkTempNumbers() const;
     bool DoMarkTempNumbersOnTempObjects() const;

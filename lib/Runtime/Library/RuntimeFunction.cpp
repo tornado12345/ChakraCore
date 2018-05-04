@@ -18,31 +18,40 @@ namespace Js
         : JavascriptFunction(type, functionInfo, cache), functionNameId(nullptr)
     {}
 
-    Var
+    JavascriptString *
     RuntimeFunction::EnsureSourceString()
     {
         JavascriptLibrary* library = this->GetLibrary();
         ScriptContext * scriptContext = library->GetScriptContext();
+        JavascriptString * retStr = nullptr;
         if (this->functionNameId == nullptr)
         {
-            this->functionNameId = library->GetFunctionDisplayString();
+            retStr = library->GetFunctionDisplayString();
+            this->functionNameId = retStr;
         }
         else
         {
             if (TaggedInt::Is(this->functionNameId))
             {
-                if (this->GetScriptContext()->GetConfig()->IsES6FunctionNameEnabled() && this->GetTypeHandler()->IsDeferredTypeHandler())
+                if (this->GetTypeHandler()->IsDeferredTypeHandler())
                 {
                     JavascriptString* functionName = nullptr;
                     DebugOnly(bool status = ) this->GetFunctionName(&functionName);
                     Assert(status);
                     this->SetPropertyWithAttributes(PropertyIds::name, functionName, PropertyConfigurable, nullptr);
                 }
-                this->functionNameId = GetNativeFunctionDisplayString(scriptContext, scriptContext->GetPropertyString(TaggedInt::ToInt32(this->functionNameId)));
+
+                // This has a side-effect where any other code (such as debugger) that uses functionNameId value will now get the value like "function foo() { native code }"
+                // instead of just "foo". Alternative ways will need to be devised; if it's not desirable to use this full display name value in those cases.
+                 retStr = GetNativeFunctionDisplayString(scriptContext, scriptContext->GetPropertyString(TaggedInt::ToInt32(this->functionNameId)));
+                 this->functionNameId = retStr;
+            }
+            else
+            {
+                retStr = JavascriptString::FromVar(this->functionNameId);
             }
         }
-        Assert(JavascriptString::Is(this->functionNameId));
-        return this->functionNameId;
+        return retStr;
     }
 
     void
@@ -59,6 +68,11 @@ namespace Js
 #if ENABLE_TTD
     void RuntimeFunction::MarkVisitKindSpecificPtrs(TTD::SnapshotExtractor* extractor)
     {
+        if(this->functionNameId != nullptr)
+        {
+            extractor->MarkVisitVar(this->functionNameId);
+        }
+
         Var revokableProxy = nullptr;
         RuntimeFunction* function = const_cast<RuntimeFunction*>(this);
         if(function->GetInternalProperty(function, Js::InternalPropertyIds::RevocableProxy, &revokableProxy, nullptr, this->GetScriptContext()))
@@ -100,7 +114,7 @@ namespace Js
             }
             else
             {
-                AssertMsg(TTD::JsSupport::IsVarComplexKind(revokableProxy), "Huh, it looks like we need to check before adding this as a dep on.");
+                TTDAssert(TTD::JsSupport::IsVarComplexKind(revokableProxy), "Huh, it looks like we need to check before adding this as a dep on.");
 
                 uint32 depOnCount = 1;
                 TTD_PTR_ID* depOnArray = alloc.SlabAllocateArray<TTD_PTR_ID>(1);

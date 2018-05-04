@@ -10,7 +10,7 @@
 namespace Wasm
 {
 
-WasmFunctionInfo::WasmFunctionInfo(ArenaAllocator * alloc, WasmSignature* signature, uint32 number) : 
+WasmFunctionInfo::WasmFunctionInfo(ArenaAllocator* alloc, WasmSignature* signature, uint32 number) : 
     m_alloc(alloc),
     m_signature(signature),
     m_body(nullptr),
@@ -19,24 +19,25 @@ WasmFunctionInfo::WasmFunctionInfo(ArenaAllocator * alloc, WasmSignature* signat
     m_nameLength(0),
     m_number(number),
     m_locals(alloc, signature->GetParamCount())
+#if DBG_DUMP
+    , importedFunctionReference(nullptr)
+#endif
 {
-    for (uint32 i = 0; i < signature->GetParamCount(); ++i)
+    for (Js::ArgSlot i = 0; i < signature->GetParamCount(); ++i)
     {
-        m_locals.Add(Wasm::Local(signature->GetParam(i)));
+        m_locals.Add(signature->GetParam(i));
     }
 }
 
-void
-WasmFunctionInfo::AddLocal(WasmTypes::WasmType type, uint count)
+void WasmFunctionInfo::AddLocal(WasmTypes::WasmType type, uint32 count)
 {
-    for (uint i = 0; i < count; ++i)
+    for (uint32 i = 0; i < count; ++i)
     {
         m_locals.Add(Wasm::Local(type));
     }
 }
 
-Local
-WasmFunctionInfo::GetLocal(uint index) const
+Local WasmFunctionInfo::GetLocal(uint32 index) const
 {
     if (index < GetLocalCount())
     {
@@ -45,30 +46,26 @@ WasmFunctionInfo::GetLocal(uint index) const
     return WasmTypes::Limit;
 }
 
-Local
-WasmFunctionInfo::GetParam(uint index) const
+
+uint32 WasmFunctionInfo::GetResultCount() const
 {
-    return m_signature->GetParam(index);
+    return m_signature->GetResultCount();
 }
 
-WasmTypes::WasmType
-WasmFunctionInfo::GetResultType() const
+Local WasmFunctionInfo::GetResult(uint32 index) const
 {
-    return m_signature->GetResultType();
+    return m_signature->GetResult(index);
 }
 
-uint32
-WasmFunctionInfo::GetLocalCount() const
+uint32 WasmFunctionInfo::GetLocalCount() const
 {
     return m_locals.Count();
 }
 
-uint32
-WasmFunctionInfo::GetParamCount() const
+Js::ArgSlot WasmFunctionInfo::GetParamCount() const
 {
     return m_signature->GetParamCount();
 }
-
 
 } // namespace Wasm
 #endif // ENABLE_WASM

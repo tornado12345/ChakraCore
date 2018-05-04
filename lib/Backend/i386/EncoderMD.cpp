@@ -337,26 +337,36 @@ EncoderMD::EmitModRM(IR::Instr * instr, IR::Opnd *opnd, BYTE reg1)
 
     case IR::OpndKindIndir:
         indirOpnd = opnd->AsIndirOpnd();
-        AssertMsg(indirOpnd->GetBaseOpnd() != nullptr, "Expected base to be set in indirOpnd");
 
         baseOpnd = indirOpnd->GetBaseOpnd();
         indexOpnd = indirOpnd->GetIndexOpnd();
-        AssertMsg(!indexOpnd || indexOpnd->GetReg() != RegESP, "ESP cannot be the index of an indir.");
 
-        regBase = this->GetRegEncode(baseOpnd);
-        if (indexOpnd != nullptr)
+        AssertMsg(!indexOpnd || indexOpnd->GetReg() != RegESP, "ESP cannot be the index of an indir.");
+        if (baseOpnd == nullptr)
         {
+            Assert(indexOpnd != nullptr);
             regIndex = this->GetRegEncode(indexOpnd);
-            *(m_pc++) = (this->GetMod(indirOpnd, &dispSize) | reg1 | 0x4);
-            *(m_pc++) = (((indirOpnd->GetScale() & 3) << 6) | ((regIndex & 7) << 3) | (regBase & 7));
+            dispSize = 4;
+            *(m_pc++) = (0x00 | reg1 | 0x4);
+            *(m_pc++) = (((indirOpnd->GetScale() & 3) << 6) | ((regIndex & 7) << 3) | 0x5);
         }
         else
         {
-            *(m_pc++) = (this->GetMod(indirOpnd, &dispSize) | reg1 | regBase);
-            if (baseOpnd->GetReg() == RegESP)
+            regBase = this->GetRegEncode(baseOpnd);
+            if (indexOpnd != nullptr)
             {
-                // needs SIB byte
-                *(m_pc++) = ((regBase & 7) << 3) | (regBase & 7);
+                regIndex = this->GetRegEncode(indexOpnd);
+                *(m_pc++) = (this->GetMod(indirOpnd, &dispSize) | reg1 | 0x4);
+                *(m_pc++) = (((indirOpnd->GetScale() & 3) << 6) | ((regIndex & 7) << 3) | (regBase & 7));
+            }
+            else
+            {
+                *(m_pc++) = (this->GetMod(indirOpnd, &dispSize) | reg1 | regBase);
+                if (baseOpnd->GetReg() == RegESP)
+                {
+                    // needs SIB byte
+                    *(m_pc++) = ((regBase & 7) << 3) | (regBase & 7);
+                }
             }
         }
         break;
@@ -599,8 +609,11 @@ EncoderMD::Encode(IR::Instr *instr, BYTE *pc, BYTE* beginCodeAddress)
                 }
             }
         }
-#if DBG_DUMP
-        if( instr->IsEntryInstr() && Js::Configuration::Global.flags.DebugBreak.Contains( m_func->GetFunctionNumber() ) )
+#if ENABLE_DEBUG_CONFIG_OPTIONS
+        if (instr->IsEntryInstr() && (
+            Js::Configuration::Global.flags.DebugBreak.Contains(m_func->GetFunctionNumber()) ||
+            PHASE_ON(Js::DebugBreakPhase, m_func)
+        ))
         {
             IR::Instr *int3 = IR::Instr::New(Js::OpCode::INT, m_func);
             int3->SetSrc1(IR::IntConstOpnd::New(3, TyMachReg, m_func));
@@ -617,8 +630,9 @@ EncoderMD::Encode(IR::Instr *instr, BYTE *pc, BYTE* beginCodeAddress)
     IR::Opnd  *opr1;
     IR::Opnd  *opr2;
 
+    uint32 opdope = this->GetOpdope(instr);
     // Canonicalize operands.
-    if (this->GetOpdope(instr) & DDST)
+    if (opdope & DDST)
     {
         opr1 = dst;
         opr2 = src1;
@@ -636,31 +650,37 @@ EncoderMD::Encode(IR::Instr *instr, BYTE *pc, BYTE* beginCodeAddress)
     const uint32 leadIn = EncoderMD::GetLeadIn(instr);
     instrRestart = instrStart = m_pc;
 
-    if (instrSize == 2 && (this->GetOpdope(instr) & (DNO16|DFLT)) == 0)
+    // Emit the lock byte first if needed
+    if (opdope & DLOCK)
+    {
+        *instrRestart++ = 0xf0;
+    }
+
+    if (instrSize == 2 && (opdope & (DNO16|DFLT)) == 0)
     {
         *instrRestart++ = 0x66;
     }
-    if (this->GetOpdope(instr) & D66EX)
+    if (opdope & D66EX)
     {
         if (opr1->IsFloat64() || opr2->IsFloat64())
         {
             *instrRestart++ = 0x66;
         }
     }
-    if (this->GetOpdope(instr) & (DZEROF|DF2|DF3|D66))
+    if (opdope & (DZEROF|DF2|DF3|D66))
     {
-        if (this->GetOpdope(instr) & DZEROF)
+        if (opdope & DZEROF)
         {
         }
-        else if (this->GetOpdope(instr) & DF2)
+        else if (opdope & DF2)
         {
             *instrRestart++ = 0xf2;
         }
-        else if (this->GetOpdope(instr) & DF3)
+        else if (opdope & DF3)
         {
             *instrRestart++ = 0xf3;
         }
-        else if (this->GetOpdope(instr) & D66)
+        else if (opdope & D66)
         {
             *instrRestart++ = 0x66;
         }
@@ -925,7 +945,7 @@ modrm:
             }
             else if (opr1->IsHelperCallOpnd())
             {
-                const void* fnAddress = (void*)IR::GetMethodAddress(m_func->GetThreadContextInfo(), opr1->AsHelperCallOpnd());
+                const void* fnAddress = (void *)IR::GetMethodAddress(m_func->GetThreadContextInfo(), opr1->AsHelperCallOpnd());
                 AppendRelocEntry(RelocTypeCallPcrel, (void*)m_pc, nullptr, fnAddress);
                 AssertMsg(sizeof(uint32) == sizeof(void*), "Sizes of void* assumed to be 32-bits");
                 this->EmitConst(0, 4);
@@ -938,7 +958,6 @@ modrm:
             break;
 
         // Special form which doesn't fit any existing patterns.
-
         case SPECIAL:
 
             switch (instr->m_opcode)
@@ -1058,6 +1077,7 @@ modrm:
             case Js::OpCode::MOVAPS:
             case Js::OpCode::MOVUPS:
             case Js::OpCode::MOVHPD:
+            case Js::OpCode::MOVLPD:
                 if (!opr1->IsRegOpnd())
                 {
                     Assert(opr2->IsRegOpnd());
@@ -1124,6 +1144,9 @@ modrm:
                 {
                     continue;
                 }
+                break;
+            case Js::OpCode::PEXTRD:
+                this->EmitModRM(instr, opr1, this->GetRegEncode(opr2->AsRegOpnd()));
                 break;
             case Js::OpCode::BT:
             case Js::OpCode::BTR:
@@ -1217,13 +1240,13 @@ modrm:
         }
 
         // if instr has W bit, set it appropriately
-        if ((*form & WBIT) && !(this->GetOpdope(instr) & DFLT) && instrSize != 1)
+        if ((*form & WBIT) && !(opdope & DFLT) && instrSize != 1)
         {
             *opcodeByte |= 0x1; // set WBIT
         }
 
         AssertMsg(m_pc - instrStart <= MachMaxInstrSize, "MachMaxInstrSize not set correctly");
-        if (this->GetOpdope(instr) & DSSE)
+        if (opdope & DSSE)
         {
             // extra imm8 byte for SSE instructions.
             uint valueImm = 0;
@@ -1802,6 +1825,14 @@ void EncoderMD::UpdateRelocListWithNewBuffer(RelocList * relocList, BYTE * newBu
 bool EncoderMD::IsOPEQ(IR::Instr *instr)
 {
     return instr->IsLowered() && (EncoderMD::GetOpdope(instr) & DOPEQ);
+}
+
+bool EncoderMD::IsSHIFT(IR::Instr *instr)
+{
+    return (instr->IsLowered() && EncoderMD::GetInstrForm(instr) == FORM_SHIFT) ||
+        instr->m_opcode == Js::OpCode::PSLLDQ || instr->m_opcode == Js::OpCode::PSRLDQ ||
+        instr->m_opcode == Js::OpCode::PSLLW || instr->m_opcode == Js::OpCode::PSRLW ||
+        instr->m_opcode == Js::OpCode::PSLLD;
 }
 
 void EncoderMD::AddLabelReloc(BYTE* relocAddress)

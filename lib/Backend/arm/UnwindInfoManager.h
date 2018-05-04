@@ -31,7 +31,7 @@ public:
     }
 
     void Init(Func * func);
-    void EmitUnwindInfo(JITOutput *jitOutput, EmitBufferAllocation * alloc);
+    void EmitUnwindInfo(JITOutput *jitOutput, CustomHeap::Allocation * alloc);
     DWORD EmitLongUnwindInfoChunk(DWORD remainingLength);
 
     void SetFunc(Func *func)
@@ -134,6 +134,7 @@ public:
     bool GetHasChkStk() const;
     DWORD GetPDataCount(DWORD length);
     void SetSavedReg(BYTE reg);
+    bool TestSavedReg(BYTE reg) const;
     DWORD ClearSavedReg(DWORD mask, BYTE reg) const;
 
     void SetDoubleSavedRegList(DWORD doubleRegMask);
@@ -153,7 +154,7 @@ private:
     int xdataTotal;
     HANDLE processHandle;
     JITOutput *jitOutput;
-    EmitBufferAllocation * alloc;
+    CustomHeap::Allocation * alloc;
     DWORD fragmentLength;
     DWORD prologOffset;
     DWORD prologLabelId;

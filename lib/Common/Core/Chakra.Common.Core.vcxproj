@@ -26,6 +26,8 @@
       </AdditionalIncludeDirectories>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>CommonCorePch.h</PrecompiledHeaderFile>
+      <!-- # Check out https://osgwiki.com/wiki/Dev_14_Migration for more details about -Zc:implicitNoexcept- -->
+      <AdditionalOptions>-Zc:implicitNoexcept- %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
   </ItemDefinitionGroup>
   <ItemGroup>
@@ -39,8 +41,10 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)DelayLoadLibrary.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)EtwTraceCore.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)FaultInjection.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)GlobalSecurityPolicy.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)Output.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)PerfCounter.cpp" />
+    <ClCompile Include="CRC.cpp" />
     <None Include="PerfCounterImpl.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)PerfCounterSet.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)ProfileInstrument.cpp" />
@@ -64,6 +68,7 @@
     <ClInclude Include="CommonTypedefs.h" />
     <ClInclude Include="ConfigFlagsTable.h" />
     <ClInclude Include="ConfigParser.h" />
+    <ClInclude Include="CRC.h" />
     <ClInclude Include="CriticalSection.h" />
     <ClInclude Include="DbgHelpSymbolManager.h" />
     <ClInclude Include="DelayLoadLibrary.h" />

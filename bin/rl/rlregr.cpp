@@ -40,8 +40,8 @@ static BOOL NoMasterCompare;
 
 LOCAL int
 DoCommand(
-    char *path,     // full path of directory to run command in
-    char *cmdbuf,
+    const char *path,     // full path of directory to run command in
+    const char *cmdbuf,
     bool displayError = true
 )
 {
@@ -133,13 +133,14 @@ RegrFile(
 )
 {
     FILE *fp;
-    char *p, *opts;
+    char *p;
+    const char *opts;
     int x;
     int rc;
     int retval;
     char full[MAX_PATH];              // temporary place for full paths
     char basename[MAX_PATH];          // base filename
-    char *asmdir;                     // dir of generated asm file
+    const char *asmdir;               // dir of generated asm file
     char masterasmbuf[MAX_PATH];      // name of master asm file
     char asmbuf[MAX_PATH];            // name of generated asm file
     char diffbuf[MAX_PATH];           // name of generated diff file
@@ -337,7 +338,7 @@ RegrFile(
         return -1;
     }
 
-    x = DoCompare(fullasmbuf, fullmasterasmbuf);
+    x = DoCompare(fullasmbuf, fullmasterasmbuf, pTestVariant->testInfo.hasData[TIK_EOL_NORMALIZATION]);
     if (x < 0)
         return -1;
 
@@ -377,7 +378,7 @@ RegrFile(
 
                 // Compare again.
 
-                x = DoCompare(tmp_file1, tmp_file2);
+                x = DoCompare(tmp_file1, tmp_file2, pTestVariant->testInfo.hasData[TIK_EOL_NORMALIZATION]);
                 if (x < 0) {
                     rc = -1;
                 }

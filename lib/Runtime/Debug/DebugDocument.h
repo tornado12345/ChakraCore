@@ -27,6 +27,10 @@ namespace Js
         void RemoveBreakpointProbe(BreakpointProbe *probe);
         void ClearAllBreakPoints(void);
 
+#if ENABLE_TTD
+        BreakpointProbe* SetBreakPoint_TTDWbpId(int64 bpId, StatementLocation statement);
+#endif
+
         BreakpointProbe* FindBreakpoint(StatementLocation statement);
         bool FindBPStatementLocation(UINT bpId, StatementLocation * statement);
 
@@ -47,10 +51,6 @@ namespace Js
         Js::FunctionBody * GetFunctionBodyAt(int32 ibos);
 
         Utf8SourceInfo* GetUtf8SourceInfo() { return this->utf8SourceInfo; }
-
-#if ENABLE_TTD
-        bool IsJustMyCode() const;
-#endif
 
     private:
         Utf8SourceInfo* utf8SourceInfo;

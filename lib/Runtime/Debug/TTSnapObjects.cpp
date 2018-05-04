@@ -3,6 +3,9 @@
 // Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.
 //-------------------------------------------------------------------------------------------------------
 #include "RuntimeDebugPch.h"
+#include "Library/JavascriptGenerator.h"
+#include "Language/InterpreterStackFrame.h"
+#include "Library/JavascriptPromise.h"
 
 #if ENABLE_TTD
 
@@ -12,7 +15,7 @@ namespace TTD
     {
         void ExtractCompoundObject(NSSnapObjects::SnapObject* sobj, Js::RecyclableObject* obj, bool isWellKnown, const TTDIdentifierDictionary<TTD_PTR_ID, NSSnapType::SnapType*>& idToTypeMap, SlabAllocator& alloc)
         {
-            AssertMsg(!obj->CanHaveInterceptors(), "We are not prepared for custom external objects yet");
+            TTDAssert(!obj->IsExternal(), "We are not prepared for custom external objects yet");
 
             sobj->ObjectPtrId = TTD_CONVERT_VAR_TO_PTR_ID(obj);
             sobj->SnapObjectTag = obj->GetSnapTag_TTD();
@@ -79,7 +82,7 @@ namespace TTD
                 TTDVar* cpyBase = snpObject->VarArray;
                 if(sHandler->InlineSlotCapacity != 0)
                 {
-                    Js::Var* inlineSlots = dynObj->GetInlineSlots_TTD();
+                    Field(Js::Var) const* inlineSlots = dynObj->GetInlineSlots_TTD();
 
                     //copy all the properties (if they all fit into the inline slots) otherwise just copy all the inline slot values
                     uint32 inlineSlotCount = min(sHandler->MaxPropertyIndex, sHandler->InlineSlotCapacity);
@@ -89,7 +92,7 @@ namespace TTD
                 if(sHandler->MaxPropertyIndex > sHandler->InlineSlotCapacity)
                 {
                     cpyBase = cpyBase + sHandler->InlineSlotCapacity;
-                    Js::Var* auxSlots = dynObj->GetAuxSlots_TTD();
+                    Js::Var const* auxSlots = dynObj->GetAuxSlots_TTD();
 
                     //there are some values in aux slots (in addition to the inline slots) so copy them as well
                     uint32 auxSlotCount = (sHandler->MaxPropertyIndex - sHandler->InlineSlotCapacity);
@@ -107,25 +110,78 @@ namespace TTD
         Js::DynamicObject* ReuseObjectCheckAndReset(const SnapObject* snpObject, InflateMap* inflator)
         {
             Js::RecyclableObject* robj = inflator->FindReusableObjectIfExists(snpObject->ObjectPtrId);
-            if(robj == nullptr)
+            if(robj == nullptr || Js::DynamicObject::FromVar(robj)->GetTypeId() != snpObject->SnapType->JsTypeId || Js::DynamicObject::FromVar(robj)->IsCrossSiteObject() != snpObject->IsCrossSite)
             {
                 return nullptr;
             }
-            AssertMsg(Js::DynamicType::Is(robj->GetTypeId()), "You should only do this for dynamic objects!!!");
+            TTDAssert(Js::DynamicType::Is(robj->GetTypeId()), "You should only do this for dynamic objects!!!");
 
             Js::DynamicObject* dynObj = Js::DynamicObject::FromVar(robj);
-            return ObjectPropertyReset(snpObject, dynObj, inflator, false);
+            return ObjectPropertyReset_General(snpObject, dynObj, inflator);
         }
 
-        Js::DynamicObject* ObjectPropertyReset(const SnapObject* snpObject, Js::DynamicObject* dynObj, InflateMap* inflator, bool isForWellKnown)
+        bool DoesObjectBlockScriptContextReuse(const SnapObject* snpObject, Js::DynamicObject* dynObj, InflateMap* inflator)
         {
-            //
-            //TODO: right now this reset is pretty kludgy so we avoid doing it unless we absolutely must -- fix this and then allow for other cases too
-            //
-            if(!isForWellKnown)
+            TTDAssert(snpObject->OptWellKnownToken != TTD_INVALID_WELLKNOWN_TOKEN, "Only well known objects can block re-use so check that before calling this.");
+
+            JsUtil::BaseHashSet<Js::PropertyId, HeapAllocator>& propertyReset = inflator->GetPropertyResetSet();
+            propertyReset.Clear();
+
+            ////
+            for(int32 i = 0; i < dynObj->GetPropertyCount(); i++)
             {
-                return nullptr;
+                Js::PropertyId pid = dynObj->GetPropertyId((Js::PropertyIndex)i);
+                if(pid != Js::Constants::NoProperty)
+                {
+                    propertyReset.AddNew(pid);
+                }
             }
+
+            const NSSnapType::SnapHandler* handler = snpObject->SnapType->TypeHandlerInfo;
+            for(uint32 i = 0; i < handler->MaxPropertyIndex; ++i)
+            {
+                BOOL willOverwriteLater = (handler->PropertyInfoArray[i].DataKind != NSSnapType::SnapEntryDataKindTag::Clear);
+                BOOL isInternal = Js::IsInternalPropertyId(handler->PropertyInfoArray[i].PropertyRecordId);
+
+                if(willOverwriteLater | isInternal)
+                {
+                    Js::PropertyId pid = handler->PropertyInfoArray[i].PropertyRecordId;
+                    propertyReset.Remove(pid);
+                }
+            }
+
+            if(propertyReset.Count() != 0)
+            {
+                for(auto iter = propertyReset.GetIterator(); iter.IsValid(); iter.MoveNext())
+                {
+                    Js::PropertyId pid = iter.CurrentValue();
+                    TTDAssert(pid != Js::Constants::NoProperty, "This shouldn't happen!!!");
+
+                    //We don't like trying to reset these
+                    if(Js::IsInternalPropertyId(pid))
+                    {
+                        propertyReset.Clear();
+                        return true;
+                    }
+
+                    //someone added a property that is not simple to remove so let's just be safe an recreate contexts
+                    if(!dynObj->IsConfigurable(pid))
+                    {
+                        propertyReset.Clear();
+                        return true;
+                    }
+                }
+            }
+
+            propertyReset.Clear();
+            ////
+
+            return false;
+        }
+
+        Js::DynamicObject* ObjectPropertyReset_WellKnown(const SnapObject* snpObject, Js::DynamicObject* dynObj, InflateMap* inflator)
+        {
+            TTDAssert(snpObject->OptWellKnownToken != TTD_INVALID_WELLKNOWN_TOKEN, "Should only call this on well known objects.");
 
             JsUtil::BaseHashSet<Js::PropertyId, HeapAllocator>& propertyReset = inflator->GetPropertyResetSet();
             propertyReset.Clear();
@@ -160,16 +216,7 @@ namespace TTD
                 {
                     BOOL ok = FALSE;
                     Js::PropertyId pid = iter.CurrentValue();
-                    AssertMsg(pid != Js::Constants::NoProperty, "This shouldn't happen!!!");
-
-                    //This is a bit of a kludge
-                    if(Js::IsInternalPropertyId(pid))
-                    {
-                        AssertMsg(dynObj->GetTypeId() == Js::TypeIds_Object, "If it is anything else then I am not sure we can re-create it appropriately");
-
-                        propertyReset.Clear();
-                        return dynObj->GetLibrary()->CreateObject();
-                    }
+                    TTDAssert(pid != Js::Constants::NoProperty && !Js::IsInternalPropertyId(pid), "This shouldn't happen!!!");
 
                     if(!dynObj->IsConfigurable(pid))
                     {
@@ -180,12 +227,32 @@ namespace TTD
                         ok = dynObj->DeleteProperty(pid, Js::PropertyOperationFlags::PropertyOperation_Force);
                     }
 
-                    AssertMsg(ok, "This property is stuck!!!");
+                    TTDAssert(ok, "This property is stuck!!!");
                 }
             }
 
             propertyReset.Clear();
             ////
+
+            //always reset the index array as this is unusual and annoying to iterate over a bunch
+            Js::ArrayObject* parray = dynObj->GetObjectArray();
+            if(parray != nullptr)
+            {
+                Js::JavascriptArray* newArray = dynObj->GetLibrary()->CreateArray();
+                dynObj->SetObjectArray(newArray);
+            }
+
+            return dynObj;
+        }
+
+        Js::DynamicObject* ObjectPropertyReset_General(const SnapObject* snpObject, Js::DynamicObject* dynObj, InflateMap* inflator)
+        {
+            TTDAssert(snpObject->OptWellKnownToken == TTD_INVALID_WELLKNOWN_TOKEN, "Should only call this on generic objects that we can fall back to re-allocating if we want.");
+
+            if(!dynObj->GetDynamicType()->GetTypeHandler()->IsResetableForTTD(snpObject->SnapType->TypeHandlerInfo->MaxPropertyIndex))
+            {
+                return nullptr;
+            }
 
             //always reset the index array as this is unusual and annoying to iterate over a bunch
             Js::ArrayObject* parray = dynObj->GetObjectArray();
@@ -224,7 +291,7 @@ namespace TTD
             //
             //We assume that placing properties back in the same order we read them out produces correct results.
             //This is not true for enumeration -- but we handle this by explicit logging
-            //There may also be sensitivity in other cases -- e.g. activataion objects with arguments objects that use slot index values directly.
+            //There may also be sensitivity in other cases -- e.g. activation objects with arguments objects that use slot index values directly.
             //    Things look good in this case but future changes may require care and/or adding special case handling.
             //
             for(uint32 i = 0; i < handler->MaxPropertyIndex; ++i)
@@ -235,17 +302,17 @@ namespace TTD
                     continue;
                 }
 
-                AssertMsg(!Js::JavascriptProxy::Is(obj), "I didn't think proxies could have real properties directly on them.");
+                TTDAssert(!Js::JavascriptProxy::Is(obj), "I didn't think proxies could have real properties directly on them.");
 
                 Js::PropertyId pid = handler->PropertyInfoArray[i].PropertyRecordId;
 
                 if(handler->PropertyInfoArray[i].DataKind == NSSnapType::SnapEntryDataKindTag::Uninitialized)
                 {
-                    AssertMsg(!obj->HasOwnProperty(pid), "Shouldn't have this defined, or we should have cleared it, and nothing more to do.");
+                    TTDAssert(!obj->HasOwnProperty(pid), "Shouldn't have this defined, or we should have cleared it, and nothing more to do.");
 
                     BOOL success = obj->EnsureProperty(pid);
 
-                    AssertMsg(success, "Failed to set property during restore!!!");
+                    TTDAssert(success, "Failed to set property during restore!!!");
                 }
                 else
                 {
@@ -264,7 +331,7 @@ namespace TTD
                         {
                             //get the value to see if it is alreay ok
                             Js::Var currentValue = nullptr;
-                            Js::JavascriptOperators::GetOwnProperty(obj, pid, &currentValue, obj->GetScriptContext());
+                            Js::JavascriptOperators::GetOwnProperty(obj, pid, &currentValue, obj->GetScriptContext(), nullptr);
 
                             if(currentValue == pVal)
                             {
@@ -278,7 +345,7 @@ namespace TTD
                             }
                         }
 
-                        AssertMsg(success, "Failed to set property during restore!!!");
+                        TTDAssert(success, "Failed to set property during restore!!!");
                     }
                     else
                     {
@@ -293,7 +360,7 @@ namespace TTD
                         }
                         else
                         {
-                            AssertMsg(false, "Don't know how to restore this accesstag!!");
+                            TTDAssert(false, "Don't know how to restore this accesstag!!");
                         }
                     }
                 }
@@ -331,7 +398,7 @@ namespace TTD
             {
                 if(!obj->GetIsExtensible())
                 {
-                    AssertMsg(!(obj->GetDynamicType()->GetIsShared() || obj->GetDynamicType()->GetTypeHandler()->GetIsShared()), "We are just changing the flag so if it is shared this might unexpectedly change another type!");
+                    TTDAssert(!(obj->GetDynamicType()->GetIsShared() || obj->GetDynamicType()->GetTypeHandler()->GetIsShared()), "We are just changing the flag so if it is shared this might unexpectedly change another type!");
 
                     obj->GetDynamicType()->GetTypeHandler()->SetExtensible_TTD();
                 }
@@ -339,8 +406,6 @@ namespace TTD
 
             if(snpObject->SnapType->HasNoEnumerableProperties != obj->GetDynamicType()->GetHasNoEnumerableProperties())
             {
-                AssertMsg(!obj->GetDynamicType()->GetIsShared(), "This is shared so we are mucking something up.");
-
                 obj->GetDynamicType()->SetHasNoEnumerableProperties(snpObject->SnapType->HasNoEnumerableProperties);
             }
         }
@@ -435,9 +500,9 @@ namespace TTD
             writer->WriteRecordEnd(NSTokens::Separator::BigSpaceSeparator);
         }
 
-        void ParseObject(SnapObject* snpObject, bool readSeperator, FileReader* reader, SlabAllocator& alloc, const SnapObjectVTable* vtable, const TTDIdentifierDictionary<TTD_PTR_ID, NSSnapType::SnapType*>& ptrIdToTypeMap)
+        void ParseObject(SnapObject* snpObject, bool readSeparator, FileReader* reader, SlabAllocator& alloc, const SnapObjectVTable* vtable, const TTDIdentifierDictionary<TTD_PTR_ID, NSSnapType::SnapType*>& ptrIdToTypeMap)
         {
-            reader->ReadRecordStart(readSeperator);
+            reader->ReadRecordStart(readSeparator);
 
             snpObject->ObjectPtrId = reader->ReadAddr(NSTokens::Key::objectId);
             snpObject->SnapObjectTag = reader->ReadTag<SnapObjectType>(NSTokens::Key::objectType, true);
@@ -529,7 +594,7 @@ namespace TTD
             reader->ReadRecordEnd();
         }
 
-#if ENABLE_SNAPSHOT_COMPARE 
+#if ENABLE_SNAPSHOT_COMPARE
         void AssertSnapEquiv(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
         {
             compareMap.DiagnosticAssert(sobj1->SnapObjectTag == sobj2->SnapObjectTag);
@@ -598,7 +663,7 @@ namespace TTD
                         }
                         else
                         {
-                            AssertMsg(spe.DataKind == NSSnapType::SnapEntryDataKindTag::Setter, "What other tags are there???");
+                            TTDAssert(spe.DataKind == NSSnapType::SnapEntryDataKindTag::Setter, "What other tags are there???");
 
                             NSSnapValues::AssertSnapEquivTTDVar_PropertySetter(var1, var2, compareMap, spe.PropertyRecordId);
                         }
@@ -639,7 +704,7 @@ namespace TTD
             {
                 Js::ScriptContext* ctx = inflator->LookupScriptContext(snpObject->SnapType->ScriptContextLogId);
                 Js::Var res = nullptr;
-                ctx->GetThreadContext()->TTDContext->TTDExternalObjectFunctions.pfCreateExternalObject(ctx, &res);
+                ctx->GetThreadContext()->TTDContext->TTDExternalObjectFunctions.pfCreateExternalObject(ctx, nullptr, &res);
 
                 return Js::RecyclableObject::FromVar(res);
             }
@@ -649,70 +714,67 @@ namespace TTD
 
         Js::RecyclableObject* DoObjectInflation_SnapScriptFunctionInfo(const SnapObject* snpObject, InflateMap* inflator)
         {
-            Js::DynamicObject* rcObj = ReuseObjectCheckAndReset(snpObject, inflator);
-            if(rcObj != nullptr)
+            Js::ScriptContext* ctx = inflator->LookupScriptContext(snpObject->SnapType->ScriptContextLogId);
+            SnapScriptFunctionInfo* snapFuncInfo = SnapObjectGetAddtlInfoAs<SnapScriptFunctionInfo*, SnapObjectType::SnapScriptFunctionObject>(snpObject);
+
+            Js::FunctionBody* fbody = inflator->LookupFunctionBody(snapFuncInfo->BodyRefId);
+
+            Js::ScriptFunction* func = nullptr;
+            if(!fbody->GetInlineCachesOnFunctionObject())
             {
-                return rcObj;
+                func = ctx->GetLibrary()->CreateScriptFunction(fbody);
             }
             else
             {
-                Js::ScriptContext* ctx = inflator->LookupScriptContext(snpObject->SnapType->ScriptContextLogId);
-                SnapScriptFunctionInfo* snapFuncInfo = SnapObjectGetAddtlInfoAs<SnapScriptFunctionInfo*, SnapObjectType::SnapScriptFunctionObject>(snpObject);
+                Js::ScriptFunctionWithInlineCache* ifunc = ctx->GetLibrary()->CreateScriptFunctionWithInlineCache(fbody);
+                ifunc->CreateInlineCache();
 
-                Js::FunctionBody* fbody = inflator->LookupFunctionBody(snapFuncInfo->BodyRefId);
-
-                Js::ScriptFunction* func = nullptr;
-                if(!fbody->GetInlineCachesOnFunctionObject())
-                {
-                    func = ctx->GetLibrary()->CreateScriptFunction(fbody);
-                }
-                else
-                {
-                    Js::ScriptFunctionWithInlineCache* ifunc = ctx->GetLibrary()->CreateScriptFunctionWithInlineCache(fbody);
-                    ifunc->CreateInlineCache();
-
-                    func = ifunc;
-                }
-
-                func->SetHasInlineCaches(snapFuncInfo->HasInlineCaches);
-                func->SetHasSuperReference(snapFuncInfo->HasSuperReference);
-                func->SetIsActiveScript(snapFuncInfo->IsActiveScript);
-
-                return func;
+                func = ifunc;
             }
+
+            return func;
         }
 
         void DoAddtlValueInstantiation_SnapScriptFunctionInfo(const SnapObject* snpObject, Js::RecyclableObject* obj, InflateMap* inflator)
         {
             Js::ScriptFunction* fobj = Js::ScriptFunction::FromVar(obj);
             SnapScriptFunctionInfo* snapFuncInfo = SnapObjectGetAddtlInfoAs<SnapScriptFunctionInfo*, SnapObjectType::SnapScriptFunctionObject>(snpObject);
+            DoAddtlValueInstantiation_SnapScriptFunctionInfoEx(snapFuncInfo, fobj, inflator);
+        }
 
+        void DoAddtlValueInstantiation_SnapScriptFunctionInfoEx(const SnapScriptFunctionInfo* snapFuncInfo, Js::ScriptFunction* func, InflateMap* inflator)
+        {
             if(snapFuncInfo->CachedScopeObjId != TTD_INVALID_PTR_ID)
             {
-                fobj->SetCachedScope((Js::ActivationObjectEx*)inflator->LookupObject(snapFuncInfo->CachedScopeObjId));
+                func->SetCachedScope(Js::ActivationObjectEx::FromVar(inflator->LookupObject(snapFuncInfo->CachedScopeObjId)));
             }
 
             if(snapFuncInfo->HomeObjId != TTD_INVALID_PTR_ID)
             {
-                fobj->SetHomeObj(inflator->LookupObject(snapFuncInfo->HomeObjId));
+                func->SetHomeObj(inflator->LookupObject(snapFuncInfo->HomeObjId));
             }
 
             if(snapFuncInfo->ScopeId != TTD_INVALID_PTR_ID)
             {
                 Js::FrameDisplay* environment = inflator->LookupEnvironment(snapFuncInfo->ScopeId);
-                fobj->SetEnvironment(environment);
+                func->SetEnvironment(environment);
             }
 
             if(snapFuncInfo->ComputedNameInfo != nullptr)
             {
                 Js::Var cNameVar = inflator->InflateTTDVar(snapFuncInfo->ComputedNameInfo);
-                fobj->SetComputedNameVar(cNameVar);
+                func->SetComputedNameVar(cNameVar);
             }
         }
 
         void EmitAddtlInfo_SnapScriptFunctionInfo(const SnapObject* snpObject, FileWriter* writer)
         {
             SnapScriptFunctionInfo* snapFuncInfo = SnapObjectGetAddtlInfoAs<SnapScriptFunctionInfo*, SnapObjectType::SnapScriptFunctionObject>(snpObject);
+            EmitAddtlInfo_SnapScriptFunctionInfoEx(snapFuncInfo, writer);
+        }
+
+        void EmitAddtlInfo_SnapScriptFunctionInfoEx(const SnapScriptFunctionInfo* snapFuncInfo, FileWriter* writer)
+        {
 
             writer->WriteAddr(NSTokens::Key::functionBodyId, snapFuncInfo->BodyRefId, NSTokens::Separator::CommaAndBigSpaceSeparator);
 
@@ -723,18 +785,18 @@ namespace TTD
 
             writer->WriteKey(NSTokens::Key::nameInfo, NSTokens::Separator::CommaSeparator);
             NSSnapValues::EmitTTDVar(snapFuncInfo->ComputedNameInfo, writer, NSTokens::Separator::NoSeparator);
-
-            writer->WriteBool(NSTokens::Key::boolVal, snapFuncInfo->HasInlineCaches, NSTokens::Separator::CommaSeparator);
-            writer->WriteBool(NSTokens::Key::boolVal, snapFuncInfo->HasSuperReference, NSTokens::Separator::CommaSeparator);
-            writer->WriteBool(NSTokens::Key::boolVal, snapFuncInfo->IsActiveScript, NSTokens::Separator::CommaSeparator);
         }
 
         void ParseAddtlInfo_SnapScriptFunctionInfo(SnapObject* snpObject, FileReader* reader, SlabAllocator& alloc)
         {
             SnapScriptFunctionInfo* snapFuncInfo = alloc.SlabAllocateStruct<SnapScriptFunctionInfo>();
+            ParseAddtlInfo_SnapScriptFunctionInfoEx(snapFuncInfo, reader, alloc);
+            SnapObjectSetAddtlInfoAs<SnapScriptFunctionInfo*, SnapObjectType::SnapScriptFunctionObject>(snpObject, snapFuncInfo);
+        }
 
+        void ParseAddtlInfo_SnapScriptFunctionInfoEx(SnapScriptFunctionInfo* snapFuncInfo, FileReader* reader, SlabAllocator& alloc)
+        {
             snapFuncInfo->BodyRefId = reader->ReadAddr(NSTokens::Key::functionBodyId, true);
-
             reader->ReadString(NSTokens::Key::name, alloc, snapFuncInfo->DebugFunctionName, true);
             snapFuncInfo->CachedScopeObjId = reader->ReadAddr(NSTokens::Key::cachedScopeObjId, true);
             snapFuncInfo->ScopeId = reader->ReadAddr(NSTokens::Key::scopeId, true);
@@ -742,15 +804,9 @@ namespace TTD
 
             reader->ReadKey(NSTokens::Key::nameInfo, true);
             snapFuncInfo->ComputedNameInfo = NSSnapValues::ParseTTDVar(false, reader);
-
-            snapFuncInfo->HasInlineCaches = reader->ReadBool(NSTokens::Key::boolVal, true);
-            snapFuncInfo->HasSuperReference = reader->ReadBool(NSTokens::Key::boolVal, true);
-            snapFuncInfo->IsActiveScript = reader->ReadBool(NSTokens::Key::boolVal, true);
-
-            SnapObjectSetAddtlInfoAs<SnapScriptFunctionInfo*, SnapObjectType::SnapScriptFunctionObject>(snpObject, snapFuncInfo);
         }
 
-#if ENABLE_SNAPSHOT_COMPARE 
+#if ENABLE_SNAPSHOT_COMPARE
         void AssertSnapEquiv_SnapScriptFunctionInfo(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
         {
             const SnapScriptFunctionInfo* snapFuncInfo1 = SnapObjectGetAddtlInfoAs<SnapScriptFunctionInfo*, SnapObjectType::SnapScriptFunctionObject>(sobj1);
@@ -765,45 +821,41 @@ namespace TTD
             compareMap.CheckConsistentAndAddPtrIdMapping_Special(snapFuncInfo1->HomeObjId, snapFuncInfo2->HomeObjId, _u("homeObject"));
 
             NSSnapValues::AssertSnapEquivTTDVar_Special(snapFuncInfo1->ComputedNameInfo, snapFuncInfo2->ComputedNameInfo, compareMap, _u("computedName"));
-
-            compareMap.DiagnosticAssert(snapFuncInfo1->HasInlineCaches == snapFuncInfo2->HasInlineCaches);
-            compareMap.DiagnosticAssert(snapFuncInfo1->HasSuperReference == snapFuncInfo2->HasSuperReference);
-            compareMap.DiagnosticAssert(snapFuncInfo1->IsActiveScript == snapFuncInfo2->IsActiveScript);
         }
 #endif
 
         Js::RecyclableObject* DoObjectInflation_SnapExternalFunctionInfo(const SnapObject* snpObject, InflateMap* inflator)
         {
             Js::ScriptContext* ctx = inflator->LookupScriptContext(snpObject->SnapType->ScriptContextLogId);
-            TTString* snapName = SnapObjectGetAddtlInfoAs<TTString*, SnapObjectType::SnapExternalFunctionObject>(snpObject);
+            TTDVar snapVar = SnapObjectGetAddtlInfoAs<TTDVar, SnapObjectType::SnapExternalFunctionObject>(snpObject);
 
-            Js::JavascriptString* fname = Js::JavascriptString::NewCopyBuffer(snapName->Contents, (charcount_t)snapName->Length, ctx);
+            Js::Var fname = (snapVar != nullptr) ? inflator->InflateTTDVar(snapVar) : nullptr;
             return ctx->GetLibrary()->CreateExternalFunction_TTD(fname);
         }
 
         void EmitAddtlInfo_SnapExternalFunctionInfo(const SnapObject* snpObject, FileWriter* writer)
         {
-            TTString* snapName = SnapObjectGetAddtlInfoAs<TTString*, SnapObjectType::SnapExternalFunctionObject>(snpObject);
+            TTDVar snapName = SnapObjectGetAddtlInfoAs<TTDVar, SnapObjectType::SnapExternalFunctionObject>(snpObject);
 
-            writer->WriteString(NSTokens::Key::name, *snapName, NSTokens::Separator::CommaSeparator);
+            writer->WriteKey(NSTokens::Key::name, NSTokens::Separator::CommaSeparator);
+            NSSnapValues::EmitTTDVar(snapName, writer, NSTokens::Separator::NoSeparator);
         }
 
         void ParseAddtlInfo_SnapExternalFunctionInfo(SnapObject* snpObject, FileReader* reader, SlabAllocator& alloc)
         {
-            TTString* snapName = alloc.SlabAllocateStruct<TTD::TTString>();
-            reader->ReadString(NSTokens::Key::name, alloc, *snapName, true);
+            reader->ReadKey(NSTokens::Key::name, true);
+            TTDVar snapName = NSSnapValues::ParseTTDVar(false, reader);
 
-            SnapObjectSetAddtlInfoAs<TTString*, SnapObjectType::SnapExternalFunctionObject>(snpObject, snapName);
+            SnapObjectSetAddtlInfoAs<TTDVar, SnapObjectType::SnapExternalFunctionObject>(snpObject, snapName);
         }
 
-
-#if ENABLE_SNAPSHOT_COMPARE 
+#if ENABLE_SNAPSHOT_COMPARE
         void AssertSnapEquiv_SnapExternalFunctionInfo(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
         {
-            TTString* snapName1 = SnapObjectGetAddtlInfoAs<TTString*, SnapObjectType::SnapExternalFunctionObject>(sobj1);
-            TTString* snapName2 = SnapObjectGetAddtlInfoAs<TTString*, SnapObjectType::SnapExternalFunctionObject>(sobj2);
+            TTDVar snapName1 = SnapObjectGetAddtlInfoAs<TTDVar, SnapObjectType::SnapExternalFunctionObject>(sobj1);
+            TTDVar snapName2 = SnapObjectGetAddtlInfoAs<TTDVar, SnapObjectType::SnapExternalFunctionObject>(sobj2);
 
-            compareMap.DiagnosticAssert(TTStringEQForDiagnostics(*snapName1, *snapName2));
+            NSSnapValues::AssertSnapEquivTTDVar_Special(snapName1, snapName2, compareMap, _u("externalFunctionName"));
         }
 #endif
 
@@ -840,7 +892,7 @@ namespace TTD
             SnapObjectSetAddtlInfoAs<TTD_PTR_ID*, SnapObjectType::SnapRuntimeRevokerFunctionObject>(snpObject, revokerId);
         }
 
-#if ENABLE_SNAPSHOT_COMPARE 
+#if ENABLE_SNAPSHOT_COMPARE
         void AssertSnapEquiv_SnapRevokerFunctionInfo(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
         {
             TTD_PTR_ID* revokeTrgt1 = SnapObjectGetAddtlInfoAs<TTD_PTR_ID*, SnapObjectType::SnapRuntimeRevokerFunctionObject>(sobj1);
@@ -861,10 +913,10 @@ namespace TTD
             Js::RecyclableObject* bFunction = inflator->LookupObject(snapBoundInfo->TargetFunction);
             Js::RecyclableObject* bThis = (snapBoundInfo->BoundThis != TTD_INVALID_PTR_ID) ? inflator->LookupObject(snapBoundInfo->BoundThis) : nullptr;
 
-            Js::Var* bArgs = nullptr;
+            Field(Js::Var)* bArgs = nullptr;
             if(snapBoundInfo->ArgCount != 0)
             {
-                bArgs = RecyclerNewArray(ctx->GetRecycler(), Js::Var, snapBoundInfo->ArgCount);
+                bArgs = RecyclerNewArray(ctx->GetRecycler(), Field(Js::Var), snapBoundInfo->ArgCount);
 
                 for(uint i = 0; i < snapBoundInfo->ArgCount; i++)
                 {
@@ -920,7 +972,7 @@ namespace TTD
             SnapObjectSetAddtlInfoAs<SnapBoundFunctionInfo*, SnapObjectType::SnapBoundFunctionObject>(snpObject, snapBoundInfo);
         }
 
-#if ENABLE_SNAPSHOT_COMPARE 
+#if ENABLE_SNAPSHOT_COMPARE
         void AssertSnapEquiv_SnapBoundFunctionInfo(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
         {
             SnapBoundFunctionInfo* snapBoundInfo1 = SnapObjectGetAddtlInfoAs<SnapBoundFunctionInfo*, SnapObjectType::SnapBoundFunctionObject>(sobj1);
@@ -980,13 +1032,9 @@ namespace TTD
             {
                 activationObj = nullptr;
             }
-            else if(argsInfo->IsFrameJsNull)
-            {
-                activationObj = ctx->GetLibrary()->GetNull();
-            }
             else
             {
-                AssertMsg(argsInfo->FrameObject != TTD_INVALID_PTR_ID, "That won't work!");
+                TTDAssert(argsInfo->FrameObject != TTD_INVALID_PTR_ID, "That won't work!");
 
                 activationObj = inflator->LookupObject(argsInfo->FrameObject);
             }
@@ -1005,13 +1053,9 @@ namespace TTD
             {
                 activationObj = nullptr;
             }
-            else if(argsInfo->IsFrameJsNull)
-            {
-                activationObj = ctx->GetLibrary()->GetNull();
-            }
             else
             {
-                AssertMsg(argsInfo->FrameObject != TTD_INVALID_PTR_ID, "That won't work!");
+                TTDAssert(argsInfo->FrameObject != TTD_INVALID_PTR_ID, "That won't work!");
 
                 activationObj = inflator->LookupObject(argsInfo->FrameObject);
             }
@@ -1119,7 +1163,7 @@ namespace TTD
         }
 
 
-#if ENABLE_SNAPSHOT_COMPARE 
+#if ENABLE_SNAPSHOT_COMPARE
         void AssertSnapEquiv_SnapPromiseInfo(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
         {
             const SnapPromiseInfo* promiseInfo1 = SnapObjectGetAddtlInfoAs<SnapPromiseInfo*, SnapObjectType::SnapPromiseObject>(sobj1);
@@ -1186,7 +1230,7 @@ namespace TTD
         }
 
 
-#if ENABLE_SNAPSHOT_COMPARE 
+#if ENABLE_SNAPSHOT_COMPARE
         void AssertSnapEquiv_SnapPromiseResolveOrRejectFunctionInfo(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
         {
             SnapPromiseResolveOrRejectFunctionInfo* rrfInfo1 = SnapObjectGetAddtlInfoAs<SnapPromiseResolveOrRejectFunctionInfo*, SnapObjectType::SnapPromiseResolveOrRejectFunctionObject>(sobj1);
@@ -1239,7 +1283,7 @@ namespace TTD
         }
 
 
-#if ENABLE_SNAPSHOT_COMPARE 
+#if ENABLE_SNAPSHOT_COMPARE
         void AssertSnapEquiv_SnapPromiseReactionTaskFunctionInfo(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
         {
             SnapPromiseReactionTaskFunctionInfo* rInfo1 = SnapObjectGetAddtlInfoAs<SnapPromiseReactionTaskFunctionInfo*, SnapObjectType::SnapPromiseReactionTaskFunctionObject>(sobj1);
@@ -1247,6 +1291,80 @@ namespace TTD
 
             NSSnapValues::AssertSnapEquivTTDVar_Special(rInfo1->Argument, rInfo2->Argument, compareMap, _u("argument"));
             NSSnapValues::AssertSnapEquiv(&(rInfo1->Reaction), &(rInfo2->Reaction), compareMap);
+        }
+#endif
+
+        ////
+        //AllResolveElementFunctionObject Info
+        Js::RecyclableObject* DoObjectInflation_SnapPromiseAllResolveElementFunctionInfo(const SnapObject* snpObject, InflateMap* inflator)
+        {
+            const SnapPromiseAllResolveElementFunctionInfo* aInfo = SnapObjectGetAddtlInfoAs<SnapPromiseAllResolveElementFunctionInfo*, SnapObjectType::SnapPromiseAllResolveElementFunctionObject>(snpObject);
+            Js::ScriptContext* ctx = inflator->LookupScriptContext(snpObject->SnapType->ScriptContextLogId);
+
+            Js::JavascriptPromiseCapability* capabilities = InflatePromiseCapabilityInfo(&aInfo->Capabilities, ctx, inflator);
+
+            if(!inflator->IsPromiseInfoDefined<Js::JavascriptPromiseAllResolveElementFunctionRemainingElementsWrapper>(aInfo->RemainingElementsWrapperId))
+            {
+                Js::JavascriptPromiseAllResolveElementFunctionRemainingElementsWrapper* remainingWrapper = ctx->GetLibrary()->CreateRemainingElementsWrapper_TTD(ctx, aInfo->RemainingElementsValue);
+                inflator->AddInflatedPromiseInfo(aInfo->RemainingElementsWrapperId, remainingWrapper);
+            }
+            Js::JavascriptPromiseAllResolveElementFunctionRemainingElementsWrapper* wrapper = inflator->LookupInflatedPromiseInfo<Js::JavascriptPromiseAllResolveElementFunctionRemainingElementsWrapper>(aInfo->RemainingElementsWrapperId);
+
+            Js::RecyclableObject* values = inflator->LookupObject(aInfo->Values);
+
+            return ctx->GetLibrary()->CreatePromiseAllResolveElementFunction_TTD(capabilities, aInfo->Index, wrapper, values, aInfo->AlreadyCalled);
+        }
+
+        void EmitAddtlInfo_SnapPromiseAllResolveElementFunctionInfo(const SnapObject* snpObject, FileWriter* writer)
+        {
+            SnapPromiseAllResolveElementFunctionInfo* aInfo = SnapObjectGetAddtlInfoAs<SnapPromiseAllResolveElementFunctionInfo*, SnapObjectType::SnapPromiseAllResolveElementFunctionObject>(snpObject);
+
+            writer->WriteKey(NSTokens::Key::entry, NSTokens::Separator::CommaSeparator);
+            NSSnapValues::EmitPromiseCapabilityInfo(&aInfo->Capabilities, writer, NSTokens::Separator::NoSeparator);
+
+            writer->WriteUInt32(NSTokens::Key::u32Val, aInfo->Index, NSTokens::Separator::CommaSeparator);
+            writer->WriteAddr(NSTokens::Key::ptrIdVal, aInfo->RemainingElementsWrapperId, NSTokens::Separator::CommaSeparator);
+            writer->WriteUInt32(NSTokens::Key::u32Val, aInfo->RemainingElementsValue, NSTokens::Separator::CommaSeparator);
+
+            writer->WriteAddr(NSTokens::Key::ptrIdVal, aInfo->Values, NSTokens::Separator::CommaSeparator);
+
+            writer->WriteBool(NSTokens::Key::boolVal, aInfo->AlreadyCalled, NSTokens::Separator::CommaSeparator);
+        }
+
+        void ParseAddtlInfo_SnapPromiseAllResolveElementFunctionInfo(SnapObject* snpObject, FileReader* reader, SlabAllocator& alloc)
+        {
+            SnapPromiseAllResolveElementFunctionInfo* aInfo = alloc.SlabAllocateStruct<SnapPromiseAllResolveElementFunctionInfo>();
+
+            reader->ReadKey(NSTokens::Key::entry, true);
+            NSSnapValues::ParsePromiseCapabilityInfo(&aInfo->Capabilities, false, reader, alloc);
+
+            aInfo->Index = reader->ReadUInt32(NSTokens::Key::u32Val, true);
+            aInfo->RemainingElementsWrapperId = reader->ReadAddr(NSTokens::Key::ptrIdVal, true);
+            aInfo->RemainingElementsValue = reader->ReadUInt32(NSTokens::Key::u32Val, true);
+
+            aInfo->Values = reader->ReadAddr(NSTokens::Key::ptrIdVal, true);
+
+            aInfo->AlreadyCalled = reader->ReadBool(NSTokens::Key::boolVal, true);
+
+            SnapObjectSetAddtlInfoAs<SnapPromiseAllResolveElementFunctionInfo*, SnapObjectType::SnapPromiseAllResolveElementFunctionObject>(snpObject, aInfo);
+        }
+
+
+#if ENABLE_SNAPSHOT_COMPARE
+        void AssertSnapEquiv_SnapPromiseAllResolveElementFunctionInfo(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
+        {
+            SnapPromiseAllResolveElementFunctionInfo* aInfo1 = SnapObjectGetAddtlInfoAs<SnapPromiseAllResolveElementFunctionInfo*, SnapObjectType::SnapPromiseAllResolveElementFunctionObject>(sobj1);
+            SnapPromiseAllResolveElementFunctionInfo* aInfo2 = SnapObjectGetAddtlInfoAs<SnapPromiseAllResolveElementFunctionInfo*, SnapObjectType::SnapPromiseAllResolveElementFunctionObject>(sobj2);
+
+            NSSnapValues::AssertSnapEquiv(&aInfo1->Capabilities, &aInfo2->Capabilities, compareMap);
+
+            compareMap.DiagnosticAssert(aInfo1->Index == aInfo2->Index);
+            compareMap.DiagnosticAssert(aInfo1->RemainingElementsValue == aInfo2->RemainingElementsValue);
+            compareMap.DiagnosticAssert(aInfo1->AlreadyCalled == aInfo2->AlreadyCalled);
+
+            compareMap.CheckConsistentAndAddPtrIdMapping_Special(aInfo1->Values, aInfo2->Values, _u("values"));
+
+            compareMap.CheckConsistentAndAddPtrIdMapping_NoEnqueue(aInfo1->RemainingElementsWrapperId, aInfo2->RemainingElementsWrapperId);
         }
 #endif
 
@@ -1287,7 +1405,7 @@ namespace TTD
         }
 
 
-#if ENABLE_SNAPSHOT_COMPARE 
+#if ENABLE_SNAPSHOT_COMPARE
         void AssertSnapEquiv_SnapBoxedValue(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
         {
             TTDVar snapBoxedVar1 = SnapObjectGetAddtlInfoAs<TTDVar, SnapObjectType::SnapBoxedValueObject>(sobj1);
@@ -1322,7 +1440,7 @@ namespace TTD
             SnapObjectSetAddtlInfoAs<double*, SnapObjectType::SnapDateObject>(snpObject, dateInfo);
         }
 
-#if ENABLE_SNAPSHOT_COMPARE 
+#if ENABLE_SNAPSHOT_COMPARE
         void AssertSnapEquiv_SnapDate(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
         {
             const double* dateInfo1 = SnapObjectGetAddtlInfoAs<double*, SnapObjectType::SnapDateObject>(sobj1);
@@ -1362,7 +1480,7 @@ namespace TTD
         {
             SnapRegexInfo* regexInfo = alloc.SlabAllocateStruct<SnapRegexInfo>();
 
-             reader->ReadString(NSTokens::Key::stringVal, alloc, regexInfo->RegexStr, true);
+            reader->ReadString(NSTokens::Key::stringVal, alloc, regexInfo->RegexStr, true);
 
             regexInfo->Flags = reader->ReadTag<UnifiedRegex::RegexFlags>(NSTokens::Key::attributeFlags, true);
             regexInfo->LastIndexOrFlag = reader->ReadUInt32(NSTokens::Key::u32Val, true);
@@ -1373,7 +1491,7 @@ namespace TTD
             SnapObjectSetAddtlInfoAs<SnapRegexInfo*, SnapObjectType::SnapRegexObject>(snpObject, regexInfo);
         }
 
-#if ENABLE_SNAPSHOT_COMPARE 
+#if ENABLE_SNAPSHOT_COMPARE
         void AssertSnapEquiv_SnapRegexInfo(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
         {
             const SnapRegexInfo* regexInfo1 = SnapObjectGetAddtlInfoAs<SnapRegexInfo*, SnapObjectType::SnapRegexObject>(sobj1);
@@ -1422,7 +1540,7 @@ namespace TTD
             *into = NSSnapValues::ParseTTDVar(false, reader);
         }
 
-#if ENABLE_SNAPSHOT_COMPARE 
+#if ENABLE_SNAPSHOT_COMPARE
         void SnapArrayInfo_EquivValue(int32 val1, int32 val2, TTDCompareMap& compareMap, int32 i)
         {
             compareMap.DiagnosticAssert(val1 == val2);
@@ -1593,7 +1711,7 @@ namespace TTD
             SnapArrayBufferInfo* buffInfo = SnapObjectGetAddtlInfoAs<SnapArrayBufferInfo*, SnapObjectType::SnapArrayBufferObject>(snpObject);
 
             Js::ArrayBuffer* abuff = ctx->GetLibrary()->CreateArrayBuffer(buffInfo->Length);
-            AssertMsg(abuff->GetByteLength() == buffInfo->Length, "Something is wrong with our sizes.");
+            TTDAssert(abuff->GetByteLength() == buffInfo->Length, "Something is wrong with our sizes.");
 
             js_memcpy_s(abuff->GetBuffer(), abuff->GetByteLength(), buffInfo->Buff, buffInfo->Length);
 
@@ -1722,7 +1840,7 @@ namespace TTD
                 tab = Js::CharArray::Create(arrayBuffer, typedArrayInfo->ByteOffset, typedArrayInfo->Length, jslib);
                 break;
             default:
-                AssertMsg(false, "Not a typed array!");
+                TTDAssert(false, "Not a typed array!");
                 break;
             }
 
@@ -1885,7 +2003,7 @@ namespace TTD
             if(snpObject->SnapType->JsTypeId == Js::TypeIds_Map)
             {
                 Js::JavascriptMap* mobj = (Js::JavascriptMap*)obj;
-                for(uint32 i = 0; i < mapInfo->MapSize; i+=2)
+                for(uint32 i = 0; i < mapInfo->MapSize; i += 2)
                 {
                     Js::Var key = inflator->InflateTTDVar(mapInfo->MapKeyValueArray[i]);
                     Js::Var data = inflator->InflateTTDVar(mapInfo->MapKeyValueArray[i + 1]);
@@ -1913,7 +2031,7 @@ namespace TTD
             if(mapInfo->MapSize > 0)
             {
                 writer->WriteSequenceStart_DefaultKey(NSTokens::Separator::CommaSeparator);
-                for(uint32 i = 0; i < mapInfo->MapSize; i+=2)
+                for(uint32 i = 0; i < mapInfo->MapSize; i += 2)
                 {
                     writer->WriteSequenceStart(i != 0 ? NSTokens::Separator::CommaAndBigSpaceSeparator : NSTokens::Separator::BigSpaceSeparator);
                     NSSnapValues::EmitTTDVar(mapInfo->MapKeyValueArray[i], writer, NSTokens::Separator::NoSeparator);
@@ -1938,7 +2056,7 @@ namespace TTD
                 mapInfo->MapKeyValueArray = alloc.SlabAllocateArray<TTDVar>(mapInfo->MapSize);
 
                 reader->ReadSequenceStart_WDefaultKey(true);
-                for(uint32 i = 0; i < mapInfo->MapSize; i+=2)
+                for(uint32 i = 0; i < mapInfo->MapSize; i += 2)
                 {
                     reader->ReadSequenceStart(i != 0);
                     mapInfo->MapKeyValueArray[i] = NSSnapValues::ParseTTDVar(false, reader);
@@ -2014,6 +2132,444 @@ namespace TTD
             compareMap.CheckConsistentAndAddPtrIdMapping_Special(proxyInfo1->TargetId, proxyInfo2->TargetId, _u("targetId"));
         }
 #endif
+
+        //////////////////
+
+        Js::RecyclableObject* DoObjectInflation_SnapGeneratorInfo(const SnapObject* snpObject, InflateMap* inflator)
+        {
+            Js::ScriptContext* ctx = inflator->LookupScriptContext(snpObject->SnapType->ScriptContextLogId);
+
+            SnapGeneratorInfo* generatorInfo = SnapObjectGetAddtlInfoAs<SnapGeneratorInfo*, SnapObjectType::SnapGenerator>(snpObject);
+
+            Field(Js::Var)* argVals = nullptr;
+            if(generatorInfo->arguments_count > 0)
+            {
+                argVals = RecyclerNewArray(ctx->GetRecycler(), Field(Js::Var), generatorInfo->arguments_count);
+                for(Js::RegSlot i = 0; i < generatorInfo->arguments_count; i++)
+                {
+                    argVals[i] = inflator->InflateTTDVar(generatorInfo->arguments_values[i]);
+                }
+            }
+
+            Js::CallInfo callInfo(static_cast<Js::CallFlags>(generatorInfo->arguments_callInfo_flags), generatorInfo->arguments_callInfo_count);
+
+            Js::Arguments arguments(callInfo, unsafe_write_barrier_cast<Js::Var*>(argVals));
+
+            // TODO: BUGBUG - figure out how to determine what the prototype was.  Just use GetNull() for now
+            Js::RecyclableObject* prototype = ctx->GetLibrary()->GetNull();
+            //if (generatorInfo->generatorPrototype == 1) {
+            //    prototype = ctx->GetLibrary()->GetNull();
+            //}
+            //else if (generatorInfo->generatorPrototype == 2) {
+            //    prototype = ctx->GetLibrary()->CreateGeneratorConstructorPrototypeObject();
+            //}
+            //else {
+            //    //TTDAssert(false, "unexpected prototype found JavascriptGenerator");
+            //}
+
+            //Js::DynamicType* type = reinterpret_cast<Js::DynamicType*>((snpObject->SnapType->TypePtrId != TTD_INVALID_PTR_ID) ? inflator->LookupType(snpObject->SnapType->TypePtrId): nullptr);
+
+            return  ctx->GetLibrary()->CreateJavascriptGenerator_TTD(ctx, prototype, arguments, static_cast<Js::JavascriptGenerator::GeneratorState>(generatorInfo->state));
+        }
+
+        void DoAddtlValueInstantiation_SnapGeneratorInfo(const SnapObject* snpObject, Js::RecyclableObject* obj, InflateMap* inflator)
+        {
+            Js::ScriptContext* ctx = inflator->LookupScriptContext(snpObject->SnapType->ScriptContextLogId);
+            Js::JavascriptGenerator* generator = reinterpret_cast<Js::JavascriptGenerator*>(obj);
+
+            SnapGeneratorInfo* generatorInfo = SnapObjectGetAddtlInfoAs<SnapGeneratorInfo*, SnapObjectType::SnapGenerator>(snpObject);
+            Js::ScriptFunction* scriptFunction = reinterpret_cast<Js::ScriptFunction*>((generatorInfo->scriptFunction != TTD_INVALID_PTR_ID) ? inflator->LookupObject(generatorInfo->scriptFunction) : nullptr);
+            if (scriptFunction != nullptr)
+            {
+                generator->SetScriptFunction(scriptFunction);
+                Js::FunctionBody* executeFunction = scriptFunction->GetFunctionBody();
+
+#if ENABLE_PROFILE_INFO
+                // call EnsureDynamicProfileInfo or we get asserts in some cases when creating the InterpreterStackFrame
+                executeFunction->EnsureDynamicProfileInfo();
+#endif
+                bool doProfile = Js::InterpreterStackFrame::ShouldDoProfile(executeFunction);
+
+                Js::InterpreterStackFrame* frame = Js::InterpreterStackFrame::CreateInterpreterStackFrameForGenerator(scriptFunction, executeFunction, generator, doProfile);
+                TTDAssert(generator->GetFrame() == frame, "unexpected frame mis-match");
+
+                Field(Js::Var)* frameSlotArray = nullptr;
+                if (generatorInfo->frame_slotCount != 0)
+                {
+                    frameSlotArray = RecyclerNewArray(ctx->GetRecycler(), Field(Js::Var), generatorInfo->frame_slotCount);
+
+                    for (Js::RegSlot i = 0; i < generatorInfo->frame_slotCount; i++)
+                    {
+                        if (generatorInfo->frame_slotArray[i] != nullptr)
+                        {
+                            frameSlotArray[i] = inflator->InflateTTDVar(generatorInfo->frame_slotArray[i]);
+                        }
+                        else
+                        {
+                            frameSlotArray[i] = nullptr;
+                        }
+                    }
+                }
+
+                generator->SetFrameSlots(generatorInfo->frame_slotCount, frameSlotArray);
+                if (generatorInfo->byteCodeReader_offset > 0)
+                {
+                    frame->InitializeClosures();
+                    frame->GetReader()->SetCurrentOffset(generatorInfo->byteCodeReader_offset);
+                }
+            }
+            else
+            {
+                TTDAssert(generator->IsCompleted(), "Unexpected null scriptFunction when generator is not in completed state");
+            }
+        }
+
+        void EmitAddtlInfo_SnapGeneratorInfo(const SnapObject* snpObject, FileWriter* writer)
+        {
+            SnapGeneratorInfo* sgi = SnapObjectGetAddtlInfoAs<SnapGeneratorInfo*, SnapObjectType::SnapGenerator>(snpObject);
+
+            writer->WriteInt32(NSTokens::Key::i32Val, sgi->generatorPrototype, NSTokens::Separator::CommaSeparator);
+
+            writer->WriteInt32(NSTokens::Key::i32Val, sgi->frame_slotCount, NSTokens::Separator::CommaSeparator);
+
+            // frame_slotArray
+            writer->WriteKey(NSTokens::Key::frame_slotArray, NSTokens::Separator::CommaAndBigSpaceSeparator);
+            writer->WriteSequenceStart();
+            for(Js::RegSlot i = 0; i < sgi->frame_slotCount; ++i)
+            {
+                NSSnapValues::EmitTTDVar(sgi->frame_slotArray[i], writer, i != 0 ? NSTokens::Separator::CommaSeparator : NSTokens::Separator::NoSeparator);
+            }
+            writer->WriteSequenceEnd();
+
+            writer->WriteUInt32(NSTokens::Key::u32Val, sgi->state, NSTokens::Separator::CommaSeparator);
+            writer->WriteAddr(NSTokens::Key::objectId, sgi->scriptFunction, NSTokens::Separator::CommaSeparator);
+
+            writer->WriteUInt32(NSTokens::Key::u32Val, sgi->arguments_callInfo_count, NSTokens::Separator::CommaSeparator);
+            writer->WriteUInt32(NSTokens::Key::u32Val, sgi->arguments_callInfo_flags, NSTokens::Separator::CommaSeparator);
+            writer->WriteUInt32(NSTokens::Key::u32Val, sgi->arguments_count, NSTokens::Separator::CommaSeparator);
+
+            // arguments_values array
+            writer->WriteKey(NSTokens::Key::arguments_values, NSTokens::Separator::CommaAndBigSpaceSeparator);
+            writer->WriteSequenceStart();
+            for(uint32 i = 0; i < sgi->arguments_count; ++i)
+            {
+                NSSnapValues::EmitTTDVar(sgi->arguments_values[i], writer, i != 0 ? NSTokens::Separator::CommaSeparator : NSTokens::Separator::NoSeparator);
+            }
+            writer->WriteSequenceEnd();
+
+            writer->WriteUInt32(NSTokens::Key::u32Val, sgi->byteCodeReader_offset, NSTokens::Separator::CommaSeparator);
+        }
+
+        void ParseAddtlInfo_SnapGeneratorInfo(SnapObject* snpObject, FileReader* reader, SlabAllocator& alloc)
+        {
+            SnapGeneratorInfo* sgi = alloc.SlabAllocateStruct<SnapGeneratorInfo>();
+
+            sgi->generatorPrototype = reader->ReadInt32(NSTokens::Key::i32Val, true);
+
+            sgi->frame_slotCount = reader->ReadInt32(NSTokens::Key::i32Val, true);
+
+            if(sgi->frame_slotCount == 0)
+            {
+                sgi->frame_slotArray = nullptr;
+            }
+            else
+            {
+                sgi->frame_slotArray = alloc.SlabAllocateArray<TTDVar>(sgi->frame_slotCount);
+            }
+            reader->ReadKey(NSTokens::Key::frame_slotArray, true);
+            reader->ReadSequenceStart();
+            for(Js::RegSlot i = 0; i < sgi->frame_slotCount; ++i)
+            {
+                sgi->frame_slotArray[i] = NSSnapValues::ParseTTDVar(i != 0, reader);
+            }
+            reader->ReadSequenceEnd();
+
+
+            sgi->state = reader->ReadUInt32(NSTokens::Key::u32Val, true);
+            sgi->scriptFunction = reader->ReadAddr(NSTokens::Key::objectId, true);
+            sgi->arguments_callInfo_count = reader->ReadUInt32(NSTokens::Key::u32Val, true);
+            sgi->arguments_callInfo_flags = static_cast<uint8>(reader->ReadUInt32(NSTokens::Key::u32Val, true));
+            sgi->arguments_count = reader->ReadUInt32(NSTokens::Key::u32Val, true);
+
+            if(sgi->arguments_count == 0)
+            {
+                sgi->arguments_values = nullptr;
+            }
+            else
+            {
+                sgi->arguments_values = alloc.SlabAllocateArray<TTDVar>(sgi->arguments_count);
+            }
+            reader->ReadKey(NSTokens::Key::arguments_values, true);
+            reader->ReadSequenceStart();
+            for(uint32 i = 0; i < sgi->arguments_count; ++i)
+            {
+                sgi->arguments_values[i] = NSSnapValues::ParseTTDVar(i != 0, reader);
+            }
+            reader->ReadSequenceEnd();
+
+            sgi->byteCodeReader_offset = reader->ReadUInt32(NSTokens::Key::u32Val, true);
+
+            SnapObjectSetAddtlInfoAs<SnapGeneratorInfo*, SnapObjectType::SnapGenerator>(snpObject, sgi);
+        }
+
+#if ENABLE_SNAPSHOT_COMPARE
+        void AssertSnapEquiv_SnapGeneratorInfo(const SnapObject *sobj1, const SnapObject *sobj2, TTDCompareMap &compareMap)
+        {
+            // TODO
+        }
+#endif
+
+        ////////////////////
+
+        Js::RecyclableObject* DoObjectInflation_SnapGeneratorFunctionInfo(const SnapObject *snpObject, InflateMap *inflator)
+        {
+            Js::ScriptContext *ctx = inflator->LookupScriptContext(snpObject->SnapType->ScriptContextLogId);
+            SnapGeneratorFunctionInfo *sfi = SnapObjectGetAddtlInfoAs<SnapGeneratorFunctionInfo *, SnapObjectType::SnapGeneratorFunction>(snpObject);
+            Js::JavascriptGeneratorFunction* func = ctx->GetLibrary()->CreateGeneratorFunction(Js::JavascriptGeneratorFunction::EntryGeneratorFunctionImplementation, sfi->isAnonymousFunction);
+            return func;
+        }
+
+        void DoAddtlValueInstantiation_SnapGeneratorFunctionInfo(const SnapObject *snpObject, Js::RecyclableObject *obj, InflateMap *inflator)
+        {
+            Js::JavascriptGeneratorFunction *func = Js::JavascriptGeneratorFunction::FromVar(obj);
+            SnapGeneratorFunctionInfo *sfi = SnapObjectGetAddtlInfoAs<SnapGeneratorFunctionInfo *, SnapObjectType::SnapGeneratorFunction>(snpObject);
+
+            if(sfi->scriptFunction != TTD_INVALID_PTR_ID)
+            {
+                Js::GeneratorVirtualScriptFunction* gvsf = reinterpret_cast<Js::GeneratorVirtualScriptFunction*>(inflator->LookupObject(sfi->scriptFunction));
+                func->SetScriptFunction(gvsf);
+            }
+        }
+
+        void EmitAddtlInfo_SnapGeneratorFunctionInfo(const SnapObject *snpObject, FileWriter *writer)
+        {
+            SnapGeneratorFunctionInfo* sgfi = SnapObjectGetAddtlInfoAs<SnapGeneratorFunctionInfo*, SnapObjectType::SnapGeneratorFunction>(snpObject);
+            writer->WriteAddr(NSTokens::Key::objectId, sgfi->scriptFunction, NSTokens::Separator::CommaSeparator);
+            writer->WriteBool(NSTokens::Key::boolVal, sgfi->isAnonymousFunction, NSTokens::Separator::CommaSeparator);
+        }
+
+        void ParseAddtlInfo_SnapGeneratorFunctionInfo(SnapObject *snpObject, FileReader *reader, SlabAllocator &alloc)
+        {
+            SnapGeneratorFunctionInfo* sgfi = alloc.SlabAllocateStruct<SnapGeneratorFunctionInfo>();
+            sgfi->scriptFunction = reader->ReadAddr(NSTokens::Key::objectId, true);
+            sgfi->isAnonymousFunction = reader->ReadBool(NSTokens::Key::boolVal, true);
+            SnapObjectSetAddtlInfoAs<SnapGeneratorFunctionInfo*, SnapObjectType::SnapGeneratorFunction>(snpObject, sgfi);
+        }
+#if ENABLE_SNAPSHOT_COMPARE
+        void AssertSnapEquiv_SnapGeneratorFunctionInfo(const SnapObject *sobj1, const SnapObject *sobj2, TTDCompareMap &compareMap)
+        {
+            // TODO
+        }
+#endif
+        ////////////////////
+
+        Js::RecyclableObject* DoObjectInflation_SnapAsyncFunction(const SnapObject *snpObject, InflateMap *inflator)
+        {
+            Js::ScriptContext* ctx = inflator->LookupScriptContext(snpObject->SnapType->ScriptContextLogId);
+            SnapGeneratorFunctionInfo* info = SnapObjectGetAddtlInfoAs<SnapGeneratorFunctionInfo *, SnapObjectType::SnapAsyncFunction>(snpObject);
+            Js::JavascriptAsyncFunction* func = ctx->GetLibrary()->CreateAsyncFunction(Js::JavascriptAsyncFunction::EntryAsyncFunctionImplementation, info->isAnonymousFunction);
+            return func;
+        }
+
+        void DoAddtlValueInstantiation_SnapAsyncFunction(const SnapObject* snpObject, Js::RecyclableObject* obj, InflateMap* inflator)
+        {
+            Js::JavascriptAsyncFunction* func = Js::JavascriptAsyncFunction::FromVar(obj);
+            SnapGeneratorFunctionInfo* info = SnapObjectGetAddtlInfoAs<SnapGeneratorFunctionInfo *, SnapObjectType::SnapAsyncFunction>(snpObject);
+
+            if (info->scriptFunction != TTD_INVALID_PTR_ID)
+            {
+                Js::GeneratorVirtualScriptFunction* gvsf = reinterpret_cast<Js::GeneratorVirtualScriptFunction*>(inflator->LookupObject(info->scriptFunction));
+                func->SetScriptFunction(gvsf);
+            }
+        }
+
+        void EmitAddtlInfo_SnapAsyncFunction(const SnapObject* snpObject, FileWriter* writer)
+        {
+            SnapGeneratorFunctionInfo* info = SnapObjectGetAddtlInfoAs<SnapGeneratorFunctionInfo*, SnapObjectType::SnapAsyncFunction>(snpObject);
+            writer->WriteAddr(NSTokens::Key::objectId, info->scriptFunction, NSTokens::Separator::CommaSeparator);
+            writer->WriteBool(NSTokens::Key::boolVal, info->isAnonymousFunction, NSTokens::Separator::CommaSeparator);
+        }
+
+        void ParseAddtlInfo_SnapAsyncFunction(SnapObject* snpObject, FileReader* reader, SlabAllocator& alloc)
+        {
+            SnapGeneratorFunctionInfo* info = alloc.SlabAllocateStruct<SnapGeneratorFunctionInfo>();
+            info->scriptFunction = reader->ReadAddr(NSTokens::Key::objectId, true);
+            info->isAnonymousFunction = reader->ReadBool(NSTokens::Key::boolVal, true);
+            SnapObjectSetAddtlInfoAs<SnapGeneratorFunctionInfo*, SnapObjectType::SnapAsyncFunction>(snpObject, info);
+        }
+#if ENABLE_SNAPSHOT_COMPARE
+        void AssertSnapEquiv_SnapAsyncFunction(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
+        {
+        }
+#endif
+
+        ////////////////////
+
+        Js::RecyclableObject* DoObjectInflation_SnapGeneratorVirtualScriptFunctionInfo(const SnapObject *snpObject, InflateMap *inflator)
+        {
+            Js::ScriptContext *ctx = inflator->LookupScriptContext(snpObject->SnapType->ScriptContextLogId);
+            SnapGeneratorVirtualScriptFunctionInfo* sgvsf = SnapObjectGetAddtlInfoAs<SnapGeneratorVirtualScriptFunctionInfo *, SnapObjectType::SnapGeneratorVirtualScriptFunction>(snpObject);
+            Js::FunctionBody* fbody = inflator->LookupFunctionBody(sgvsf->BodyRefId);
+            return ctx->GetLibrary()->CreateGeneratorVirtualScriptFunction(fbody);
+        }
+
+        void DoAddtlValueInstantiation_SnapGeneratorVirtualScriptFunctionInfo(const SnapObject *snpObject, Js::RecyclableObject *obj, InflateMap *inflator)
+        {
+            Js::GeneratorVirtualScriptFunction* fobj = reinterpret_cast<Js::GeneratorVirtualScriptFunction*>(obj);
+            SnapGeneratorVirtualScriptFunctionInfo *sgvsf = SnapObjectGetAddtlInfoAs<SnapGeneratorVirtualScriptFunctionInfo *, SnapObjectType::SnapGeneratorVirtualScriptFunction>(snpObject);
+
+            // fill in all the details of the base class
+            DoAddtlValueInstantiation_SnapScriptFunctionInfoEx(sgvsf, fobj, inflator);
+
+            if(sgvsf->realFunction != TTD_INVALID_PTR_ID)
+            {
+                fobj->SetRealGeneratorFunction(reinterpret_cast<Js::JavascriptGeneratorFunction*>(inflator->LookupObject(sgvsf->realFunction)));
+            }
+        }
+
+        void EmitAddtlInfo_SnapGeneratorVirtualScriptFunctionInfo(const SnapObject *snpObject, FileWriter *writer)
+        {
+            SnapGeneratorVirtualScriptFunctionInfo* sgvsf = SnapObjectGetAddtlInfoAs<SnapGeneratorVirtualScriptFunctionInfo*, SnapObjectType::SnapGeneratorVirtualScriptFunction>(snpObject);
+            EmitAddtlInfo_SnapScriptFunctionInfoEx(sgvsf, writer);
+            writer->WriteAddr(NSTokens::Key::objectId, sgvsf->realFunction, NSTokens::Separator::CommaSeparator);
+        }
+
+        void ParseAddtlInfo_SnapGeneratorVirtualScriptFunctionInfo(SnapObject *snpObject, FileReader *reader, SlabAllocator &alloc)
+        {
+            SnapGeneratorVirtualScriptFunctionInfo* sgvsf = alloc.SlabAllocateStruct<SnapGeneratorVirtualScriptFunctionInfo>();
+            ParseAddtlInfo_SnapScriptFunctionInfoEx(sgvsf, reader, alloc);
+            sgvsf->realFunction = reader->ReadAddr(NSTokens::Key::objectId, true);
+            SnapObjectSetAddtlInfoAs<SnapGeneratorVirtualScriptFunctionInfo*, SnapObjectType::SnapGeneratorVirtualScriptFunction>(snpObject, sgvsf);
+        }
+#if ENABLE_SNAPSHOT_COMPARE
+        void AssertSnapEquiv_SnapGeneratorVirtualScriptFunctionInfo(const SnapObject *sobj1, const SnapObject *sobj2, TTDCompareMap &compareMap)
+        {
+            // TODO
+        }
+#endif
+
+        ////////////////////
+
+        Js::RecyclableObject* DoObjectInflation_SnapJavascriptPromiseAsyncSpawnExecutorFunction(const SnapObject *snpObject, InflateMap *inflator)
+        {
+            Js::ScriptContext *ctx = inflator->LookupScriptContext(snpObject->SnapType->ScriptContextLogId);
+            SnapJavascriptPromiseAsyncSpawnExecutorFunctionInfo* info = SnapObjectGetAddtlInfoAs<SnapJavascriptPromiseAsyncSpawnExecutorFunctionInfo *, SnapObjectType::JavascriptPromiseAsyncSpawnExecutorFunction>(snpObject);
+            Js::Var target = (info->target!= nullptr) ? inflator->InflateTTDVar(info->target) : nullptr;
+
+            Js::JavascriptGenerator* generator = nullptr;
+            if (info->generator != TTD_INVALID_PTR_ID)
+            {
+                generator = reinterpret_cast<Js::JavascriptGenerator*>(inflator->LookupObject(info->generator));
+            }
+
+            // TODO; why do we need to cast here??
+            Js::RecyclableObject* res = reinterpret_cast<Js::RecyclableObject*>(ctx->GetLibrary()->CreatePromiseAsyncSpawnExecutorFunction(generator, target));
+            return res;
+        }
+
+        void DoAddtlValueInstantiation_SnapJavascriptPromiseAsyncSpawnExecutorFunction(const SnapObject* snpObject, Js::RecyclableObject* obj, InflateMap* inflator)
+        {
+        }
+
+        void EmitAddtlInfo_SnapJavascriptPromiseAsyncSpawnExecutorFunction(const SnapObject* snpObject, FileWriter* writer)
+        {
+            SnapJavascriptPromiseAsyncSpawnExecutorFunctionInfo* info = SnapObjectGetAddtlInfoAs<SnapJavascriptPromiseAsyncSpawnExecutorFunctionInfo*, SnapObjectType::JavascriptPromiseAsyncSpawnExecutorFunction>(snpObject);
+            writer->WriteAddr(NSTokens::Key::objectId, info->generator, NSTokens::Separator::CommaSeparator);
+            writer->WriteKey(NSTokens::Key::target, NSTokens::Separator::CommaSeparator);
+            NSSnapValues::EmitTTDVar(info->target, writer, NSTokens::Separator::NoSeparator);
+        }
+
+        void ParseAddtlInfo_SnapJavascriptPromiseAsyncSpawnExecutorFunction(SnapObject* snpObject, FileReader* reader, SlabAllocator& alloc)
+        {
+            SnapJavascriptPromiseAsyncSpawnExecutorFunctionInfo* info = alloc.SlabAllocateStruct<SnapJavascriptPromiseAsyncSpawnExecutorFunctionInfo>();
+            info->generator = reader->ReadAddr(NSTokens::Key::objectId, true);
+            reader->ReadKey(NSTokens::Key::target, true);
+            info->target= NSSnapValues::ParseTTDVar(false, reader);
+            SnapObjectSetAddtlInfoAs<SnapJavascriptPromiseAsyncSpawnExecutorFunctionInfo*, SnapObjectType::JavascriptPromiseAsyncSpawnExecutorFunction>(snpObject, info);
+        }
+#if ENABLE_SNAPSHOT_COMPARE
+        void AssertSnapEquiv_SnapJavascriptPromiseAsyncSpawnExecutorFunction(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
+        {
+        }
+#endif
+
+        ////////////////////
+
+        Js::RecyclableObject *DoObjectInflation_SnapJavascriptPromiseAsyncSpawnStepArgumentExecutorFunctionInfo(const SnapObject *snpObject, InflateMap *inflator)
+        {
+            Js::ScriptContext *ctx = inflator->LookupScriptContext(snpObject->SnapType->ScriptContextLogId);
+            SnapJavascriptPromiseAsyncSpawnStepArgumentExecutorFunctionInfo* info = SnapObjectGetAddtlInfoAs<SnapJavascriptPromiseAsyncSpawnStepArgumentExecutorFunctionInfo *, SnapObjectType::JavascriptPromiseAsyncSpawnStepArgumentExecutorFunction>(snpObject);
+            Js::Var reject = (info->reject != nullptr) ? inflator->InflateTTDVar(info->reject) : nullptr;
+            Js::Var resolve = (info->resolve != nullptr) ? inflator->InflateTTDVar(info->resolve) : nullptr;
+            Js::Var argument = (info->argument != nullptr) ? inflator->InflateTTDVar(info->argument) : nullptr;
+            bool isReject = info->isReject;
+
+            Js::JavascriptGenerator* generator = nullptr;
+            if (info->generator != TTD_INVALID_PTR_ID)
+            {
+                generator = reinterpret_cast<Js::JavascriptGenerator*>(inflator->LookupObject(info->generator));
+            }
+
+            Js::JavascriptMethod entryPoint = nullptr;
+            switch (info->entryPoint)
+            {
+            case 1:
+                entryPoint = Js::JavascriptPromise::EntryJavascriptPromiseAsyncSpawnStepNextExecutorFunction;
+                break;
+            case 2:
+                entryPoint = Js::JavascriptPromise::EntryJavascriptPromiseAsyncSpawnStepThrowExecutorFunction;
+                break;
+            case 3:
+                entryPoint = Js::JavascriptPromise::EntryJavascriptPromiseAsyncSpawnCallStepExecutorFunction;
+                break;
+            default:
+                TTDAssert(false, "Unexpected value for entryPoint when inflating JavascriptPromiseAsyncSpawnStepArgumentExecutorFunction");
+                break;
+            }
+
+            return ctx->GetLibrary()->CreatePromiseAsyncSpawnStepArgumentExecutorFunction(entryPoint, generator, argument, resolve, reject, isReject);
+        }
+
+        void DoAddtlValueInstantiation_SnapJavascriptPromiseAsyncSpawnStepArgumentExecutorFunctionInfo(const SnapObject* snpObject, Js::RecyclableObject* obj, InflateMap* inflator)
+        { }
+        
+        void EmitAddtlInfo_SnapJavascriptPromiseAsyncSpawnStepArgumentExecutorFunctionInfo(const SnapObject* snpObject, FileWriter* writer)
+        {
+            SnapJavascriptPromiseAsyncSpawnStepArgumentExecutorFunctionInfo* info = SnapObjectGetAddtlInfoAs<SnapJavascriptPromiseAsyncSpawnStepArgumentExecutorFunctionInfo*, SnapObjectType::JavascriptPromiseAsyncSpawnStepArgumentExecutorFunction>(snpObject);
+            writer->WriteAddr(NSTokens::Key::objectId, info->generator, NSTokens::Separator::CommaSeparator);
+            writer->WriteKey(NSTokens::Key::reject, NSTokens::Separator::CommaSeparator);
+            NSSnapValues::EmitTTDVar(info->reject, writer, NSTokens::Separator::NoSeparator);
+            writer->WriteKey(NSTokens::Key::resolve, NSTokens::Separator::CommaSeparator);
+            NSSnapValues::EmitTTDVar(info->resolve, writer, NSTokens::Separator::NoSeparator);
+            writer->WriteKey(NSTokens::Key::argument, NSTokens::Separator::CommaSeparator);
+            NSSnapValues::EmitTTDVar(info->argument, writer, NSTokens::Separator::NoSeparator);
+            writer->WriteUInt32(NSTokens::Key::u32Val, info->entryPoint, NSTokens::Separator::CommaSeparator);
+            writer->WriteBool(NSTokens::Key::boolVal, info->isReject, NSTokens::Separator::CommaSeparator);
+        }
+
+        void ParseAddtlInfo_SnapJavascriptPromiseAsyncSpawnStepArgumentExecutorFunctionInfo(SnapObject* snpObject, FileReader* reader, SlabAllocator& alloc)
+        {
+            SnapJavascriptPromiseAsyncSpawnStepArgumentExecutorFunctionInfo* info = alloc.SlabAllocateStruct<SnapJavascriptPromiseAsyncSpawnStepArgumentExecutorFunctionInfo>();
+            info->generator = reader->ReadAddr(NSTokens::Key::objectId, true);
+            reader->ReadKey(NSTokens::Key::reject, true);
+            info->reject = NSSnapValues::ParseTTDVar(false, reader);
+            reader->ReadKey(NSTokens::Key::resolve, true);
+            info->resolve = NSSnapValues::ParseTTDVar(false, reader);
+            reader->ReadKey(NSTokens::Key::argument, true);
+            info->argument = NSSnapValues::ParseTTDVar(false, reader);
+            info->entryPoint = reader->ReadUInt32(NSTokens::Key::u32Val, true);
+            info->isReject = reader->ReadBool(NSTokens::Key::boolVal, true);
+            SnapObjectSetAddtlInfoAs<SnapJavascriptPromiseAsyncSpawnStepArgumentExecutorFunctionInfo*, SnapObjectType::JavascriptPromiseAsyncSpawnStepArgumentExecutorFunction>(snpObject, info);
+        }
+
+#if ENABLE_SNAPSHOT_COMPARE
+        void AssertSnapEquiv_SnapJavascriptPromiseAsyncSpawnStepArgumentExecutorFunctionInfo(const SnapObject* sobj1, const SnapObject* sobj2, TTDCompareMap& compareMap)
+        { }
+#endif
+        //////////
+
+
+
     }
 }
 

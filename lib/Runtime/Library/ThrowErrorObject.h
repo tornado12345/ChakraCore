@@ -12,7 +12,7 @@ namespace Js
     class ThrowErrorObject : public RecyclableObject
     {
     private:
-        JavascriptError* m_error;
+        Field(JavascriptError*) m_error;
 
     protected:
         ThrowErrorObject(StaticType* type, JavascriptError* error);
@@ -24,6 +24,7 @@ namespace Js
         static ThrowErrorObject* New(StaticType* type, JavascriptError* error, Recycler* recycler);
         static bool Is(Var aValue);
         static ThrowErrorObject* FromVar(Var aValue);
+        static ThrowErrorObject* UnsafeFromVar(Var aValue);
 
         static RecyclableObject* CreateThrowTypeErrorObject(ScriptContext* scriptContext, int32 hCode, PCWSTR varName);
         static RecyclableObject* CreateThrowTypeErrorObject(ScriptContext* scriptContext, int32 hCode, JavascriptString* varName);

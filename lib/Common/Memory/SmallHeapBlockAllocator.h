@@ -66,6 +66,12 @@ public:
     {
         return !IsBumpAllocMode() && !IsExplicitFreeObjectListAllocMode();
     }
+#if ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP
+    bool IsAllocatingDuringConcurrentSweepMode(Recycler * recycler) const
+    {
+        return IsFreeListAllocMode() && recycler->IsConcurrentSweepState();
+    }
+#endif
 private:
     static bool NeedSetAttributes(ObjectInfoBits attributes)
     {
@@ -75,6 +81,11 @@ private:
     char * endAddress;
     FreeObject * freeObjectList;
     TBlockType * heapBlock;
+#if ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP 
+#if DBG
+    bool isAllocatingFromNewBlock;
+#endif
+#endif
 
     SmallHeapBlockAllocator * prev;
     SmallHeapBlockAllocator * next;
@@ -100,9 +111,12 @@ private:
 template <typename TBlockType>
 template <bool canFaultInject>
 inline char*
-SmallHeapBlockAllocator<TBlockType>::InlinedAllocImpl(Recycler * recycler, size_t sizeCat, ObjectInfoBits attributes)
+SmallHeapBlockAllocator<TBlockType>::InlinedAllocImpl(Recycler * recycler, DECLSPEC_GUARD_OVERFLOW size_t sizeCat, ObjectInfoBits attributes)
 {
     Assert((attributes & InternalObjectInfoBitMask) == attributes);
+#ifdef RECYCLER_WRITE_BARRIER
+    Assert(!CONFIG_FLAG(ForceSoftwareWriteBarrier) || (attributes & WithBarrierBit) || (attributes & LeafBit));
+#endif
 
     AUTO_NO_EXCEPTION_REGION;
     if (canFaultInject)
@@ -126,6 +140,15 @@ SmallHeapBlockAllocator<TBlockType>::InlinedAllocImpl(Recycler * recycler, size_
 
         if (NeedSetAttributes(attributes))
         {
+            if ((attributes & (FinalizeBit | TrackBit)) != 0)
+            {
+                // Make sure a valid vtable is installed as once the attributes have been set this allocation may be traced by background marking
+                memBlock = (char *)new (memBlock) DummyVTableObject();
+#if defined(_M_ARM32_OR_ARM64)
+                // On ARM, make sure the v-table write is performed before setting the attributes
+                MemoryBarrier();
+#endif
+            }
             heapBlock->SetAttributes(memBlock, (attributes & StoredObjectInfoBitMask));
         }
 
@@ -135,6 +158,11 @@ SmallHeapBlockAllocator<TBlockType>::InlinedAllocImpl(Recycler * recycler, size_
     if (memBlock != nullptr && endAddress == nullptr)
     {
         // Free list allocation
+        freeObjectList = ((FreeObject *)memBlock)->GetNext();
+#ifdef RECYCLER_MEMORY_VERIFY
+        ((FreeObject *)memBlock)->DebugFillNext();
+#endif
+        
         Assert(!this->IsBumpAllocMode());
         if (NeedSetAttributes(attributes))
         {
@@ -146,13 +174,20 @@ SmallHeapBlockAllocator<TBlockType>::InlinedAllocImpl(Recycler * recycler, size_
                 Assert(allocationHeapBlock != nullptr);
                 Assert(!allocationHeapBlock->IsLargeHeapBlock());
             }
+
+            if ((attributes & (FinalizeBit | TrackBit)) != 0)
+            {
+                // Make sure a valid vtable is installed as once the attributes have been set this allocation may be traced by background marking
+                memBlock = (char *)new (memBlock) DummyVTableObject();
+#if defined(_M_ARM32_OR_ARM64)
+                // On ARM, make sure the v-table write is performed before setting the attributes
+                MemoryBarrier();
+#endif
+            }
             allocationHeapBlock->SetAttributes(memBlock, (attributes & StoredObjectInfoBitMask));
         }
-        freeObjectList = ((FreeObject *)memBlock)->GetNext();
 
 #ifdef RECYCLER_MEMORY_VERIFY
-        ((FreeObject *)memBlock)->DebugFillNext();
-
         if (this->IsExplicitFreeObjectListAllocMode())
         {
             HeapBlock* heapBlock = recycler->FindHeapBlock(memBlock);
@@ -170,6 +205,31 @@ SmallHeapBlockAllocator<TBlockType>::InlinedAllocImpl(Recycler * recycler, size_
             Assert(isSet);
         }
 #endif
+#if ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP
+        // If we are allocating during concurrent sweep we must mark the object to prevent it from being swept
+        // in the ongoing sweep.
+        if (heapBlock != nullptr && heapBlock->isPendingConcurrentSweepPrep)
+        {
+            AssertMsg(!this->isAllocatingFromNewBlock, "We shouldn't be tracking allocation to a new block; i.e. bump allocation; during concurrent sweep.");
+            AssertMsg(!heapBlock->IsAnyFinalizableBlock(), "Allocations are not allowed to finalizable blocks during concurrent sweep.");
+            AssertMsg(heapBlock->heapBucket->AllocationsStartedDuringConcurrentSweep(), "We shouldn't be allocating from this block while allocations are disabled.");
+
+            // Explcitly mark this object and also clear the free bit.
+            heapBlock->SetObjectMarkedBit(memBlock);
+#if DBG || defined(RECYCLER_SLOW_CHECK_ENABLED)
+            uint bitIndex = heapBlock->GetAddressBitIndex(memBlock);
+            heapBlock->GetDebugFreeBitVector()->Clear(bitIndex);
+            heapBlock->objectsMarkedDuringSweep++;
+#endif
+
+#ifdef RECYCLER_TRACE
+            if (recycler->GetRecyclerFlagsTable().Trace.IsEnabled(Js::ConcurrentSweepPhase) && recycler->GetRecyclerFlagsTable().Trace.IsEnabled(Js::MemoryAllocationPhase) && CONFIG_FLAG_RELEASE(Verbose))
+            {
+                Output::Print(_u("[**33**]FreeListAlloc: Object 0x%p from HeapBlock 0x%p used for allocation during ConcurrentSweep [CollectionState: %d] \n"), memBlock, heapBlock, recycler->collectionState);
+            }
+#endif
+        }
+#endif
         return memBlock;
     }
 
@@ -180,7 +240,7 @@ SmallHeapBlockAllocator<TBlockType>::InlinedAllocImpl(Recycler * recycler, size_
 template <typename TBlockType>
 template <ObjectInfoBits attributes>
 inline char *
-SmallHeapBlockAllocator<TBlockType>::InlinedAlloc(Recycler * recycler, size_t sizeCat)
+SmallHeapBlockAllocator<TBlockType>::InlinedAlloc(Recycler * recycler, DECLSPEC_GUARD_OVERFLOW size_t sizeCat)
 {
     return InlinedAllocImpl<true /* allow fault injection */>(recycler, sizeCat, attributes);
 }
@@ -189,7 +249,7 @@ template <typename TBlockType>
 template <bool canFaultInject>
 inline
 char *
-SmallHeapBlockAllocator<TBlockType>::SlowAlloc(Recycler * recycler, size_t sizeCat, ObjectInfoBits attributes)
+SmallHeapBlockAllocator<TBlockType>::SlowAlloc(Recycler * recycler, DECLSPEC_GUARD_OVERFLOW size_t sizeCat, ObjectInfoBits attributes)
 {
     Assert((attributes & InternalObjectInfoBitMask) == attributes);
 

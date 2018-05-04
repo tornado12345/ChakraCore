@@ -45,17 +45,19 @@ namespace Js
         return nullptr;
     }
 
-    void
-    SourceDynamicProfileManager::Reset(uint numberOfFunctions)
-    {
-        dynamicProfileInfoMap.Clear();
-    }
-
     void SourceDynamicProfileManager::UpdateDynamicProfileInfo(LocalFunctionId functionId, DynamicProfileInfo * dynamicProfileInfo)
     {
         Assert(dynamicProfileInfo != nullptr);
 
         dynamicProfileInfoMap.Item(functionId, dynamicProfileInfo);
+    }
+
+    void SourceDynamicProfileManager::RemoveDynamicProfileInfo(LocalFunctionId functionId)
+    {
+        dynamicProfileInfoMap.Remove(functionId);
+#ifdef DYNAMIC_PROFILE_STORAGE
+        dynamicProfileInfoMapSaving.Remove(functionId);
+#endif
     }
 
     void SourceDynamicProfileManager::MarkAsExecuted(LocalFunctionId functionId)
@@ -330,12 +332,30 @@ namespace Js
     }
 
 #ifdef DYNAMIC_PROFILE_STORAGE
+    void SourceDynamicProfileManager::ClearSavingData()
+    {
+        dynamicProfileInfoMapSaving.Reset();
+    }
+
+    void SourceDynamicProfileManager::AddSavingItem(LocalFunctionId functionId, DynamicProfileInfo *info)
+    {
+        try
+        {
+            // our BaseDictionary does not allow nothrow allocator
+            AUTO_NESTED_HANDLED_EXCEPTION_TYPE(ExceptionType_OutOfMemory);
+            dynamicProfileInfoMapSaving.Item(functionId, info);
+        }
+        catch (Js::OutOfMemoryException&)
+        {
+            Output::Print(_u("Hit OOM while saving dynamic profile info\n"));
+        }
+    }
 
     void
     SourceDynamicProfileManager::SaveDynamicProfileInfo(LocalFunctionId functionId, DynamicProfileInfo * dynamicProfileInfo)
     {
         Assert(dynamicProfileInfo->GetFunctionBody()->HasExecutionDynamicProfileInfo());
-        dynamicProfileInfoMap.Item(functionId, dynamicProfileInfo);
+        this->AddSavingItem(functionId, dynamicProfileInfo);
     }
 
     template <typename T>
@@ -345,6 +365,7 @@ namespace Js
         uint functionCount;
         if (!reader->Peek(&functionCount))
         {
+            Assert(false);
             return nullptr;
         }
 
@@ -352,6 +373,7 @@ namespace Js
         if (!reader->ReadArray(((char *)startupFunctions),
             BVFixed::GetAllocSize(functionCount)))
         {
+            Assert(false);
             return nullptr;
         }
 
@@ -359,6 +381,7 @@ namespace Js
 
         if (!reader->Read(&profileCount))
         {
+            Assert(false);
             return nullptr;
         }
 
@@ -382,9 +405,11 @@ namespace Js
             DynamicProfileInfo * dynamicProfileInfo = DynamicProfileInfo::Deserialize(reader, recycler, &functionId);
             if (dynamicProfileInfo == nullptr || functionId >= functionCount)
             {
+                Assert(false);
                 return nullptr;
             }
             sourceDynamicProfileManager->dynamicProfileInfoMap.Add(functionId, dynamicProfileInfo);
+            sourceDynamicProfileManager->AddSavingItem(functionId, dynamicProfileInfo);
         }
         return sourceDynamicProfileManager;
     }
@@ -397,7 +422,7 @@ namespace Js
         // to be so from the profile - this helps with ensure inlined functions are marked as executed.
         if(!this->startupFunctions)
         {
-            this->startupFunctions = const_cast<BVFixed*>(this->cachedStartupFunctions);
+            this->startupFunctions = const_cast<BVFixed*>(static_cast<const BVFixed*>(this->cachedStartupFunctions));
         }
         else if(cachedStartupFunctions && this->cachedStartupFunctions->Length() == this->startupFunctions->Length())
         {
@@ -415,16 +440,16 @@ namespace Js
 #endif
 
             size_t bvSize = BVFixed::GetAllocSize(this->startupFunctions->Length()) ;
-            if (!writer->WriteArray((char *)this->startupFunctions, bvSize)
-                || !writer->Write(this->dynamicProfileInfoMap.Count()))
+            if (!writer->WriteArray((char *)static_cast<BVFixed*>(this->startupFunctions), bvSize)
+                || !writer->Write(this->dynamicProfileInfoMapSaving.Count()))
             {
                 return false;
             }
         }
 
-        for (int i = 0; i < this->dynamicProfileInfoMap.Count(); i++)
+        for (int i = 0; i < this->dynamicProfileInfoMapSaving.Count(); i++)
         {
-            DynamicProfileInfo * dynamicProfileInfo = this->dynamicProfileInfoMap.GetValueAt(i);
+            DynamicProfileInfo * dynamicProfileInfo = this->dynamicProfileInfoMapSaving.GetValueAt(i);
             if (dynamicProfileInfo == nullptr || !dynamicProfileInfo->HasFunctionBody())
             {
                 continue;

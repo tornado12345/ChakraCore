@@ -41,6 +41,7 @@ namespace Js
         InlineCacheNoFlags              = 0x0,
         InlineCacheGetterFlag           = 0x1,
         InlineCacheSetterFlag           = 0x2,
+        InlineCacheIsOnProtoFlag        = 0x4,
     };
 
     #define PropertyNone            0x00
@@ -53,14 +54,34 @@ namespace Js
     #define PropertyLet             0x40
     #define PropertyConst           0x80
     // No more flags will fit unless PropertyAttributes is bumped up to a short instead of char
-    #define PropertyBuiltInMethodDefaults (PropertyConfigurable|PropertyWritable)
-    #define PropertyDynamicTypeDefaults (PropertyConfigurable|PropertyWritable|PropertyEnumerable)
-    #define PropertyLetDefaults   (PropertyEnumerable|PropertyConfigurable|PropertyWritable|PropertyLet)
-    #define PropertyConstDefaults (PropertyEnumerable|PropertyConfigurable|PropertyConst)
-    #define PropertyDeletedDefaults (PropertyDeleted | PropertyWritable | PropertyConfigurable)
-    #define PropertyNoRedecl        (PropertyLet | PropertyConst)
-    #define PropertyClassMemberDefaults (PropertyConfigurable|PropertyWritable)
-    #define PropertyModuleNamespaceDefault (PropertyEnumerable|PropertyWritable)
+    #define PropertyInternalDefaults        (PropertyConfigurable|PropertyWritable)
+    #define PropertyBuiltInMethodDefaults   (PropertyConfigurable|PropertyWritable)
+    #define PropertyDynamicTypeDefaults     (PropertyConfigurable|PropertyWritable|PropertyEnumerable)
+    #define PropertyLetDefaults             (PropertyEnumerable|PropertyConfigurable|PropertyWritable|PropertyLet)
+    #define PropertyConstDefaults           (PropertyEnumerable|PropertyConfigurable|PropertyConst)
+    #define PropertyDeletedDefaults         (PropertyDeleted|PropertyWritable|PropertyConfigurable)
+    #define PropertyNoRedecl                (PropertyLet|PropertyConst)
+    #define PropertyClassMemberDefaults     (PropertyConfigurable|PropertyWritable)
+    #define PropertyModuleNamespaceDefault  (PropertyEnumerable|PropertyWritable)
+
+    static const uint ObjectSlotAttr_BitSize = 8;
+    typedef uint8 ObjectSlotAttr_TSize;
+
+    enum ObjectSlotAttributes : ObjectSlotAttr_TSize
+    {
+        ObjectSlotAttr_None =         0x00,
+        ObjectSlotAttr_Enumerable =   0x01,
+        ObjectSlotAttr_Configurable = 0x02,
+        ObjectSlotAttr_Writable =     0x04,
+        ObjectSlotAttr_Deleted =      0x08,
+        ObjectSlotAttr_Accessor =     0x10,
+        ObjectSlotAttr_Int =          0x20,
+        ObjectSlotAttr_Double =       0x40,
+        ObjectSlotAttr_Default =      (ObjectSlotAttr_Writable|ObjectSlotAttr_Enumerable|ObjectSlotAttr_Configurable),
+        ObjectSlotAttr_PropertyAttributesMask = (ObjectSlotAttr_Default|ObjectSlotAttr_Deleted),
+        ObjectSlotAttr_All =          0xFF,
+        ObjectSlotAttr_Setter =       ObjectSlotAttr_All ^ ObjectSlotAttr_Deleted,   // an impossible value indicating "setter"
+    };
 
     BEGIN_ENUM_UINT(InternalPropertyIds)
 #define INTERNALPROPERTY(n) n,
@@ -94,14 +115,16 @@ namespace Js
                                                          // (no accessors or non-writable properties)
     #define PropertyTypesWritableDataOnlyDetection 0x20  // Set on each call to DynamicTypeHandler::SetHasOnlyWritableDataProperties.
     #define PropertyTypesInlineSlotCapacityLocked  0x40  // Indicates that the inline slot capacity has been shrunk already and shouldn't be touched again.
-    #define PropertyTypesAll                       0x70
+    #define PropertyTypesHasSpecialProperties      0x80  // Indicates that @@toStringTag, @@toPrimitive, toString, or valueOf are set
+    #define PropertyTypesAll                       (PropertyTypesHasSpecialProperties|PropertyTypesWritableDataOnly|PropertyTypesWritableDataOnlyDetection|PropertyTypesInlineSlotCapacityLocked)
     typedef unsigned char PropertyTypes;                 // Holds flags that represent general information about the types of properties
                                                          // handled by a type handler.
-    BEGIN_ENUM_UINT(JavascriptHint)
+    enum class JavascriptHint
+    {
         None,                                   // no hint. use the default for that object
-        HintString  = 0x00000001,               // 'string' hint in ToPrimitiveValue()
-        HintNumber  = 0x00000002,               // 'number' hint
-    END_ENUM_UINT()
+        HintString = 0x00000001,               // 'string' hint in ToPrimitiveValue()
+        HintNumber = 0x00000002,               // 'number' hint
+    };
 
     enum DescriptorFlags
     {
@@ -111,6 +134,7 @@ namespace Js
         Writable = 0x4,  // Data descriptor is writable
         Const = 0x8,     // Data is const, meaning we throw on attempt to write to it
         Proxy = 0x10,    // data returned from proxy.
+        None_NoProto = 0x20, // No data/accessor descriptor and stop traversing prototype chain
         WritableData = Data | Writable // Data descriptor is writable
     };
 

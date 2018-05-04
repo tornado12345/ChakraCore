@@ -25,20 +25,31 @@ JITTimeProfileInfo::InitializeJITProfileData(
         return;
     }
 
+    CompileAssert(sizeof(LdLenIDL) == sizeof(Js::LdLenInfo));
     CompileAssert(sizeof(LdElemIDL) == sizeof(Js::LdElemInfo));
     CompileAssert(sizeof(StElemIDL) == sizeof(Js::StElemInfo));
 
+    data->profiledLdLenCount = functionBody->GetProfiledLdLenCount();
     data->profiledLdElemCount = functionBody->GetProfiledLdElemCount();
     data->profiledStElemCount = functionBody->GetProfiledStElemCount();
 
     if (JITManager::GetJITManager()->IsOOPJITEnabled() || isForegroundJIT)
     {
+        data->ldLenData = (LdLenIDL*)profileInfo->GetLdLenInfo();
         data->ldElemData = (LdElemIDL*)profileInfo->GetLdElemInfo();
         data->stElemData = (StElemIDL*)profileInfo->GetStElemInfo();
     }
     else
     {
-        // for in-proc background JIT we need to explicitly copy LdElem and StElem info
+        // for in-proc background JIT we need to explicitly copy LdLen, LdElem, and StElem info
+        data->ldLenData = AnewArray(alloc, LdLenIDL, data->profiledLdLenCount);
+        memcpy_s(
+            data->ldLenData,
+            data->profiledLdLenCount * sizeof(LdLenIDL),
+            profileInfo->GetLdLenInfo(),
+            functionBody->GetProfiledLdLenCount() * sizeof(Js::LdLenInfo)
+        );
+
         data->ldElemData = AnewArray(alloc, LdElemIDL, data->profiledLdElemCount);
         memcpy_s(
             data->ldElemData,
@@ -135,62 +146,48 @@ JITTimeProfileInfo::InitializeJITProfileData(
     data->flags |= profileInfo->IsLoopImplicitCallInfoDisabled() ? Flags_disableLoopImplicitCallInfo : 0;
     data->flags |= profileInfo->IsPowIntIntTypeSpecDisabled() ? Flags_disablePowIntIntTypeSpec : 0;
     data->flags |= profileInfo->IsTagCheckDisabled() ? Flags_disableTagCheck : 0;
+    data->flags |= profileInfo->IsOptimizeTryFinallyDisabled() ? Flags_disableOptimizeTryFinally : 0;
 }
 
-void
-JITTimeProfileInfo::DisableAggressiveIntTypeSpec(bool isLoopBody)
+const Js::LdLenInfo *
+JITTimeProfileInfo::GetLdLenInfo(Js::ProfileId ldLenId) const
 {
-    m_profileData.flags |= isLoopBody ? Flags_disableAggressiveIntTypeSpec_jitLoopBody : Flags_disableAggressiveIntTypeSpec;
-}
-
-void
-JITTimeProfileInfo::DisableStackArgOpt()
-{
-    m_profileData.flags |= Flags_disableStackArgOpt;
-}
-
-void
-JITTimeProfileInfo::DisableSwitchOpt()
-{
-    m_profileData.flags |= Flags_disableSwitchOpt;
-}
-
-void
-JITTimeProfileInfo::DisableTrackCompoundedIntOverflow()
-{
-    m_profileData.flags |= Flags_disableTrackCompoundedIntOverflow;
+    AssertOrFailFast(ldLenId < m_profileData.profiledLdLenCount);
+    return &(reinterpret_cast<Js::LdLenInfo*>(m_profileData.ldLenData)[ldLenId]);
 }
 
 const Js::LdElemInfo *
 JITTimeProfileInfo::GetLdElemInfo(Js::ProfileId ldElemId) const
 {
+    AssertOrFailFast(ldElemId < m_profileData.profiledLdElemCount);
     return &(reinterpret_cast<Js::LdElemInfo*>(m_profileData.ldElemData)[ldElemId]);
 }
 
 const Js::StElemInfo *
 JITTimeProfileInfo::GetStElemInfo(Js::ProfileId stElemId) const
 {
+    AssertOrFailFast(stElemId < m_profileData.profiledStElemCount);
     return &(reinterpret_cast<Js::StElemInfo*>(m_profileData.stElemData)[stElemId]);
 }
 
 Js::ArrayCallSiteInfo *
 JITTimeProfileInfo::GetArrayCallSiteInfo(Js::ProfileId index) const
 {
-    Assert(index < GetProfiledArrayCallSiteCount());
+    AssertOrFailFast(index < GetProfiledArrayCallSiteCount());
     return &(reinterpret_cast<Js::ArrayCallSiteInfo*>(m_profileData.arrayCallSiteData)[index]);
 }
 
 intptr_t
 JITTimeProfileInfo::GetArrayCallSiteInfoAddr(Js::ProfileId index) const
 {
-    Assert(index < GetProfiledArrayCallSiteCount());
+    AssertOrFailFast(index < GetProfiledArrayCallSiteCount());
     return m_profileData.arrayCallSiteDataAddr + index * sizeof(ArrayCallSiteIDL);
 }
 
 Js::FldInfo *
 JITTimeProfileInfo::GetFldInfo(uint fieldAccessId) const
 {
-    Assert(fieldAccessId < GetProfiledFldCount());
+    AssertOrFailFast(fieldAccessId < GetProfiledFldCount());
     return &(reinterpret_cast<Js::FldInfo*>(m_profileData.fldData)[fieldAccessId]);
 }
 
@@ -198,13 +195,13 @@ intptr_t
 JITTimeProfileInfo::GetFldInfoAddr(uint fieldAccessId) const
 {
     Assert(fieldAccessId < GetProfiledFldCount());
-    return m_profileData.fldDataAddr + fieldAccessId;
+    return m_profileData.fldDataAddr + fieldAccessId * sizeof(Js::FldInfo);
 }
 
 ValueType
 JITTimeProfileInfo::GetSlotLoad(Js::ProfileId slotLoadId) const
 {
-    Assert(slotLoadId < GetProfiledSlotCount());
+    AssertOrFailFast(slotLoadId < GetProfiledSlotCount());
     return reinterpret_cast<ValueType*>(m_profileData.slotData)[slotLoadId];
 }
 
@@ -220,32 +217,32 @@ JITTimeProfileInfo::GetReturnType(Js::OpCode opcode, Js::ProfileId callSiteId) c
     if (opcode < Js::OpCode::ProfiledReturnTypeCallI || (opcode > Js::OpCode::ProfiledReturnTypeCallIFlags && opcode < Js::OpCode::ProfiledReturnTypeCallIExtended) || opcode > Js::OpCode::ProfiledReturnTypeCallIExtendedFlags)
     {
         Assert(Js::DynamicProfileInfo::IsProfiledCallOp(opcode));
-        Assert(callSiteId < GetProfiledCallSiteCount());
+        AssertOrFailFast(callSiteId < GetProfiledCallSiteCount());
         return GetCallSiteInfo()[callSiteId].returnType;
     }
     Assert(Js::DynamicProfileInfo::IsProfiledReturnTypeOp(opcode));
-    Assert(callSiteId < GetProfiledReturnTypeCount());
+    AssertOrFailFast(callSiteId < GetProfiledReturnTypeCount());
     return reinterpret_cast<ValueType*>(m_profileData.returnTypeData)[callSiteId];
 }
 
 ValueType
 JITTimeProfileInfo::GetDivProfileInfo(Js::ProfileId divideId) const
 {
-    Assert(divideId < GetProfiledDivOrRemCount());
+    AssertOrFailFast(divideId < GetProfiledDivOrRemCount());
     return reinterpret_cast<ValueType*>(m_profileData.divideTypeInfo)[divideId];
 }
 
 ValueType
 JITTimeProfileInfo::GetSwitchProfileInfo(Js::ProfileId switchId) const
 {
-    Assert(switchId < GetProfiledSwitchCount());
+    AssertOrFailFast(switchId < GetProfiledSwitchCount());
     return reinterpret_cast<ValueType*>(m_profileData.switchTypeInfo)[switchId];
 }
 
 ValueType
 JITTimeProfileInfo::GetParameterInfo(Js::ArgSlot index) const
 {
-    Assert(index < GetProfiledInParamsCount());
+    AssertOrFailFast(index < GetProfiledInParamsCount());
     return reinterpret_cast<ValueType*>(m_profileData.parameterInfo)[index];
 }
 
@@ -254,7 +251,7 @@ JITTimeProfileInfo::GetLoopImplicitCallFlags(uint loopNum) const
 {
     // TODO: michhol OOP JIT, investigate vaibility of reenabling this assert
     // Assert(Js::DynamicProfileInfo::EnableImplicitCallFlags(functionBody));
-    Assert(loopNum < GetLoopCount());
+    AssertOrFailFast(loopNum < GetLoopCount());
 
     // Mask out the dispose implicit call. We would bailout on reentrant dispose,
     // but it shouldn't affect optimization.
@@ -504,6 +501,12 @@ bool
 JITTimeProfileInfo::IsTagCheckDisabled() const
 {
     return TestFlag(Flags_disableTagCheck);
+}
+
+bool
+JITTimeProfileInfo::IsOptimizeTryFinallyDisabled() const
+{
+    return TestFlag(Flags_disableOptimizeTryFinally);
 }
 
 bool

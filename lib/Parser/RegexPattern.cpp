@@ -7,11 +7,11 @@
 namespace UnifiedRegex
 {
     RegexPattern::RegexPattern(Js::JavascriptLibrary *const library, Program* program, bool isLiteral)
-        : library(library), isLiteral(isLiteral), isShallowClone(false)
+        : library(library), isLiteral(isLiteral), isShallowClone(false), testCache(nullptr)
     {
         rep.unified.program = program;
-        rep.unified.matcher = 0;
-        rep.unified.trigramInfo = 0;
+        rep.unified.matcher = nullptr;
+        rep.unified.trigramInfo = nullptr;
     }
 
     RegexPattern *RegexPattern::New(Js::ScriptContext *scriptContext, Program* program, bool isLiteral)
@@ -72,7 +72,7 @@ namespace UnifiedRegex
         return rep.unified.program->flags;
     }
 
-    int RegexPattern::NumGroups() const
+    uint16 RegexPattern::NumGroups() const
     {
         return rep.unified.program->numGroups;
     }
@@ -128,6 +128,21 @@ namespace UnifiedRegex
         return result;
     }
 
+    Field(RegExpTestCache*) RegexPattern::EnsureTestCache()
+    {
+        if (this->testCache == nullptr)
+        {
+            this->testCache = RecyclerNewPlusZ(this->library->GetRecycler(), TestCacheSize * sizeof(void*), RegExpTestCache);
+        }
+        return this->testCache;
+    }
+
+    /* static */
+    uint RegexPattern::GetTestCacheIndex(Js::JavascriptString* str)
+    {
+        return (uint)(((uintptr_t)str) >> PolymorphicInlineCacheShift) & (TestCacheSize - 1);
+    }
+
 #if ENABLE_REGEX_CONFIG_OPTIONS
     void RegexPattern::Print(DebugWriter* w)
     {
@@ -177,6 +192,34 @@ namespace UnifiedRegex
         w->Print(_u(", "));
         w->Print(isLiteral ? _u("literal") : _u("dynamic"));
         w->Print(_u(" */"));
+    }
+
+    /* static */
+    void RegexPattern::TraceTestCache(bool cacheHit, Js::JavascriptString* input, Js::JavascriptString* cachedValue, bool disabled)
+    {
+        if (REGEX_CONFIG_FLAG(RegexTracing))
+        {
+            if (disabled)
+            {
+                Output::Print(_u("Regexp Test Cache Disabled.\n"));
+            }
+            else if (cacheHit)
+            {
+                Output::Print(_u("Regexp Test Cache Hit.\n"));
+            }
+            else
+            {
+                Output::Print(_u("Regexp Test Cache Miss. "));
+                if (cachedValue != nullptr)
+                {
+                    Output::Print(_u("Input: (%p); Cached String: (%p) '%s'\n"), input, cachedValue, cachedValue->GetString());
+                }
+                else
+                {
+                    Output::Print(_u("Cache was empty\n"));
+                }
+            }
+        }
     }
 #endif
 }

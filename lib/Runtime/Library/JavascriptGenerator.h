@@ -19,7 +19,8 @@ namespace Js
     class JavascriptGenerator : public DynamicObject
     {
     public:
-        enum class GeneratorState {
+        enum class GeneratorState
+        {
             Suspended,
             Executing,
             Completed
@@ -29,19 +30,9 @@ namespace Js
         static uint32 GetCallInfoOffset() { return offsetof(JavascriptGenerator, args) + Arguments::GetCallInfoOffset(); }
         static uint32 GetArgsPtrOffset() { return offsetof(JavascriptGenerator, args) + Arguments::GetValuesOffset(); }
 
-    private:
-        InterpreterStackFrame* frame;
-        GeneratorState state;
-        Arguments args;
-        ScriptFunction* scriptFunction;
-
-        DEFINE_VTABLE_CTOR_MEMBER_INIT(JavascriptGenerator, DynamicObject, args);
-        DEFINE_MARSHAL_OBJECT_TO_SCRIPT_CONTEXT(JavascriptGenerator);
-
-        void SetState(GeneratorState state)
-        {
+        void SetState(GeneratorState state) {
             this->state = state;
-            if (state == GeneratorState::Completed)
+            if(state == GeneratorState::Completed)
             {
                 frame = nullptr;
                 args.Values = nullptr;
@@ -49,23 +40,46 @@ namespace Js
             }
         }
 
+    private:
+        Field(InterpreterStackFrame*) frame;
+        Field(GeneratorState) state;
+        Field(Arguments) args;
+        Field(ScriptFunction*) scriptFunction;
+
+        DEFINE_VTABLE_CTOR_MEMBER_INIT(JavascriptGenerator, DynamicObject, args);
+        DEFINE_MARSHAL_OBJECT_TO_SCRIPT_CONTEXT(JavascriptGenerator);
+
         Var CallGenerator(ResumeYieldData* yieldData, const char16* apiNameForErrorMessage);
+        JavascriptGenerator(DynamicType* type, Arguments& args, ScriptFunction* scriptFunction);
 
     public:
-        JavascriptGenerator(DynamicType* type, Arguments& args, ScriptFunction* scriptFunction);
+        static JavascriptGenerator* New(Recycler* recycler, DynamicType* generatorType, Arguments& args, ScriptFunction* scriptFunction);
+
+        static JavascriptGenerator *New(Recycler *recycler, DynamicType *generatorType, Arguments &args, Js::JavascriptGenerator::GeneratorState generatorState);
 
         bool IsExecuting() const { return state == GeneratorState::Executing; }
         bool IsSuspended() const { return state == GeneratorState::Suspended; }
         bool IsCompleted() const { return state == GeneratorState::Completed; }
         bool IsSuspendedStart() const { return state == GeneratorState::Suspended && this->frame == nullptr; }
 
-        void SetFrame(InterpreterStackFrame* frame) { Assert(this->frame == nullptr); this->frame = frame; }
+        void SetScriptFunction(ScriptFunction* sf)
+        {
+            this->scriptFunction = sf;
+        }
+
+        void SetFrame(InterpreterStackFrame* frame, size_t bytes);
         InterpreterStackFrame* GetFrame() const { return frame; }
+        void SetFrameSlots(uint slotCount, Field(Var)* frameSlotArray);
+
+#if GLOBAL_ENABLE_WRITE_BARRIER
+        virtual void Finalize(bool isShutdown) override;
+#endif
 
         const Arguments& GetArguments() const { return args; }
 
         static bool Is(Var var);
         static JavascriptGenerator* FromVar(Var var);
+        static JavascriptGenerator* UnsafeFromVar(Var var);
 
         class EntryInfo
         {
@@ -77,5 +91,12 @@ namespace Js
         static Var EntryNext(RecyclableObject* function, CallInfo callInfo, ...);
         static Var EntryReturn(RecyclableObject* function, CallInfo callInfo, ...);
         static Var EntryThrow(RecyclableObject* function, CallInfo callInfo, ...);
+
+#if ENABLE_TTD
+        virtual void MarkVisitKindSpecificPtrs(TTD::SnapshotExtractor* extractor) override;
+        virtual TTD::NSSnapObjects::SnapObjectType GetSnapTag_TTD() const override;
+        virtual void ExtractSnapObjectDataInto(TTD::NSSnapObjects::SnapObject* objData, TTD::SlabAllocator& alloc) override;
+        //virtual void ProcessCorePaths() override;
+#endif
     };
 }

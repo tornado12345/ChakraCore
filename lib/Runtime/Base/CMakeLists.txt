@@ -10,8 +10,10 @@ add_library (Chakra.Runtime.Base OBJECT
     Exception.cpp
     ExpirableObject.cpp
     FunctionBody.cpp
+    FunctionExecutionStateMachine.cpp
     FunctionInfo.cpp
     LeaveScriptObject.cpp
+    LineOffsetCache.cpp
     PerfHint.cpp
     PropertyRecord.cpp
     RuntimeBasePch.cpp
@@ -19,6 +21,7 @@ add_library (Chakra.Runtime.Base OBJECT
     ScriptContextOptimizationOverrideInfo.cpp
     ScriptContextProfiler.cpp
     ScriptMemoryDumper.cpp
+    SourceContextInfo.cpp
     SourceHolder.cpp
     StackProber.cpp
     TempArenaAllocatorObject.cpp
@@ -29,9 +32,9 @@ add_library (Chakra.Runtime.Base OBJECT
     ThreadContextTlsEntry.cpp
     ThreadServiceWrapperBase.cpp
     Utf8SourceInfo.cpp
-    VTuneChakraProfile.cpp    
+    VTuneChakraProfile.cpp
     # WindowsFoundationAdapter.cpp
-    # WindowsGlobalizationAdapter.cpp
+    WindowsGlobalizationAdapter.cpp
     jitprofiling.cpp
     )
 

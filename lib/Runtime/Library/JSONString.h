@@ -42,16 +42,16 @@ namespace Js
         virtual const char16* GetSz() override;
     protected:
         DEFINE_VTABLE_CTOR(JSONString, JavascriptString);
-        DECLARE_CONCRETE_STRING_CLASS;
     private:
-        JavascriptString* m_originalString;
-        charcount_t m_start; /* start of the escaping operation */
+        Field(JavascriptString*) m_originalString;
+        Field(charcount_t) m_start; /* start of the escaping operation */
 
     private:
         JSONString(JavascriptString* originalString, charcount_t start, charcount_t length);
         static const WCHAR escapeMap[128];
-        static const BYTE escapeMapCount[128];
     public:
+        static const BYTE escapeMapCount[128];
+
         template <EscapingOperation op>
         static Js::JavascriptString* Escape(Js::JavascriptString* value, uint start = 0, WritableStringBuffer* outputString = nullptr)
         {

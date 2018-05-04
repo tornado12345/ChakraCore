@@ -18,14 +18,12 @@ namespace Js
         {
             Assert(type->GetTypeId() == TypeIds_Arguments);
         }
-        Var GetCaller(ScriptContext * scriptContext);
-        static Var GetCaller(ScriptContext * scriptContext, JavascriptStackWalker *walker, bool skipGlobal);
 
         static bool Is(Var aValue);
 
         virtual BOOL GetDiagValueString(StringBuilder<ArenaAllocator>* stringBuilder, ScriptContext* requestContext) override;
         virtual BOOL GetDiagTypeString(StringBuilder<ArenaAllocator>* stringBuilder, ScriptContext* requestContext) override;
-        virtual BOOL GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, ForInCache * forInCache = nullptr) override;
+        virtual BOOL GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, EnumeratorCache * enumeratorCache = nullptr) override;
 
         virtual uint32 GetNumberOfArguments() const = 0;
         virtual uint32 GetNextFormalArgIndex(uint32 index, BOOL enumNonEnumerable = FALSE, PropertyAttributes* attributes = nullptr) const = 0;
@@ -55,15 +53,15 @@ namespace Js
 
     private:
         // We currently support only 2^24 arguments
-        uint32              numOfArguments:31;
-        uint32              callerDeleted:1;
+        Field(uint32)              numOfArguments:31;
+        Field(uint32)              callerDeleted:1;
 
         DEFINE_MARSHAL_OBJECT_TO_SCRIPT_CONTEXT(HeapArgumentsObject);
 
     protected:
-        uint32              formalCount;
-        ActivationObject*   frameObject;
-        BVSparse<Recycler>* deletedArgs;
+        Field(uint32)              formalCount;
+        Field(ActivationObject*)   frameObject;
+        Field(BVSparse<Recycler>*) deletedArgs;
 
     public:
         HeapArgumentsObject(DynamicType * type);
@@ -77,15 +75,15 @@ namespace Js
         virtual BOOL SetItemAt(uint32 index, Var value);
         virtual BOOL DeleteItemAt(uint32 index);
 
-        virtual BOOL HasProperty(PropertyId propertyId) override;
-        virtual BOOL GetProperty(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
-        virtual BOOL GetProperty(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
-        virtual BOOL GetPropertyReference(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
+        virtual PropertyQueryFlags HasPropertyQuery(PropertyId propertyId, _Inout_opt_ PropertyValueInfo* info) override;
+        virtual PropertyQueryFlags GetPropertyQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
+        virtual PropertyQueryFlags GetPropertyQuery(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
+        virtual PropertyQueryFlags GetPropertyReferenceQuery(Var originalInstance, PropertyId propertyId, Var* value, PropertyValueInfo* info, ScriptContext* requestContext) override;
         virtual BOOL SetProperty(PropertyId propertyId, Var value, PropertyOperationFlags flags, PropertyValueInfo* info) override;
         virtual BOOL SetProperty(JavascriptString* propertyNameString, Var value, PropertyOperationFlags flags, PropertyValueInfo* info) override;
-        virtual BOOL HasItem(uint32 index) override;
-        virtual BOOL GetItem(Var originalInstance, uint32 index, Var* value, ScriptContext * requestContext) override;
-        virtual BOOL GetItemReference(Var originalInstance, uint32 index, Var* value, ScriptContext * requestContext) override;
+        virtual PropertyQueryFlags HasItemQuery(uint32 index) override;
+        virtual PropertyQueryFlags GetItemQuery(Var originalInstance, uint32 index, Var* value, ScriptContext * requestContext) override;
+        virtual PropertyQueryFlags GetItemReferenceQuery(Var originalInstance, uint32 index, Var* value, ScriptContext * requestContext) override;
         virtual BOOL SetItem(uint32 index, Var value, PropertyOperationFlags flags) override;
         virtual BOOL DeleteItem(uint32 index, PropertyOperationFlags flags) override;
 
@@ -122,6 +120,7 @@ namespace Js
         void SetFrameObject(ActivationObject * value)
         {
             AssertMsg(frameObject == nullptr, "Setting the frame object again?");
+            Assert(!value || ActivationObject::Is(value));
             frameObject = value;
         }
 
@@ -191,7 +190,7 @@ namespace Js
         virtual BOOL SetWritable(PropertyId propertyId, BOOL value) override;
         virtual BOOL SetAccessors(PropertyId propertyId, Var getter, Var setter, PropertyOperationFlags flags) override;
         virtual BOOL SetPropertyWithAttributes(PropertyId propertyId, Var value, PropertyAttributes attributes, PropertyValueInfo* info, PropertyOperationFlags flags = PropertyOperation_None, SideEffects possibleSideEffects = SideEffects_Any) override;
-        virtual BOOL GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, ForInCache * forInCache = nullptr) override;
+        virtual BOOL GetEnumerator(JavascriptStaticEnumerator * enumerator, EnumeratorFlags flags, ScriptContext* requestContext, EnumeratorCache * enumeratorCache = nullptr) override;
         virtual BOOL PreventExtensions() override;
         virtual BOOL Seal() override;
         virtual BOOL Freeze() override;

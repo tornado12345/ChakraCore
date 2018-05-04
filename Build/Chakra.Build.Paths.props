@@ -8,6 +8,5 @@
     <BuildConfigPropsPath>$(MSBuildThisFileDirectory)</BuildConfigPropsPath>
 
     <ChakraBuildPathImported>true</ChakraBuildPathImported>
-
   </PropertyGroup>
 </Project>

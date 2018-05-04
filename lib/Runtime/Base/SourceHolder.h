@@ -22,7 +22,7 @@ namespace Js
         virtual size_t GetByteLength(const char16* reasonString) = 0;
         virtual ISourceHolder* Clone(ScriptContext* scriptContext) = 0;
         virtual bool Equals(ISourceHolder* other) = 0;
-        virtual int GetHashCode() = 0;
+        virtual hash_t GetHashCode() = 0;
         virtual bool IsEmpty() = 0;
         virtual bool IsDeferrable() = 0;
     };
@@ -31,12 +31,12 @@ namespace Js
     {
         friend class ISourceHolder;
     private:
-        LPCUTF8 source;
-        size_t byteLength;
-        bool isEmpty;
+        Field(LPCUTF8) source;
+        Field(size_t) byteLength;
+        Field(bool) isEmpty;
 
-        SimpleSourceHolder(LPCUTF8 source, size_t byteLength, bool isEmpty)
-            : source(source),
+        SimpleSourceHolder(NO_WRITE_BARRIER_TAG_TYPE(LPCUTF8 source), size_t byteLength, bool isEmpty)
+            : source(NO_WRITE_BARRIER_TAG(source)),
             byteLength(byteLength),
             isEmpty(isEmpty)
         {
@@ -72,7 +72,7 @@ namespace Js
             return this->isEmpty;
         }
 
-        virtual int GetHashCode() override
+        virtual hash_t GetHashCode() override
         {
             Assert(byteLength < MAXUINT32);
             return JsUtil::CharacterBuffer<utf8char_t>::StaticGetHashCode(source, (charcount_t)byteLength);

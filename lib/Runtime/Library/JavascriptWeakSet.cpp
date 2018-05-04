@@ -19,9 +19,16 @@ namespace Js
 
     JavascriptWeakSet* JavascriptWeakSet::FromVar(Var aValue)
     {
+        AssertOrFailFastMsg(Is(aValue), "Ensure var is actually a 'JavascriptWeakSet'");
+
+        return static_cast<JavascriptWeakSet *>(aValue);
+    }
+
+    JavascriptWeakSet* JavascriptWeakSet::UnsafeFromVar(Var aValue)
+    {
         AssertMsg(Is(aValue), "Ensure var is actually a 'JavascriptWeakSet'");
 
-        return static_cast<JavascriptWeakSet *>(RecyclableObject::FromVar(aValue));
+        return static_cast<JavascriptWeakSet *>(aValue);
     }
 
     Var JavascriptWeakSet::NewInstance(RecyclableObject* function, CallInfo callInfo, ...)
@@ -32,10 +39,9 @@ namespace Js
         ScriptContext* scriptContext = function->GetScriptContext();
         JavascriptLibrary* library = scriptContext->GetLibrary();
 
-        Var newTarget = callInfo.Flags & CallFlags_NewTarget ? args.Values[args.Info.Count] : args[0];
-        bool isCtorSuperCall = (callInfo.Flags & CallFlags_New) && newTarget != nullptr && !JavascriptOperators::IsUndefined(newTarget);
-        Assert(isCtorSuperCall || !(callInfo.Flags & CallFlags_New) || args[0] == nullptr);
-        CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(WeakSetCount);
+        Var newTarget = args.GetNewTarget();
+        bool isCtorSuperCall = JavascriptOperators::GetAndAssertIsConstructorSuperCall(args);
+        CHAKRATEL_LANGSTATS_INC_LANGFEATURECOUNT(ES6, WeakSet, scriptContext);
 
         JavascriptWeakSet* weakSetObject = nullptr;
 
@@ -68,9 +74,14 @@ namespace Js
         if (iter != nullptr)
         {
             JavascriptOperators::DoIteratorStepAndValue(iter, scriptContext, [&](Var nextItem) {
-                CALL_FUNCTION(adder, CallInfo(CallFlags_Value, 2), weakSetObject, nextItem);
+                CALL_FUNCTION(scriptContext->GetThreadContext(), adder, CallInfo(CallFlags_Value, 2), weakSetObject, nextItem);
             });
         }
+
+#if ENABLE_TTD
+        //TODO: right now we always GC before snapshots (assuming we have a weak collection)
+        //      may want to optimize this and use a notify here that we have a weak container -- also update post inflate and post snap
+#endif
 
         return isCtorSuperCall ?
             JavascriptOperators::OrdinaryCreateFromConstructor(RecyclableObject::FromVar(newTarget), weakSetObject, nullptr, scriptContext) :
@@ -100,16 +111,13 @@ namespace Js
             JavascriptError::ThrowTypeError(scriptContext, JSERR_WeakMapSetKeyNotAnObject, _u("WeakSet.prototype.add"));
         }
 
-        DynamicObject* keyObj = DynamicObject::FromVar(key);
+        RecyclableObject* keyObj = RecyclableObject::FromVar(key);
 
 #if ENABLE_TTD
-        //
-        //This makes the set decidedly less weak -- forces it to only release when we clean the tracking set but determinizes the behavior nicely
-        //      We want to improve this.
-        //
-        if(scriptContext->IsTTDRecordOrReplayModeEnabled())
+        //In replay we need to pin the object (and will release at snapshot points) -- in record we don't need to do anything
+        if(scriptContext->IsTTDReplayModeEnabled())
         {
-            scriptContext->TTDContextInfo->TTDWeakReferencePinSet->Add(keyObj);
+            scriptContext->TTDContextInfo->TTDWeakReferencePinSet->AddNew(keyObj);
         }
 #endif
 
@@ -137,10 +145,24 @@ namespace Js
 
         if (JavascriptOperators::IsObject(key) && JavascriptOperators::GetTypeId(key) != TypeIds_HostDispatch)
         {
-            DynamicObject* keyObj = DynamicObject::FromVar(key);
+            RecyclableObject* keyObj = RecyclableObject::FromVar(key);
 
             didDelete = weakSet->Delete(keyObj);
         }
+
+#if ENABLE_TTD
+        if(scriptContext->IsTTDRecordOrReplayModeEnabled())
+        {
+            if(scriptContext->IsTTDRecordModeEnabled())
+            {
+                function->GetScriptContext()->GetThreadContext()->TTDLog->RecordWeakCollectionContainsEvent(didDelete);
+            }
+            else
+            {
+                didDelete = function->GetScriptContext()->GetThreadContext()->TTDLog->ReplayWeakCollectionContainsEvent();
+            }
+        }
+#endif
 
         return scriptContext->GetLibrary()->CreateBoolean(didDelete);
     }
@@ -164,26 +186,40 @@ namespace Js
 
         if (JavascriptOperators::IsObject(key) && JavascriptOperators::GetTypeId(key) != TypeIds_HostDispatch)
         {
-            DynamicObject* keyObj = DynamicObject::FromVar(key);
+            RecyclableObject* keyObj = RecyclableObject::FromVar(key);
 
             hasValue = weakSet->Has(keyObj);
         }
 
+#if ENABLE_TTD
+        if(scriptContext->IsTTDRecordOrReplayModeEnabled())
+        {
+            if(scriptContext->IsTTDRecordModeEnabled())
+            {
+                function->GetScriptContext()->GetThreadContext()->TTDLog->RecordWeakCollectionContainsEvent(hasValue);
+            }
+            else
+            {
+                hasValue = function->GetScriptContext()->GetThreadContext()->TTDLog->ReplayWeakCollectionContainsEvent();
+            }
+        }
+#endif
+
         return scriptContext->GetLibrary()->CreateBoolean(hasValue);
     }
 
-    void JavascriptWeakSet::Add(DynamicObject* key)
+    void JavascriptWeakSet::Add(RecyclableObject* key)
     {
         keySet.Item(key, true);
     }
 
-    bool JavascriptWeakSet::Delete(DynamicObject* key)
+    bool JavascriptWeakSet::Delete(RecyclableObject* key)
     {
         bool unused = false;
         return keySet.TryGetValueAndRemove(key, &unused);
     }
 
-    bool JavascriptWeakSet::Has(DynamicObject* key)
+    bool JavascriptWeakSet::Has(RecyclableObject* key)
     {
         bool unused = false;
         return keySet.TryGetValue(key, &unused);
@@ -198,10 +234,15 @@ namespace Js
 #if ENABLE_TTD
     void JavascriptWeakSet::MarkVisitKindSpecificPtrs(TTD::SnapshotExtractor* extractor)
     {
-        this->Map([&](DynamicObject* key)
+        //All weak things should be reachable from another root so no need to mark but do need to repopulate the pin sets if in replay mode
+        Js::ScriptContext* scriptContext = this->GetScriptContext();
+        if(scriptContext->IsTTDReplayModeEnabled())
         {
-            extractor->MarkVisitVar(key);
-        });
+            this->Map([&](RecyclableObject* key)
+            {
+                scriptContext->TTDContextInfo->TTDWeakReferencePinSet->AddNew(key);
+            });
+        }
     }
 
     TTD::NSSnapObjects::SnapObjectType JavascriptWeakSet::GetSnapTag_TTD() const
@@ -217,9 +258,9 @@ namespace Js
         ssi->SetSize = 0;
         ssi->SetValueArray = alloc.SlabReserveArraySpace<TTD::TTDVar>(setCountEst + 1); //always reserve at least 1 element
 
-        this->Map([&](DynamicObject* key)
+        this->Map([&](RecyclableObject* key)
         {
-            AssertMsg(ssi->SetSize < setCountEst, "We are writting junk");
+            AssertMsg(ssi->SetSize < setCountEst, "We are writing junk");
 
             ssi->SetValueArray[ssi->SetSize] = key;
             ssi->SetSize++;

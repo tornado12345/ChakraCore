@@ -64,12 +64,14 @@ public:
         , m_ldSlots(nullptr)
         , m_loopCounterSym(nullptr)
         , callTreeHasSomeProfileInfo(false)
+        , finallyBlockLevel(0)
         , m_saveLoopImplicitCallFlags(nullptr)
-        , catchOffsetStack(nullptr)
+        , handlerOffsetStack(nullptr)
         , m_switchAdapter(this)
         , m_switchBuilder(&m_switchAdapter)
         , m_stackFuncPtrSym(nullptr)
         , m_loopBodyForInEnumeratorArrayOpnd(nullptr)
+        , m_paramScopeDone(false)
 #if DBG
         , m_callsOnStack(0)
         , m_usedAsTemp(nullptr)
@@ -85,9 +87,10 @@ public:
     {
         auto loopCount = func->GetJITFunctionBody()->GetLoopCount();
         if (loopCount > 0) {
-            m_saveLoopImplicitCallFlags = (IR::Opnd**)func->m_alloc->Alloc(sizeof(IR::Opnd*) * loopCount);
 #if DBG
-            memset(m_saveLoopImplicitCallFlags, 0, sizeof(IR::Opnd*) * loopCount);
+            m_saveLoopImplicitCallFlags = AnewArrayZ(func->m_alloc, IR::Opnd*, loopCount);
+#else
+            m_saveLoopImplicitCallFlags = AnewArray(func->m_alloc, IR::Opnd*, loopCount);
 #endif
         }
 
@@ -95,10 +98,12 @@ public:
         func->m_workItem->InitializeReader(&m_jnReader, &m_statementReader, func->m_alloc);
     };
 
-    ~IRBuilder() {
+    ~IRBuilder()
+    {
         Assert(m_func->GetJITFunctionBody()->GetLoopCount() == 0 || m_saveLoopImplicitCallFlags);
-        if (m_saveLoopImplicitCallFlags) {
-            m_func->m_alloc->Free(m_saveLoopImplicitCallFlags, sizeof(IR::Opnd*) * m_func->GetJITFunctionBody()->GetLoopCount());
+        if (m_saveLoopImplicitCallFlags)
+        {
+            AdeleteArray(m_func->m_alloc, m_func->GetJITFunctionBody()->GetLoopCount(), m_saveLoopImplicitCallFlags);
         }
     }
 
@@ -107,6 +112,7 @@ public:
     IR::LabelInstr *    CreateLabel(IR::BranchInstr * branchInstr, uint& offset);
 
 private:
+    void                InsertInstr(IR::Instr *instr, IR::Instr* insertBeforeInstr);
     void                AddInstr(IR::Instr *instr, uint32 offset);
     BranchReloc *       AddBranchInstr(IR::BranchInstr *instr, uint32 offset, uint32 targetOffset);
 #ifdef BYTECODE_BRANCH_ISLAND
@@ -128,8 +134,7 @@ private:
 
     void                BuildReg1(Js::OpCode newOpcode, uint32 offset, Js::RegSlot R0);
     void                BuildReg2(Js::OpCode newOpcode, uint32 offset, Js::RegSlot R0, Js::RegSlot R1, uint32 nextOffset);
-    void                BuildProfiledReg2(Js::OpCode newOpcode, uint32 offset, Js::RegSlot dstRegSlot, Js::RegSlot srcRegSlot, Js::ProfileId profileId, Js::InlineCacheIndex inlineCacheIndex = Js::Constants::NoInlineCacheIndex);
-    void                BuildProfiledReg2WithICIndex(Js::OpCode newOpcode, uint32 offset, Js::RegSlot dstRegSlot, Js::RegSlot srcRegSlot, Js::ProfileId profileId, Js::InlineCacheIndex inlineCacheIndex);
+    void                BuildProfiledReg2(Js::OpCode newOpcode, uint32 offset, Js::RegSlot dstRegSlot, Js::RegSlot srcRegSlot, Js::ProfileId profileId);
     void                BuildReg3(Js::OpCode newOpcode, uint32 offset, Js::RegSlot dstRegSlot, Js::RegSlot src1RegSlot,
                             Js::RegSlot src2RegSlot, Js::ProfileId profileId);
     void                BuildReg3C(Js::OpCode newOpCode, uint32 offset, Js::RegSlot dstRegSlot, Js::RegSlot src1RegSlot,
@@ -161,6 +166,7 @@ private:
     void                BuildArgInRest();
     void                BuildElementP(Js::OpCode newOpcode, uint32 offset, Js::RegSlot regSlot, Js::CacheId inlineCacheIndex);
     void                BuildElementCP(Js::OpCode newOpcode, uint32 offset, Js::RegSlot instance, Js::RegSlot regSlot, Js::CacheId inlineCacheIndex);
+    void                BuildProfiledElementCP(Js::OpCode newOpcode, uint32 offset, Js::RegSlot instance, Js::RegSlot regSlot, Js::CacheId inlineCacheIndex, Js::ProfileId profileId);
     void                BuildElementC2(Js::OpCode newOpcode, uint32 offset, Js::RegSlot instanceSlot, Js::RegSlot instance2Slot,
                             Js::RegSlot regSlot, Js::PropertyIdIndexType propertyIdIndex);
     void                BuildElementScopedC2(Js::OpCode newOpcode, uint32 offset, Js::RegSlot instance2Slot,
@@ -170,27 +176,27 @@ private:
                             Js::RegSlot regSlot, Js::ProfileId profileId);
     void                BuildElementUnsigned1(Js::OpCode newOpcode, uint32 offset, Js::RegSlot baseRegSlot, uint32 index, Js::RegSlot regSlot);
     IR::Instr *         BuildCallI_Helper(Js::OpCode newOpcode, uint32 offset, Js::RegSlot Return, Js::RegSlot Function, Js::ArgSlot ArgCount,
-                            Js::ProfileId profileId, Js::InlineCacheIndex inlineCacheIndex = Js::Constants::NoInlineCacheIndex);
+                            Js::ProfileId profileId, Js::CallFlags flags = Js::CallFlags_None, Js::InlineCacheIndex inlineCacheIndex = Js::Constants::NoInlineCacheIndex);
     IR::Instr *         BuildProfiledCallI(Js::OpCode opcode, uint32 offset, Js::RegSlot returnValue, Js::RegSlot function,
-                            Js::ArgSlot argCount, Js::ProfileId profileId, Js::InlineCacheIndex inlineCacheIndex = Js::Constants::NoInlineCacheIndex);
+                            Js::ArgSlot argCount, Js::ProfileId profileId, Js::CallFlags flags = Js::CallFlags_None, Js::InlineCacheIndex inlineCacheIndex = Js::Constants::NoInlineCacheIndex);
     IR::Instr *         BuildProfiledCallIExtended(Js::OpCode opcode, uint32 offset, Js::RegSlot returnValue, Js::RegSlot function,
-                            Js::ArgSlot argCount, Js::ProfileId profileId, Js::CallIExtendedOptions options, uint32 spreadAuxOffset);
+                            Js::ArgSlot argCount, Js::ProfileId profileId, Js::CallIExtendedOptions options, uint32 spreadAuxOffset, Js::CallFlags flags = Js::CallFlags_None);
     IR::Instr *         BuildProfiledCallIWithICIndex(Js::OpCode opcode, uint32 offset, Js::RegSlot returnValue, Js::RegSlot function,
                             Js::ArgSlot argCount, Js::ProfileId profileId, Js::InlineCacheIndex inlineCacheIndex);
     void                BuildProfiledCallIExtendedFlags(Js::OpCode opcode, uint32 offset, Js::RegSlot returnValue, Js::RegSlot function,
-                                Js::ArgSlot argCount, Js::ProfileId profileId, Js::CallIExtendedOptions options, uint32 spreadAuxOffset);
+                            Js::ArgSlot argCount, Js::ProfileId profileId, Js::CallIExtendedOptions options, uint32 spreadAuxOffset);
     void                BuildProfiledCallIExtendedWithICIndex(Js::OpCode opcode, uint32 offset, Js::RegSlot returnValue, Js::RegSlot function,
-                                Js::ArgSlot argCount, Js::ProfileId profileId, Js::CallIExtendedOptions options, uint32 spreadAuxOffset);
+                            Js::ArgSlot argCount, Js::ProfileId profileId, Js::CallIExtendedOptions options, uint32 spreadAuxOffset);
     void                BuildProfiledCallIExtendedFlagsWithICIndex(Js::OpCode opcode, uint32 offset, Js::RegSlot returnValue, Js::RegSlot function,
-                                Js::ArgSlot argCount, Js::ProfileId profileId, Js::CallIExtendedOptions options, uint32 spreadAuxOffset);
+                            Js::ArgSlot argCount, Js::ProfileId profileId, Js::CallIExtendedOptions options, uint32 spreadAuxOffset);
     void                BuildProfiled2CallI(Js::OpCode opcode, uint32 offset, Js::RegSlot returnValue, Js::RegSlot function,
                             Js::ArgSlot argCount, Js::ProfileId profileId, Js::ProfileId profileId2);
     void                BuildProfiled2CallIExtended(Js::OpCode opcode, uint32 offset, Js::RegSlot returnValue, Js::RegSlot function,
                             Js::ArgSlot argCount, Js::ProfileId profileId, Js::ProfileId profileId2, Js::CallIExtendedOptions options, uint32 spreadAuxOffset);
     void                BuildLdSpreadIndices(uint32 offset, uint32 spreadAuxOffset);
     IR::Instr *         BuildCallIExtended(Js::OpCode newOpcode, uint32 offset, Js::RegSlot returnValue, Js::RegSlot function,
-                            Js::ArgSlot argCount, Js::CallIExtendedOptions options, uint32 spreadAuxOffset);
-    void                BuildCallCommon(IR::Instr *instr, StackSym *symDst, Js::ArgSlot argCount);
+                            Js::ArgSlot argCount, Js::CallIExtendedOptions options, uint32 spreadAuxOffset, Js::CallFlags flags = Js::CallFlags_None);
+    void                BuildCallCommon(IR::Instr *instr, StackSym *symDst, Js::ArgSlot argCount, Js::CallFlags flags = Js::CallFlags_None);
     void                BuildRegexFromPattern(Js::RegSlot dstRegSlot, uint32 patternIndex, uint32 offset);
     void                BuildClass(Js::OpCode newOpcode, uint32 offset, Js::RegSlot constructor, Js::RegSlot extends);
     void                BuildBrReg1(Js::OpCode newOpcode, uint32 offset, uint targetOffset, Js::RegSlot srcRegSlot);
@@ -223,7 +229,9 @@ private:
         AssertMsg(this->RegIsTemp(reg), "Processing non-temp reg as a temp?");
         AssertMsg(this->tempMap, "Processing non-temp reg without a temp map?");
 
-        return this->tempMap[reg - this->firstTemp];
+        Js::RegSlot tempIndex = reg - this->firstTemp;
+        AssertOrFailFast(tempIndex < m_func->GetJITFunctionBody()->GetTempCount());
+        return this->tempMap[tempIndex];
     }
 
     void                SetMappedTemp(Js::RegSlot reg, SymID tempId)
@@ -231,7 +239,9 @@ private:
         AssertMsg(this->RegIsTemp(reg), "Processing non-temp reg as a temp?");
         AssertMsg(this->tempMap, "Processing non-temp reg without a temp map?");
 
-        this->tempMap[reg - this->firstTemp] = tempId;
+        Js::RegSlot tempIndex = reg - this->firstTemp;
+        AssertOrFailFast(tempIndex < m_func->GetJITFunctionBody()->GetTempCount());
+        this->tempMap[tempIndex] = tempId;
     }
 
     BOOL                GetTempUsed(Js::RegSlot reg)
@@ -239,7 +249,9 @@ private:
         AssertMsg(this->RegIsTemp(reg), "Processing non-temp reg as a temp?");
         AssertMsg(this->fbvTempUsed, "Processing non-temp reg without a used BV?");
 
-        return this->fbvTempUsed->Test(reg - this->firstTemp);
+        Js::RegSlot tempIndex = reg - this->firstTemp;
+        AssertOrFailFast(tempIndex < m_func->GetJITFunctionBody()->GetTempCount());
+        return this->fbvTempUsed->Test(tempIndex);
     }
 
     void                SetTempUsed(Js::RegSlot reg, BOOL used)
@@ -247,13 +259,15 @@ private:
         AssertMsg(this->RegIsTemp(reg), "Processing non-temp reg as a temp?");
         AssertMsg(this->fbvTempUsed, "Processing non-temp reg without a used BV?");
 
+        Js::RegSlot tempIndex = reg - this->firstTemp;
+        AssertOrFailFast(tempIndex < m_func->GetJITFunctionBody()->GetTempCount());
         if (used)
         {
-            this->fbvTempUsed->Set(reg - this->firstTemp);
+            this->fbvTempUsed->Set(tempIndex);
         }
         else
         {
-            this->fbvTempUsed->Clear(reg - this->firstTemp);
+            this->fbvTempUsed->Clear(tempIndex);
         }
     }
 
@@ -266,6 +280,9 @@ private:
     {
         return reg > 0 && reg < m_func->GetJITFunctionBody()->GetConstCount();
     }
+
+    bool                IsParamScopeDone() const { return m_paramScopeDone; }
+    void                SetParamScopeDone(bool done = true) { m_paramScopeDone = done; }
 
     Js::RegSlot         InnerScopeIndexToRegSlot(uint32) const;
     Js::RegSlot         GetEnvReg() const;
@@ -317,12 +334,14 @@ private:
     Func *              m_func;
     IR::Instr *         m_lastInstr;
     IR::Instr **        m_offsetToInstruction;
+    uint32              m_offsetToInstructionCount;
     uint32              m_functionStartOffset;
     Js::ByteCodeReader  m_jnReader;
     Js::StatementReader<Js::FunctionBody::ArenaStatementMapList> m_statementReader;
     SList<IR::Instr *> *m_argStack;
     SList<BranchReloc*> *branchRelocList;
-    SList<uint>         *catchOffsetStack;
+    typedef Pair<uint, bool> handlerStackElementType;
+    SList<handlerStackElementType>         *handlerOffsetStack;
     SymID *             tempMap;
     BVFixed *           fbvTempUsed;
     Js::RegSlot         firstTemp;
@@ -337,14 +356,15 @@ private:
     StackSym *          m_loopBodyRetIPSym;
     StackSym*           m_loopCounterSym;
     StackSym *          m_stackFuncPtrSym;
+    bool                m_paramScopeDone;
     bool                callTreeHasSomeProfileInfo;
+    uint                finallyBlockLevel;
 
     // Keep track of how many args we have on the stack whenever
     // we make a call so that the max stack used over all calls can be
     // used to estimate how much stack we should probe for at the
     // beginning of a JITted function.
 #if DBG
-    uint32              m_offsetToInstructionCount;
     uint32              m_callsOnStack;
 #endif
     uint32              m_argsOnStack;

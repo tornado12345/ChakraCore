@@ -27,13 +27,15 @@ enum ErrorTypeEnum
     kjstURIError,
     kjstWebAssemblyCompileError,
     kjstWebAssemblyRuntimeError,
+    kjstWebAssemblyLinkError,
     kjstCustomError,
 #ifdef ENABLE_PROJECTION
     kjstWinRTError,
 #endif
 };
 
-struct ParseNode;
+class ParseNode;
+class ParseNodeFnc;
 typedef ParseNode *ParseNodePtr;
 
 struct Ident;
@@ -49,9 +51,9 @@ struct ModuleImportOrExportEntry
 
 typedef SList<ModuleImportOrExportEntry, ArenaAllocator> ModuleImportOrExportEntryList;
 typedef SList<IdentPtr, ArenaAllocator> IdentPtrList;
+typedef JsUtil::BaseHashSet<IdentPtr, ArenaAllocator, PowerOf2SizePolicy> IdentPtrSet;
 
 //
 // Below was moved from scrutil.h to share with chakradiag.
 //
 #define HR(sc) ((HRESULT)(sc))
-#define MAKE_HR(vbserr) (MAKE_HRESULT(SEVERITY_ERROR, FACILITY_CONTROL, vbserr))

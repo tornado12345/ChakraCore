@@ -79,20 +79,20 @@ namespace MemoryPolicyTests
 
     TEST_CASE("MemoryPolicyTest_UnboundedMemory", "[MemoryPolicyTest]")
     {
-        BasicTest(JsRuntimeAttributeNone, "UnboundedMemory.js");
-        BasicTest(JsRuntimeAttributeDisableBackgroundWork, "UnboundedMemory.js");
+        BasicTest(JsRuntimeAttributeDisableFatalOnOOM, "UnboundedMemory.js");
+        BasicTest((JsRuntimeAttributes)(JsRuntimeAttributeDisableBackgroundWork | JsRuntimeAttributeDisableFatalOnOOM), "UnboundedMemory.js");
     }
 
     TEST_CASE("MemoryPolicyTest_ArrayTest", "[MemoryPolicyTest]")
     {
-        BasicTest(JsRuntimeAttributeNone, "arrayTest.js");
-        BasicTest(JsRuntimeAttributeDisableBackgroundWork, "arrayTest.js");
+        BasicTest(JsRuntimeAttributeDisableFatalOnOOM, "arrayTest.js");
+        BasicTest((JsRuntimeAttributes)(JsRuntimeAttributeDisableBackgroundWork | JsRuntimeAttributeDisableFatalOnOOM), "arrayTest.js");
     }
 
     TEST_CASE("MemoryPolicyTest_ArrayBuffer", "[MemoryPolicyTest]")
     {
-        BasicTest(JsRuntimeAttributeNone, "arraybuffer.js");
-        BasicTest(JsRuntimeAttributeDisableBackgroundWork, "arraybuffer.js");
+        BasicTest(JsRuntimeAttributeDisableFatalOnOOM, "arraybuffer.js");
+        BasicTest((JsRuntimeAttributes)(JsRuntimeAttributeDisableBackgroundWork | JsRuntimeAttributeDisableFatalOnOOM), "arraybuffer.js");
     }
 
     void OOSTest(JsRuntimeAttributes attributes)
@@ -271,8 +271,9 @@ namespace MemoryPolicyTests
         REQUIRE(JsDisposeRuntime(jsRuntime) == JsNoError);
     }
 
-    TEST_CASE("MemoryPolicyTest_ContextLeak1", "[ContextLeak1]")
-    {
-        ContextLeak1();
-    }
+    // Disabled due to the test terminating the process early. See OS: 17366304
+    //TEST_CASE("MemoryPolicyTest_ContextLeak1", "[ContextLeak1]")
+    //{
+    //    ContextLeak1();
+    //}
 }

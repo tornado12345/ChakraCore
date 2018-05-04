@@ -6,7 +6,6 @@
 
 #ifdef ENABLE_TEST_HOOKS
 
-HRESULT OnChakraCoreLoaded();
 interface ICustomConfigFlags;
 
 #if defined(_WIN32) || defined(_MSC_VER)
@@ -18,15 +17,19 @@ interface ICustomConfigFlags;
 struct TestHooks
 {
     typedef HRESULT(TESTHOOK_CALL *SetConfigFlagsPtr)(int argc, LPWSTR argv[], ICustomConfigFlags* customConfigFlags);
+    typedef HRESULT(TESTHOOK_CALL *SetConfigFilePtr)(LPWSTR strConfigFile);
     typedef HRESULT(TESTHOOK_CALL *PrintConfigFlagsUsageStringPtr)(void);
     typedef HRESULT(TESTHOOK_CALL *SetAssertToConsoleFlagPtr)(bool flag);
     typedef HRESULT(TESTHOOK_CALL *SetEnableCheckMemoryLeakOutputPtr)(bool flag);
     typedef void(TESTHOOK_CALL * NotifyUnhandledExceptionPtr)(PEXCEPTION_POINTERS exceptionInfo);
+    typedef int(TESTHOOK_CALL *LogicalStringCompareImpl)(const char16* p1, const char16* p2);
 
     SetConfigFlagsPtr pfSetConfigFlags;
+    SetConfigFilePtr  pfSetConfigFile;
     PrintConfigFlagsUsageStringPtr pfPrintConfigFlagsUsageString;
     SetAssertToConsoleFlagPtr pfSetAssertToConsoleFlag;
     SetEnableCheckMemoryLeakOutputPtr pfSetEnableCheckMemoryLeakOutput;
+    LogicalStringCompareImpl pfLogicalCompareStringImpl;
 
 #define FLAG(type, name, description, defaultValue, ...) FLAG_##type##(name)
 #define FLAG_String(name) \
@@ -45,6 +48,7 @@ struct TestHooks
 #define FLAG_Phases(name)
 #define FLAG_NumberSet(name)
 #define FLAG_NumberPairSet(name)
+#define FLAG_NumberTrioSet(name)
 #define FLAG_NumberRange(name)
 #include "ConfigFlagsList.h"
 #undef FLAG
@@ -54,6 +58,7 @@ struct TestHooks
 #undef FLAG_Phases
 #undef FLAG_NumberSet
 #undef FLAG_NumberPairSet
+#undef FLAG_NumberTrioSet
 #undef FLAG_NumberRange
 
 #if ENABLE_NATIVE_CODEGEN
@@ -65,5 +70,8 @@ struct TestHooks
 
     NotifyUnhandledExceptionPtr pfnNotifyUnhandledException;
 };
+
+typedef HRESULT(__stdcall *OnChakraCoreLoadedPtr)(TestHooks &testHooks);
+HRESULT OnChakraCoreLoaded(OnChakraCoreLoadedPtr pfChakraCoreLoaded = NULL);
 
 #endif

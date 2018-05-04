@@ -2,23 +2,37 @@ project(CHAKRA_PLATFORM_AGNOSTIC)
 
 set(PL_SOURCE_FILES
   Common/UnicodeText.Common.cpp
-  Linux/UnicodeText.ICU.cpp
-  Linux/HiResTimer.cpp
+  Common/HiResTimer.cpp
+  Common/DateTime.cpp
   Linux/NumbersUtility.cpp
-  Linux/Thread.cpp
+  Common/Thread.cpp
+  Common/Trace.cpp
+  Common/SystemInfo.Common.cpp
   )
 
-if(CMAKE_SYSTEM_NAME STREQUAL Linux)
-set(PL_SOURCE_FILES ${PL_SOURCE_FILES}
-  Linux/DateTime.cpp
-  Linux/SystemInfo.cpp
+if(NO_ICU)
+  set(PL_SOURCE_FILES
+    ${PL_SOURCE_FILES}
+    POSIX/UnicodeText.cpp
   )
-elseif(CMAKE_SYSTEM_NAME STREQUAL Darwin)
-set(PL_SOURCE_FILES ${PL_SOURCE_FILES}
-  Unix/AssemblyCommon.cpp
-  Unix/DateTime.cpp
-  Unix/SystemInfo.cpp
+else()
+  set(PL_SOURCE_FILES
+    ${PL_SOURCE_FILES}
+    Common/UnicodeText.ICU.cpp
   )
+endif()
+
+if(CC_TARGET_OS_ANDROID OR CC_TARGET_OS_LINUX)
+  set(PL_SOURCE_FILES ${PL_SOURCE_FILES}
+    Linux/SystemInfo.cpp
+    Linux/PerfTrace.cpp
+    )
+elseif(CC_TARGET_OS_OSX)
+  set(PL_SOURCE_FILES ${PL_SOURCE_FILES}
+    Unix/AssemblyCommon.cpp
+    Unix/SystemInfo.cpp
+    # Linux/PerfTrace.cpp # TODO : implement for OSX?
+    )
 endif()
 
 if(NOT STATIC_LIBRARY)

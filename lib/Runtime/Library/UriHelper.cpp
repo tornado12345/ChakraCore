@@ -9,6 +9,7 @@ namespace Js
     Var UriHelper::EncodeCoreURI(ScriptContext* scriptContext, Arguments& args, unsigned char flags )
     {
         AssertMsg(args.Info.Count > 0, "Should always have implicit 'this'");
+
         JavascriptString * strURI;
         //TODO make sure this string is pinned when the memory recycler is in
         if(args.Info.Count < 2)
@@ -27,6 +28,7 @@ namespace Js
                 strURI = JavascriptConversion::ToString(args[1], scriptContext);
             }
         }
+
         return Encode(strURI->GetSz(), strURI->GetLength(), flags, scriptContext);
     }
 
@@ -176,6 +178,7 @@ namespace Js
         uint32 allocSize = UInt32Math::Add(outputLen, 1);
         char16* outURI = RecyclerNewArrayLeaf(scriptContext->GetRecycler(), char16, allocSize);
         char16* outCurrent = outURI;
+        const char16 *hexStream = _u("0123456789ABCDEF");
 
         for( uint32 k = 0; k < len; k++ )
         {
@@ -222,9 +225,11 @@ namespace Js
                 uint32 utfLen = ToUTF8(uVal, bUTF8);
                 for( uint32 j = 0; j < utfLen; j++ )
                 {
-#pragma prefast(suppress: 26014, "buffer length was calculated earlier");
-                    swprintf_s(outCurrent, 4, _u("%%%02X"), (int)bUTF8[j] );
-                    outCurrent +=3;
+#pragma prefast(disable: 26014, "buffer length was calculated earlier");
+                    BYTE val = bUTF8[j];
+                    *outCurrent++ = _u('%');
+                    *outCurrent++ = hexStream[(val >> 4)];
+                    *outCurrent++ = hexStream[(val & 0xF)];
 #pragma prefast(default: 26014);
                 }
             }
@@ -239,7 +244,9 @@ namespace Js
     Var UriHelper::DecodeCoreURI(ScriptContext* scriptContext, Arguments& args, unsigned char reservedFlags )
     {
         AssertMsg(args.Info.Count > 0, "Should always have implicit 'this'");
+
         JavascriptString * strURI;
+
         //TODO make sure this string is pinned when the memory recycler is in
         if(args.Info.Count < 2)
         {
@@ -257,6 +264,7 @@ namespace Js
                 strURI = JavascriptConversion::ToString(args[1], scriptContext);
             }
         }
+
         return Decode(strURI->GetSz(), strURI->GetLength(), reservedFlags, scriptContext);
     }
 

@@ -51,10 +51,13 @@
     <ClCompile Include="$(MSBuildThisFileDirectory)arm\XDataAllocator.cpp">
       <Filter>arm</Filter>
     </ClCompile>
-    <ClCompile Include="$(MSBuildThisFileDirectory)MemUtils.cpp" />
     <ClCompile Include="$(MSBuildThisFileDirectory)arm64\XDataAllocator.cpp">
       <Filter>arm64</Filter>
     </ClCompile>
+    <ClCompile Include="$(MSBuildThisFileDirectory)SectionAllocWrapper.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)HeapInfoManager.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)RecyclerSweepManager.cpp" />
+    <ClCompile Include="$(MSBuildThisFileDirectory)DelayDeletingFunctionTable.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Allocator.h" />
@@ -109,15 +112,20 @@
       <Filter>amd64</Filter>
     </ClInclude>
     <ClInclude Include="XDataAllocator.h" />
-    <ClInclude Include="MemUtils.h" />
     <ClInclude Include="CollectionState.h" />
     <ClInclude Include="AllocationPolicyManager.h" />
+    <ClInclude Include="WriteBarrierMacros.h" />
     <ClInclude Include="arm64\XDataAllocator.h">
       <Filter>arm64</Filter>
     </ClInclude>
+    <ClInclude Include="SectionAllocWrapper.h" />
+    <ClInclude Include="HeapInfoManager.h" />
+    <ClInclude Include="BucketStatsReporter.h" />
+    <ClInclude Include="RecyclerSweepManager.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="HeapBlock.inl" />
+    <None Include="HeapBlockMap.inl" />
     <None Include="HeapBucket.inl" />
     <None Include="LargeHeapBucket.inl" />
     <None Include="MarkContext.inl" />

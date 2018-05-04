@@ -6,10 +6,13 @@
 
 #if ENABLE_TTD
 
+#define TTD_CREATE_EVENTLIST_VTABLE_ENTRY(TAG, WRAPPER, TYPE, EXEC_FP, UNLOAD_FP, EMIT_FP, PARSE_FP) this->m_eventListVTable[(uint32)NSLogEvents::EventKind:: ## TAG] = { NSLogEvents::ContextExecuteKind:: ## WRAPPER, EXEC_FP, UNLOAD_FP, EMIT_FP, PARSE_FP, TTD_EVENT_PLUS_DATA_SIZE_DIRECT(sizeof(NSLogEvents:: TYPE)) }
+#define TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(TAG, WRAPPER, TYPE, EXEC_FP) this->m_eventListVTable[(uint32)NSLogEvents::EventKind:: ## TAG] = { NSLogEvents::ContextExecuteKind:: ## WRAPPER, NSLogEvents:: ## EXEC_FP, nullptr, NSLogEvents:: ## TYPE ## _Emit ## <NSLogEvents::EventKind:: ## TAG ## >, NSLogEvents:: ## TYPE ## _Parse ## <NSLogEvents::EventKind:: ## TAG ## >, TTD_EVENT_PLUS_DATA_SIZE_DIRECT(sizeof(NSLogEvents:: ## TYPE)) }
+
 namespace TTD
 {
     TTDJsRTFunctionCallActionPopperRecorder::TTDJsRTFunctionCallActionPopperRecorder()
-        : m_ctx(nullptr), m_callAction(nullptr)
+        : m_ctx(nullptr), m_beginTime(0.0), m_callAction(nullptr)
     {
         ;
     }
@@ -18,11 +21,10 @@ namespace TTD
     {
         if(this->m_ctx != nullptr)
         {
-            AssertMsg(this->m_callAction != nullptr, "Should be set in sync with ctx!!!");
+            TTDAssert(this->m_callAction != nullptr, "Should be set in sync with ctx!!!");
 
             TTD::EventLog* elog = this->m_ctx->GetThreadContext()->TTDLog;
             NSLogEvents::JsRTCallFunctionAction* cfAction = NSLogEvents::GetInlineEventDataAs<NSLogEvents::JsRTCallFunctionAction, NSLogEvents::EventKind::CallExistingFunctionActionTag>(this->m_callAction);
-            cfAction->AdditionalInfo->EndTime = elog->GetCurrentWallTime();
 
 #if ENABLE_TTD_INTERNAL_DIAGNOSTICS
             NSLogEvents::JsRTCallFunctionAction_ProcessDiagInfoPost(this->m_callAction, this->m_ctx->GetThreadContext()->TTDLog->GetLastEventTime());
@@ -31,83 +33,19 @@ namespace TTD
             //Update the time elapsed since a snapshot if needed
             if(cfAction->CallbackDepth == 0)
             {
-                double elapsedTime = (cfAction->AdditionalInfo->EndTime - cfAction->AdditionalInfo->BeginTime);
+                double elapsedTime = (elog->GetCurrentWallTime() - this->m_beginTime);
                 elog->IncrementElapsedSnapshotTime(elapsedTime);
             }
         }
     }
 
-    void TTDJsRTFunctionCallActionPopperRecorder::InitializeForRecording(Js::ScriptContext* ctx, NSLogEvents::EventLogEntry* callAction)
+    void TTDJsRTFunctionCallActionPopperRecorder::InitializeForRecording(Js::ScriptContext* ctx, double beginWallTime, NSLogEvents::EventLogEntry* callAction)
     {
-        AssertMsg(this->m_ctx == nullptr && this->m_callAction == nullptr, "Don't double initialize!!!");
+        TTDAssert(this->m_ctx == nullptr && this->m_callAction == nullptr, "Don't double initialize!!!");
 
         this->m_ctx = ctx;
+        this->m_beginTime = beginWallTime;
         this->m_callAction = callAction;
-    }
-
-    TTLastReturnLocationInfo::TTLastReturnLocationInfo()
-        : m_isExceptionFrame(false)
-    {
-        this->m_lastFrame = { 0 };
-    }
-
-    void TTLastReturnLocationInfo::SetReturnLocation(const SingleCallCounter& cframe)
-    {
-        this->m_isExceptionFrame = false;
-        this->m_lastFrame = cframe;
-    }
-
-    void TTLastReturnLocationInfo::SetExceptionLocation(const SingleCallCounter& cframe)
-    {
-        this->m_isExceptionFrame = true;
-        this->m_lastFrame = cframe;
-    }
-
-    bool TTLastReturnLocationInfo::IsDefined() const
-    {
-        return this->m_lastFrame.Function != nullptr;
-    }
-
-    bool TTLastReturnLocationInfo::IsReturnLocation() const
-    {
-        return this->IsDefined() && !this->m_isExceptionFrame;
-    }
-
-    bool TTLastReturnLocationInfo::IsExceptionLocation() const
-    {
-        return this->IsDefined() && this->m_isExceptionFrame;
-    }
-
-    const SingleCallCounter& TTLastReturnLocationInfo::GetLocation() const
-    {
-        AssertMsg(this->IsDefined(), "Should check this!");
-
-        return this->m_lastFrame;
-    }
-
-    void TTLastReturnLocationInfo::Clear()
-    {
-        if(this->IsDefined())
-        {
-            this->m_isExceptionFrame = false;
-            this->m_lastFrame = { 0 };
-        }
-    }
-
-    void TTLastReturnLocationInfo::ClearReturnOnly()
-    {
-        if(this->IsDefined() && !this->m_isExceptionFrame)
-        {
-            this->Clear();
-        }
-    }
-
-    void TTLastReturnLocationInfo::ClearExceptionOnly()
-    {
-        if(this->IsDefined() && this->m_isExceptionFrame)
-        {
-            this->Clear();
-        }
     }
 
     /////////////
@@ -115,8 +53,8 @@ namespace TTD
     void TTEventList::AddArrayLink()
     {
         TTEventListLink* newHeadBlock = this->m_alloc->SlabAllocateStruct<TTEventListLink>();
-        newHeadBlock->BlockData = this->m_alloc->SlabAllocateFixedSizeArray<NSLogEvents::EventLogEntry, TTD_EVENTLOG_LIST_BLOCK_SIZE>();
-        memset(newHeadBlock->BlockData, 0, TTD_EVENTLOG_LIST_BLOCK_SIZE * sizeof(NSLogEvents::EventLogEntry));
+        newHeadBlock->BlockData = this->m_alloc->SlabAllocateFixedSizeArray<byte, TTD_EVENTLOG_LIST_BLOCK_SIZE>();
+        memset(newHeadBlock->BlockData, 0, TTD_EVENTLOG_LIST_BLOCK_SIZE);
 
         newHeadBlock->CurrPos = 0;
         newHeadBlock->StartPos = 0;
@@ -134,8 +72,8 @@ namespace TTD
 
     void TTEventList::RemoveArrayLink(TTEventListLink* block)
     {
-        AssertMsg(block->Previous == nullptr, "Not first event block in log!!!");
-        AssertMsg(block->StartPos == block->CurrPos, "Haven't cleared all the events in this link");
+        TTDAssert(block->Previous == nullptr, "Not first event block in log!!!");
+        TTDAssert(block->StartPos == block->CurrPos, "Haven't cleared all the events in this link");
 
         if(block->Next == nullptr)
         {
@@ -151,12 +89,38 @@ namespace TTD
     }
 
     TTEventList::TTEventList(UnlinkableSlabAllocator* alloc)
-        : m_alloc(alloc), m_headBlock(nullptr)
+        : m_alloc(alloc), m_headBlock(nullptr), m_vtable(nullptr), m_previousEventMap(&HeapAllocator::Instance)
     {
         ;
     }
 
-    void TTEventList::UnloadEventList(NSLogEvents::EventLogEntryVTableEntry* vtable)
+    void TTEventList::SetVTable(const NSLogEvents::EventLogEntryVTableEntry* vtable)
+    {
+        this->m_vtable = vtable;
+    }
+
+    void TTEventList::InitializePreviousEventMap()
+    {
+        for(TTEventListLink* curr = this->m_headBlock; curr != nullptr; curr = curr->Previous)
+        {
+            size_t cpos = curr->StartPos;
+            size_t ppos = TTD_EVENTLOG_LIST_BLOCK_SIZE; //an invalid sentinal value
+
+            while(cpos != curr->CurrPos)
+            {
+                NSLogEvents::EventLogEntry* data = reinterpret_cast<NSLogEvents::EventLogEntry*>(curr->BlockData + cpos);
+                if(cpos != curr->StartPos)
+                {
+                    this->m_previousEventMap.AddNew(data, ppos);
+                }
+
+                ppos = cpos;
+                cpos += this->m_vtable[(uint32)data->EventKind].DataSize;
+            }
+        }
+    }
+
+    void TTEventList::UnloadEventList()
     {
         if(this->m_headBlock == nullptr)
         {
@@ -172,15 +136,18 @@ namespace TTD
         TTEventListLink* curr = firstBlock;
         while(curr != nullptr)
         {
-            for(uint32 i = curr->StartPos; i < curr->CurrPos; ++i)
+            size_t cpos = curr->StartPos;
+            while(cpos < curr->CurrPos)
             {
-                const NSLogEvents::EventLogEntry* entry = curr->BlockData + i;
-                auto unloadFP = vtable[(uint32)entry->EventKind].UnloadFP; //use vtable magic here
+                NSLogEvents::EventLogEntry* entry = reinterpret_cast<NSLogEvents::EventLogEntry*>(curr->BlockData + cpos);
+                auto unloadFP = this->m_vtable[(uint32)entry->EventKind].UnloadFP; //use vtable magic here
 
                 if(unloadFP != nullptr)
                 {
-                    unloadFP(curr->BlockData + i, *(this->m_alloc));
+                    unloadFP(entry, *(this->m_alloc));
                 }
+
+                cpos += this->m_vtable[(uint32)entry->EventKind].DataSize;
             }
             curr->StartPos = curr->CurrPos;
 
@@ -192,31 +159,31 @@ namespace TTD
         this->m_headBlock = nullptr;
     }
 
-    NSLogEvents::EventLogEntry* TTEventList::GetNextAvailableEntry()
+    NSLogEvents::EventLogEntry* TTEventList::GetNextAvailableEntry(size_t requiredSize)
     {
-        if((this->m_headBlock == nullptr) || (this->m_headBlock->CurrPos == TTD_EVENTLOG_LIST_BLOCK_SIZE))
+        if((this->m_headBlock == nullptr) || (this->m_headBlock->CurrPos + requiredSize >= TTD_EVENTLOG_LIST_BLOCK_SIZE))
         {
             this->AddArrayLink();
         }
 
-        NSLogEvents::EventLogEntry* entry = (this->m_headBlock->BlockData + this->m_headBlock->CurrPos);
-        this->m_headBlock->CurrPos++;
+        NSLogEvents::EventLogEntry* entry = reinterpret_cast<NSLogEvents::EventLogEntry*>(this->m_headBlock->BlockData + this->m_headBlock->CurrPos);
+        this->m_headBlock->CurrPos += requiredSize;
 
         return entry;
     }
 
-    void TTEventList::DeleteFirstEntry(TTEventListLink* block, NSLogEvents::EventLogEntry* data, NSLogEvents::EventLogEntryVTableEntry* vtable)
+    void TTEventList::DeleteFirstEntry(TTEventListLink* block, NSLogEvents::EventLogEntry* data)
     {
-        AssertMsg((block->BlockData + block->StartPos) == data, "Not the data at the start of the list!!!");
+        TTDAssert(reinterpret_cast<NSLogEvents::EventLogEntry*>(block->BlockData + block->StartPos) == data, "Not the data at the start of the list!!!");
 
-        auto unloadFP = vtable[(uint32)data->EventKind].UnloadFP; //use vtable magic here
+        auto unloadFP = this->m_vtable[(uint32)data->EventKind].UnloadFP; //use vtable magic here
 
         if(unloadFP != nullptr)
         {
             unloadFP(data, *(this->m_alloc));
         }
 
-        block->StartPos++;
+        block->StartPos += this->m_vtable[(uint32)data->EventKind].DataSize;
         if(block->StartPos == block->CurrPos)
         {
             this->RemoveArrayLink(block);
@@ -234,36 +201,43 @@ namespace TTD
 
         for(TTEventListLink* curr = this->m_headBlock; curr != nullptr; curr = curr->Previous)
         {
-            count += (curr->CurrPos - curr->StartPos);
+            size_t cpos = curr->StartPos; 
+            while(cpos != curr->CurrPos)
+            {
+                count++;
+
+                NSLogEvents::EventLogEntry* data = reinterpret_cast<NSLogEvents::EventLogEntry*>(curr->BlockData + cpos);
+                cpos += this->m_vtable[(uint32)data->EventKind].DataSize;
+            }
         }
 
-        return (uint32)count;
+        return count;
     }
 
     TTEventList::Iterator::Iterator()
-        : m_currLink(nullptr), m_currIdx(0)
+        : m_currLink(nullptr), m_currIdx(0), m_previousEventMap(nullptr)
     {
         ;
     }
 
-    TTEventList::Iterator::Iterator(TTEventListLink* head, uint32 pos)
-        : m_currLink(head), m_currIdx(pos)
+    TTEventList::Iterator::Iterator(TTEventListLink* head, size_t pos, const NSLogEvents::EventLogEntryVTableEntry* vtable, const JsUtil::BaseDictionary<const NSLogEvents::EventLogEntry*, size_t, HeapAllocator>* previousEventMap)
+        : m_currLink(head), m_currIdx(pos), m_vtable(vtable), m_previousEventMap(previousEventMap)
     {
         ;
     }
 
     const NSLogEvents::EventLogEntry* TTEventList::Iterator::Current() const
     {
-        AssertMsg(this->IsValid(), "Iterator is invalid!!!");
+        TTDAssert(this->IsValid(), "Iterator is invalid!!!");
 
-        return (this->m_currLink->BlockData + this->m_currIdx);
+        return reinterpret_cast<const NSLogEvents::EventLogEntry*>(this->m_currLink->BlockData + this->m_currIdx);
     }
 
     NSLogEvents::EventLogEntry* TTEventList::Iterator::Current()
     {
-        AssertMsg(this->IsValid(), "Iterator is invalid!!!");
+        TTDAssert(this->IsValid(), "Iterator is invalid!!!");
 
-        return (this->m_currLink->BlockData + this->m_currIdx);
+        return reinterpret_cast<NSLogEvents::EventLogEntry*>(this->m_currLink->BlockData + this->m_currIdx);
     }
 
     TTEventList::TTEventListLink* TTEventList::Iterator::GetBlock()
@@ -278,9 +252,12 @@ namespace TTD
 
     void TTEventList::Iterator::MoveNext()
     {
-        if(this->m_currIdx < (this->m_currLink->CurrPos - 1))
+        NSLogEvents::EventLogEntry* data = this->Current();
+        size_t dataSize = this->m_vtable[(uint32)data->EventKind].DataSize;
+
+        if(this->m_currIdx + dataSize < this->m_currLink->CurrPos)
         {
-            this->m_currIdx++;
+            this->m_currIdx += dataSize;
         }
         else
         {
@@ -289,16 +266,29 @@ namespace TTD
         }
     }
 
-    void TTEventList::Iterator::MovePrevious()
+    void TTEventList::Iterator::MovePrevious_ReplayOnly()
     {
         if(this->m_currIdx > this->m_currLink->StartPos)
         {
-            this->m_currIdx--;
+            this->m_currIdx = this->m_previousEventMap->Item(this->Current());
         }
         else
         {
             this->m_currLink = this->m_currLink->Previous;
-            this->m_currIdx = (this->m_currLink != nullptr) ? (this->m_currLink->CurrPos - 1) : 0;
+            this->m_currIdx = 0;
+
+            //move index to the last element
+            if(this->m_currLink != nullptr && this->m_currIdx < this->m_currLink->CurrPos)
+            {
+                NSLogEvents::EventLogEntry* data = this->Current();
+                size_t npos = this->m_vtable[(uint32)data->EventKind].DataSize;
+                while(npos < this->m_currLink->CurrPos)
+                {
+                    this->m_currIdx = npos;
+                    data = this->Current();
+                    npos += this->m_vtable[(uint32)data->EventKind].DataSize;
+                }
+            }
         }
     }
 
@@ -306,7 +296,7 @@ namespace TTD
     {
         if(this->m_headBlock == nullptr)
         {
-            return Iterator(nullptr, 0);
+            return Iterator(nullptr, 0, this->m_vtable, &this->m_previousEventMap);
         }
         else
         {
@@ -316,84 +306,33 @@ namespace TTD
                 firstBlock = firstBlock->Previous;
             }
 
-            return Iterator(firstBlock, firstBlock->StartPos);
+            return Iterator(firstBlock, firstBlock->StartPos, this->m_vtable, &this->m_previousEventMap);
         }
     }
 
-    TTEventList::Iterator TTEventList::GetIteratorAtLast() const
+    TTEventList::Iterator TTEventList::GetIteratorAtLast_ReplayOnly() const
     {
         if(this->m_headBlock == nullptr)
         {
-            return Iterator(nullptr, 0);
+            return Iterator(nullptr, 0, this->m_vtable, &this->m_previousEventMap);
         }
         else
         {
-            return Iterator(this->m_headBlock, this->m_headBlock->CurrPos - 1);
+            size_t cpos = this->m_headBlock->StartPos;
+            size_t ipos = 0;
+            do
+            {
+                ipos = cpos;
+
+                NSLogEvents::EventLogEntry* data = reinterpret_cast<NSLogEvents::EventLogEntry*>(this->m_headBlock->BlockData + cpos);
+                cpos += this->m_vtable[(uint32)data->EventKind].DataSize;
+            } while(cpos != this->m_headBlock->CurrPos);
+
+            return Iterator(this->m_headBlock, ipos, this->m_vtable, &this->m_previousEventMap);
         }
     }
 
     //////
-
-    const SingleCallCounter& EventLog::GetTopCallCounter() const
-    {
-        AssertMsg(this->m_callStack.Count() != 0, "Empty stack!");
-
-        return this->m_callStack.Item(this->m_callStack.Count() - 1);
-    }
-
-    SingleCallCounter& EventLog::GetTopCallCounter()
-    {
-        AssertMsg(this->m_callStack.Count() != 0, "Empty stack!");
-
-        return this->m_callStack.Item(this->m_callStack.Count() - 1);
-    }
-
-    bool EventLog::IsFunctionJustMyCode(const Js::FunctionBody* fbody)
-    {
-        //If not in JMC mode then implicitly everything is my code
-        if(!EventLog::IsDebuggerRunningJustMyCode(fbody->GetScriptContext()))
-        {
-            return true;
-        }
-
-        Js::Utf8SourceInfo* srcInfo = fbody->GetUtf8SourceInfo();
-        if(srcInfo == nullptr)
-        {
-            return false;
-        }
-
-        return (srcInfo->HasDebugDocument() && srcInfo->GetDebugDocument()->IsJustMyCode());
-    }
-
-    bool EventLog::IsFunctionJustMyCode(const Js::JavascriptFunction* function)
-    {
-        return EventLog::IsFunctionJustMyCode(function->GetFunctionBody());
-    }
-
-    bool EventLog::IsDebuggerRunningJustMyCode(Js::ScriptContext* ctx)
-    {
-        return (ctx->GetDebugContext() != nullptr && ctx->GetDebugContext()->IsJustMyCode());
-    }
-
-    const SingleCallCounter* EventLog::GetTopCallCallerCounter(bool justMyCode) const
-    {
-
-        for(int32 pos = this->m_callStack.Count() - 2; pos >= 0; --pos)
-        {
-            const SingleCallCounter* csi = &(this->m_callStack.Item(pos));
-            if(!justMyCode || EventLog::IsFunctionJustMyCode(csi->Function))
-            {
-                return csi;
-            }
-        }
-
-        return nullptr;
-    }
-
-    int64 EventLog::GetCurrentEventTimeAndAdvance()
-    {
-        return this->m_eventTimeCtr++;
-    }
 
     void EventLog::AdvanceTimeAndPositionForReplay()
     {
@@ -401,13 +340,13 @@ namespace TTD
         this->m_currentReplayEventIterator.MoveNext();
 
 #if ENABLE_TTD_INTERNAL_DIAGNOSTICS
-        AssertMsg(!this->m_currentReplayEventIterator.IsValid() || this->m_eventTimeCtr == this->m_currentReplayEventIterator.Current()->EventTimeStamp, "Something is out of sync.");
+        TTDAssert(!this->m_currentReplayEventIterator.IsValid() || this->m_eventTimeCtr == this->m_currentReplayEventIterator.Current()->EventTimeStamp, "Something is out of sync.");
 #endif
     }
 
     void EventLog::UpdateComputedMode()
     {
-        AssertMsg(this->m_modeStack.Count() > 0, "Should never be empty!!!");
+        TTDAssert(this->m_modeStack.Count() > 0, "Should never be empty!!!");
 
         TTDMode cm = TTDMode::Invalid;
         for(uint32 i = 0; i < this->m_modeStack.Count(); ++i)
@@ -417,21 +356,21 @@ namespace TTD
             {
             case TTDMode::RecordMode:
             case TTDMode::ReplayMode:
-            case TTDMode::DebuggerMode:
-                AssertMsg(i == 0, "One of these should always be first on the stack.");
+                TTDAssert(i == 0, "One of these should always be first on the stack.");
                 cm = m;
                 break;
+            case TTDMode::DebuggerAttachedMode:
             case TTDMode::CurrentlyEnabled:
             case TTDMode::ExcludedExecutionTTAction:
             case TTDMode::ExcludedExecutionDebuggerAction:
             case TTDMode::DebuggerSuppressGetter:
             case TTDMode::DebuggerSuppressBreakpoints:
             case TTDMode::DebuggerLogBreakpoints:
-                AssertMsg(i != 0, "A base mode should always be first on the stack.");
+                TTDAssert(i != 0, "A base mode should always be first on the stack.");
                 cm |= m;
                 break;
             default:
-                AssertMsg(false, "This mode is unknown or should never appear.");
+                TTDAssert(false, "This mode is unknown or should never appear.");
                 break;
             }
         }
@@ -446,32 +385,19 @@ namespace TTD
         }
     }
 
-    void EventLog::UnloadRetainedData()
-    {
-        if(this->m_lastInflateMap != nullptr)
-        {
-            TT_HEAP_DELETE(InflateMap, this->m_lastInflateMap);
-            this->m_lastInflateMap = nullptr;
-        }
-
-        if(this->m_propertyRecordPinSet != nullptr)
-        {
-            this->m_propertyRecordPinSet.Unroot(this->m_propertyRecordPinSet->GetAllocator());
-        }
-    }
-
-    SnapShot* EventLog::DoSnapshotExtract_Helper()
+    SnapShot* EventLog::DoSnapshotExtract_Helper(double gcTime, JsUtil::BaseHashSet<Js::FunctionBody*, HeapAllocator>& liveTopLevelBodies)
     {
         SnapShot* snap = nullptr;
 
-        this->m_snapExtractor.BeginSnapshot(this->m_threadContext);
+        //Begin the actual snapshot operation
+        this->m_snapExtractor.BeginSnapshot(this->m_threadContext, gcTime);
         this->m_snapExtractor.DoMarkWalk(this->m_threadContext);
 
         ///////////////////////////
         //Phase 2: Evacuate marked objects
         //Allows for parallel execute and evacuate (in conjunction with later refactoring)
 
-        this->m_snapExtractor.EvacuateMarkedIntoSnapshot(this->m_threadContext);
+        this->m_snapExtractor.EvacuateMarkedIntoSnapshot(this->m_threadContext, liveTopLevelBodies);
 
         ///////////////////////////
         //Phase 3: Complete and return snapshot
@@ -483,16 +409,33 @@ namespace TTD
 
     void EventLog::ReplaySnapshotEvent()
     {
-#if ENABLE_SNAPSHOT_COMPARE
         SnapShot* snap = nullptr;
         try
         {
             AUTO_NESTED_HANDLED_EXCEPTION_TYPE((ExceptionType)(ExceptionType_OutOfMemory | ExceptionType_StackOverflow));
 
+            //clear the weak collection pin set and force a GC (to get weak containers in a consistent state)
+            NSLogEvents::EventLogEntry* revt = this->m_currentReplayEventIterator.Current();
+            NSLogEvents::SnapshotEventLogEntry* snapUpdateEvt = NSLogEvents::GetInlineEventDataAs<NSLogEvents::SnapshotEventLogEntry, NSLogEvents::EventKind::SnapshotTag>(revt);
+
+            this->m_threadContext->TTDContext->SyncCtxtsAndRootsWithSnapshot_Replay(snapUpdateEvt->LiveContextCount, snapUpdateEvt->LiveContextIdArray, snapUpdateEvt->LongLivedRefRootsCount, snapUpdateEvt->LongLivedRefRootsIdArray);
+            this->m_threadContext->GetRecycler()->CollectNow<CollectNowForceInThread>();
+
+            //need to do a visit of some sort to reset the weak collection pin set
+            this->m_snapExtractor.DoResetWeakCollectionPinSet(this->m_threadContext);
+
+            //We always need to cleanup references (above but only do compare in extra diagnostics mode)
+#if ENABLE_SNAPSHOT_COMPARE
             this->SetSnapshotOrInflateInProgress(true);
             this->PushMode(TTDMode::ExcludedExecutionTTAction);
 
-            snap = this->DoSnapshotExtract_Helper();
+            JsUtil::BaseHashSet<Js::FunctionBody*, HeapAllocator> liveTopLevelBodies(&HeapAllocator::Instance);
+            snap = this->DoSnapshotExtract_Helper(0.0, liveTopLevelBodies);
+
+            for(int32 i = 0; i < this->m_threadContext->TTDContext->GetTTDContexts().Count(); ++i)
+            {
+                this->m_threadContext->TTDContext->GetTTDContexts().Item(i)->TTDContextInfo->CleanUnreachableTopLevelBodies(liveTopLevelBodies);
+            }
 
             NSLogEvents::EventLogEntry* evt = this->m_currentReplayEventIterator.Current();
             NSLogEvents::SnapshotEventLogEntry_EnsureSnapshotDeserialized(evt, this->m_threadContext);
@@ -508,17 +451,19 @@ namespace TTD
 
             this->PopMode(TTDMode::ExcludedExecutionTTAction);
             this->SetSnapshotOrInflateInProgress(false);
+#endif
         }
         catch(...)
         {
-            TT_HEAP_DELETE(SnapShot, snap);
-            AssertMsg(false, "OOM in snapshot replay... just continue");
+            if(snap != nullptr)
+            {
+                TT_HEAP_DELETE(SnapShot, snap);
+            }
+            TTDAssert(false, "OOM in snapshot replay...");
         }
-#endif
-
 
 #if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.WriteLiteralMsg("---SNAPSHOT EVENT---\n");
+        this->m_threadContext->TTDExecutionInfo->GetTraceLogger()->WriteLiteralMsg("---SNAPSHOT EVENT---\n");
 #endif
 
         this->AdvanceTimeAndPositionForReplay(); //move along
@@ -526,7 +471,16 @@ namespace TTD
 
     void EventLog::ReplayEventLoopYieldPointEvent()
     {
-        this->m_threadContext->TTDContext->ClearLocalRootsAndRefreshMap();
+        try
+        {
+            AUTO_NESTED_HANDLED_EXCEPTION_TYPE((ExceptionType)(ExceptionType_OutOfMemory | ExceptionType_StackOverflow));
+
+            this->m_threadContext->TTDContext->ClearLocalRootsAndRefreshMap_Replay();
+        }
+        catch(...)
+        {
+            TTDAssert(false, "OOM in yield point replay...");
+        }
 
         this->AdvanceTimeAndPositionForReplay(); //move along
     }
@@ -540,104 +494,105 @@ namespace TTD
     {
         this->m_eventListVTable = this->m_miscSlabAllocator.SlabAllocateArray<NSLogEvents::EventLogEntryVTableEntry>((uint32)NSLogEvents::EventKind::Count);
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::SnapshotTag] = { NSLogEvents::ContextExecuteKind::GlobalAPIWrapper, nullptr, NSLogEvents::SnapshotEventLogEntry_UnloadEventMemory, NSLogEvents::SnapshotEventLogEntry_Emit, NSLogEvents::SnapshotEventLogEntry_Parse};
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::EventLoopYieldPointTag] = { NSLogEvents::ContextExecuteKind::GlobalAPIWrapper, nullptr, nullptr, NSLogEvents::EventLoopYieldPointEntry_Emit, NSLogEvents::EventLoopYieldPointEntry_Parse};
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::TopLevelCodeTag] = { NSLogEvents::ContextExecuteKind::None, nullptr, nullptr, NSLogEvents::CodeLoadEventLogEntry_Emit, NSLogEvents::CodeLoadEventLogEntry_Parse };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::TelemetryLogTag] = { NSLogEvents::ContextExecuteKind::None, nullptr, NSLogEvents::TelemetryEventLogEntry_UnloadEventMemory, NSLogEvents::TelemetryEventLogEntry_Emit, NSLogEvents::TelemetryEventLogEntry_Parse };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::DoubleTag] = { NSLogEvents::ContextExecuteKind::None, nullptr, nullptr, NSLogEvents::DoubleEventLogEntry_Emit, NSLogEvents::DoubleEventLogEntry_Parse };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::StringTag] = { NSLogEvents::ContextExecuteKind::None, nullptr, NSLogEvents::StringValueEventLogEntry_UnloadEventMemory, NSLogEvents::StringValueEventLogEntry_Emit, NSLogEvents::StringValueEventLogEntry_Parse };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::RandomSeedTag] = { NSLogEvents::ContextExecuteKind::None, nullptr, nullptr, NSLogEvents::RandomSeedEventLogEntry_Emit, NSLogEvents::RandomSeedEventLogEntry_Parse };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::PropertyEnumTag] = { NSLogEvents::ContextExecuteKind::None, nullptr, NSLogEvents::PropertyEnumStepEventLogEntry_UnloadEventMemory, NSLogEvents::PropertyEnumStepEventLogEntry_Emit, NSLogEvents::PropertyEnumStepEventLogEntry_Parse };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::SymbolCreationTag] = { NSLogEvents::ContextExecuteKind::None, nullptr, nullptr, NSLogEvents::SymbolCreationEventLogEntry_Emit, NSLogEvents::SymbolCreationEventLogEntry_Parse };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::ExternalCbRegisterCall] = { NSLogEvents::ContextExecuteKind::None, nullptr, nullptr, NSLogEvents::ExternalCbRegisterCallEventLogEntry_Emit, NSLogEvents::ExternalCbRegisterCallEventLogEntry_Parse };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::ExternalCallTag] = { NSLogEvents::ContextExecuteKind::None, nullptr, NSLogEvents::ExternalCallEventLogEntry_UnloadEventMemory, NSLogEvents::ExternalCallEventLogEntry_Emit, NSLogEvents::ExternalCallEventLogEntry_Parse };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(SnapshotTag, GlobalAPIWrapper, SnapshotEventLogEntry, nullptr, NSLogEvents::SnapshotEventLogEntry_UnloadEventMemory, NSLogEvents::SnapshotEventLogEntry_Emit, NSLogEvents::SnapshotEventLogEntry_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(EventLoopYieldPointTag, GlobalAPIWrapper, EventLoopYieldPointEntry, nullptr, nullptr, NSLogEvents::EventLoopYieldPointEntry_Emit, NSLogEvents::EventLoopYieldPointEntry_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(TopLevelCodeTag, None, CodeLoadEventLogEntry, nullptr, nullptr, NSLogEvents::CodeLoadEventLogEntry_Emit, NSLogEvents::CodeLoadEventLogEntry_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(TelemetryLogTag, None, TelemetryEventLogEntry, nullptr, NSLogEvents::TelemetryEventLogEntry_UnloadEventMemory, NSLogEvents::TelemetryEventLogEntry_Emit, NSLogEvents::TelemetryEventLogEntry_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(DoubleTag, None, DoubleEventLogEntry, nullptr, nullptr, NSLogEvents::DoubleEventLogEntry_Emit, NSLogEvents::DoubleEventLogEntry_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(StringTag, None, StringValueEventLogEntry, nullptr, NSLogEvents::StringValueEventLogEntry_UnloadEventMemory, NSLogEvents::StringValueEventLogEntry_Emit, NSLogEvents::StringValueEventLogEntry_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(RandomSeedTag, None, RandomSeedEventLogEntry, nullptr, nullptr, NSLogEvents::RandomSeedEventLogEntry_Emit, NSLogEvents::RandomSeedEventLogEntry_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(PropertyEnumTag, None, PropertyEnumStepEventLogEntry, nullptr, NSLogEvents::PropertyEnumStepEventLogEntry_UnloadEventMemory, NSLogEvents::PropertyEnumStepEventLogEntry_Emit, NSLogEvents::PropertyEnumStepEventLogEntry_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(SymbolCreationTag, None, SymbolCreationEventLogEntry, nullptr, nullptr, NSLogEvents::SymbolCreationEventLogEntry_Emit, NSLogEvents::SymbolCreationEventLogEntry_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(WeakCollectionContainsTag, None, WeakCollectionContainsEventLogEntry, nullptr, nullptr, NSLogEvents::WeakCollectionContainsEventLogEntry_Emit, NSLogEvents::WeakCollectionContainsEventLogEntry_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(ExternalCbRegisterCall, None, ExternalCbRegisterCallEventLogEntry, nullptr, nullptr, NSLogEvents::ExternalCbRegisterCallEventLogEntry_Emit, NSLogEvents::ExternalCbRegisterCallEventLogEntry_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(ExternalCallTag, None, ExternalCallEventLogEntry, nullptr, NSLogEvents::ExternalCallEventLogEntry_UnloadEventMemory, NSLogEvents::ExternalCallEventLogEntry_Emit, NSLogEvents::ExternalCallEventLogEntry_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(ExplicitLogWriteTag, None, ExplicitLogWriteEventLogEntry, nullptr, nullptr, NSLogEvents::ExplicitLogWriteEntry_Emit, NSLogEvents::ExplicitLogWriteEntry_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(TTDInnerLoopLogWriteTag, None, TTDInnerLoopLogWriteEventLogEntry, nullptr, nullptr, NSLogEvents::TTDInnerLoopLogWriteEventLogEntry_Emit, NSLogEvents::TTDInnerLoopLogWriteEventLogEntry_Parse);
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CreateScriptContextActionTag] = { NSLogEvents::ContextExecuteKind::GlobalAPIWrapper, NSLogEvents::CreateScriptContext_Execute, NSLogEvents::CreateScriptContext_UnloadEventMemory, NSLogEvents::CreateScriptContext_Emit, NSLogEvents::CreateScriptContext_Parse };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::SetActiveScriptContextActionTag] = { NSLogEvents::ContextExecuteKind::GlobalAPIWrapper, NSLogEvents::SetActiveScriptContext_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::SetActiveScriptContextActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::SetActiveScriptContextActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::DeadScriptContextActionTag] = { NSLogEvents::ContextExecuteKind::None, NSLogEvents::DeadScriptContext_Execute, NSLogEvents::DeadScriptContext_UnloadEventMemory, NSLogEvents::DeadScriptContext_Emit, NSLogEvents::DeadScriptContext_Parse };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(CreateScriptContextActionTag, GlobalAPIWrapper, JsRTCreateScriptContextAction, NSLogEvents::CreateScriptContext_Execute, NSLogEvents::CreateScriptContext_UnloadEventMemory, NSLogEvents::CreateScriptContext_Emit, NSLogEvents::CreateScriptContext_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(SetActiveScriptContextActionTag, GlobalAPIWrapper, JsRTSingleVarArgumentAction, SetActiveScriptContext_Execute);
 
 #if !INT32VAR
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CreateIntegerActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPINoScriptWrapper, NSLogEvents::CreateInt_Execute, nullptr, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Emit<NSLogEvents::EventKind::CreateIntegerActionTag>, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Parse<NSLogEvents::EventKind::CreateIntegerActionTag> };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(CreateIntegerActionTag, ContextAPINoScriptWrapper, JsRTIntegralArgumentAction, CreateInt_Execute);
 #endif
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CreateNumberActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPINoScriptWrapper, NSLogEvents::CreateNumber_Execute, nullptr, NSLogEvents::JsRTDoubleArgumentAction_Emit<NSLogEvents::EventKind::CreateNumberActionTag>, NSLogEvents::JsRTDoubleArgumentAction_Parse<NSLogEvents::EventKind::CreateNumberActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CreateBooleanActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPINoScriptWrapper, NSLogEvents::CreateBoolean_Execute, nullptr, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Emit<NSLogEvents::EventKind::CreateBooleanActionTag>, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Parse<NSLogEvents::EventKind::CreateBooleanActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CreateStringActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPINoScriptWrapper, NSLogEvents::CreateString_Execute, NSLogEvents::JsRTStringArgumentAction_UnloadEventMemory<NSLogEvents::EventKind::CreateStringActionTag>, NSLogEvents::JsRTStringArgumentAction_Emit<NSLogEvents::EventKind::CreateStringActionTag>, NSLogEvents::JsRTStringArgumentAction_Parse<NSLogEvents::EventKind::CreateStringActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CreateSymbolActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::CreateSymbol_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::CreateSymbolActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::CreateSymbolActionTag> };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(CreateNumberActionTag, ContextAPINoScriptWrapper, JsRTDoubleArgumentAction, NSLogEvents::CreateNumber_Execute, nullptr, NSLogEvents::JsRTDoubleArgumentAction_Emit<NSLogEvents::EventKind::CreateNumberActionTag>, NSLogEvents::JsRTDoubleArgumentAction_Parse<NSLogEvents::EventKind::CreateNumberActionTag>);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(CreateBooleanActionTag, ContextAPINoScriptWrapper, JsRTIntegralArgumentAction, CreateBoolean_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(CreateStringActionTag, ContextAPINoScriptWrapper, JsRTStringArgumentAction, NSLogEvents::CreateString_Execute, NSLogEvents::JsRTStringArgumentAction_UnloadEventMemory<NSLogEvents::EventKind::CreateStringActionTag>, NSLogEvents::JsRTStringArgumentAction_Emit<NSLogEvents::EventKind::CreateStringActionTag>, NSLogEvents::JsRTStringArgumentAction_Parse<NSLogEvents::EventKind::CreateStringActionTag>);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(CreateSymbolActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, CreateSymbol_Execute);
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CreateErrorActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::CreateError_Execute<NSLogEvents::EventKind::CreateErrorActionTag>, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::CreateErrorActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::CreateErrorActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CreateRangeErrorActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::CreateError_Execute<NSLogEvents::EventKind::CreateRangeErrorActionTag>, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::CreateRangeErrorActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::CreateRangeErrorActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CreateReferenceErrorActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::CreateError_Execute<NSLogEvents::EventKind::CreateReferenceErrorActionTag>, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::CreateReferenceErrorActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::CreateReferenceErrorActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CreateSyntaxErrorActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::CreateError_Execute<NSLogEvents::EventKind::CreateSyntaxErrorActionTag>, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::CreateSyntaxErrorActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::CreateSyntaxErrorActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CreateTypeErrorActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::CreateError_Execute<NSLogEvents::EventKind::CreateTypeErrorActionTag>, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::CreateTypeErrorActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::CreateTypeErrorActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CreateURIErrorActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::CreateError_Execute<NSLogEvents::EventKind::CreateURIErrorActionTag>, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::CreateURIErrorActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::CreateURIErrorActionTag> };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(CreateErrorActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, CreateError_Execute<NSLogEvents::EventKind::CreateErrorActionTag>);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(CreateRangeErrorActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, CreateError_Execute<NSLogEvents::EventKind::CreateRangeErrorActionTag>);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(CreateReferenceErrorActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, CreateError_Execute<NSLogEvents::EventKind::CreateReferenceErrorActionTag>);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(CreateSyntaxErrorActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, CreateError_Execute<NSLogEvents::EventKind::CreateSyntaxErrorActionTag>);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(CreateTypeErrorActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, CreateError_Execute<NSLogEvents::EventKind::CreateTypeErrorActionTag>);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(CreateURIErrorActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, CreateError_Execute<NSLogEvents::EventKind::CreateURIErrorActionTag>);
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::VarConvertToNumberActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::VarConvertToNumber_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::VarConvertToNumberActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::VarConvertToNumberActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::VarConvertToBooleanActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::VarConvertToBoolean_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::VarConvertToBooleanActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::VarConvertToBooleanActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::VarConvertToStringActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::VarConvertToString_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::VarConvertToStringActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::VarConvertToStringActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::VarConvertToObjectActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::VarConvertToObject_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::VarConvertToObjectActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::VarConvertToObjectActionTag> };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(VarConvertToNumberActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, VarConvertToNumber_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(VarConvertToBooleanActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, VarConvertToBoolean_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(VarConvertToStringActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, VarConvertToString_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(VarConvertToObjectActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, VarConvertToObject_Execute);
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::AddRootRefActionTag] = { NSLogEvents::ContextExecuteKind::GlobalAPIWrapper, NSLogEvents::AddRootRef_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::AddRootRefActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::AddRootRefActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::RemoveRootRefActionTag] = { NSLogEvents::ContextExecuteKind::GlobalAPIWrapper, NSLogEvents::RemoveRootRef_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::RemoveRootRefActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::RemoveRootRefActionTag> };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(AddRootRefActionTag, GlobalAPIWrapper, JsRTSingleVarArgumentAction, AddRootRef_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(AddWeakRootRefActionTag, GlobalAPIWrapper, JsRTSingleVarArgumentAction, AddWeakRootRef_Execute);
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::AllocateObjectActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPINoScriptWrapper, NSLogEvents::AllocateObject_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::AllocateObjectActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::AllocateObjectActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::AllocateExternalObjectActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPINoScriptWrapper, NSLogEvents::AllocateExternalObject_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::AllocateExternalObjectActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::AllocateExternalObjectActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::AllocateArrayActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPINoScriptWrapper, NSLogEvents::AllocateArrayAction_Execute, nullptr, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Emit<NSLogEvents::EventKind::AllocateArrayActionTag>, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Parse<NSLogEvents::EventKind::AllocateArrayActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::AllocateArrayBufferActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::AllocateArrayBufferAction_Execute, nullptr, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Emit<NSLogEvents::EventKind::AllocateArrayBufferActionTag>, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Parse<NSLogEvents::EventKind::AllocateArrayBufferActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::AllocateExternalArrayBufferActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPINoScriptWrapper, NSLogEvents::AllocateExternalArrayBufferAction_Execute, NSLogEvents::JsRTByteBufferAction_UnloadEventMemory<NSLogEvents::EventKind::AllocateExternalArrayBufferActionTag>, NSLogEvents::JsRTByteBufferAction_Emit<NSLogEvents::EventKind::AllocateExternalArrayBufferActionTag>, NSLogEvents::JsRTByteBufferAction_Parse<NSLogEvents::EventKind::AllocateExternalArrayBufferActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::AllocateFunctionActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::AllocateFunctionAction_Execute, nullptr, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Emit<NSLogEvents::EventKind::AllocateFunctionActionTag>, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Parse<NSLogEvents::EventKind::AllocateFunctionActionTag> };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(AllocateObjectActionTag, ContextAPINoScriptWrapper, JsRTResultOnlyAction, AllocateObject_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(AllocateExternalObjectActionTag, ContextAPINoScriptWrapper, JsRTSingleVarArgumentAction, AllocateExternalObject_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(AllocateArrayActionTag, ContextAPINoScriptWrapper, JsRTIntegralArgumentAction, AllocateArrayAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(AllocateArrayBufferActionTag, ContextAPIWrapper, JsRTIntegralArgumentAction, AllocateArrayBufferAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(AllocateExternalArrayBufferActionTag, ContextAPINoScriptWrapper, JsRTByteBufferAction, NSLogEvents::AllocateExternalArrayBufferAction_Execute, NSLogEvents::JsRTByteBufferAction_UnloadEventMemory<NSLogEvents::EventKind::AllocateExternalArrayBufferActionTag>, NSLogEvents::JsRTByteBufferAction_Emit<NSLogEvents::EventKind::AllocateExternalArrayBufferActionTag>, NSLogEvents::JsRTByteBufferAction_Parse<NSLogEvents::EventKind::AllocateExternalArrayBufferActionTag>);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(AllocateFunctionActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, AllocateFunctionAction_Execute);
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::HostExitProcessTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::HostProcessExitAction_Execute, nullptr, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Emit<NSLogEvents::EventKind::HostExitProcessTag>, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Parse<NSLogEvents::EventKind::HostExitProcessTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::GetAndClearExceptionActionTag] = { NSLogEvents::ContextExecuteKind::None, NSLogEvents::GetAndClearExceptionAction_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::GetAndClearExceptionActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::GetAndClearExceptionActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::SetExceptionActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPINoScriptWrapper, NSLogEvents::SetExceptionAction_Execute, nullptr, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Emit<NSLogEvents::EventKind::SetExceptionActionTag>, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Parse<NSLogEvents::EventKind::SetExceptionActionTag> };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(HostExitProcessTag, ContextAPIWrapper, JsRTIntegralArgumentAction, HostProcessExitAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(GetAndClearExceptionWithMetadataActionTag, None, JsRTResultOnlyAction, GetAndClearExceptionWithMetadataAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(GetAndClearExceptionActionTag, None, JsRTResultOnlyAction, GetAndClearExceptionAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(SetExceptionActionTag, ContextAPINoScriptWrapper, JsRTSingleVarScalarArgumentAction, SetExceptionAction_Execute);
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::HasPropertyActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::HasPropertyAction_Execute, nullptr, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Emit<NSLogEvents::EventKind::HasPropertyActionTag>, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Parse<NSLogEvents::EventKind::HasPropertyActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::InstanceOfActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::InstanceOfAction_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::InstanceOfActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::InstanceOfActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::EqualsActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::EqualsAction_Execute, nullptr, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Emit<NSLogEvents::EventKind::EqualsActionTag>, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Parse<NSLogEvents::EventKind::EqualsActionTag> };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(HasPropertyActionTag, ContextAPIWrapper, JsRTSingleVarScalarArgumentAction, HasPropertyAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(HasOwnPropertyActionTag, ContextAPIWrapper, JsRTSingleVarScalarArgumentAction, HasOwnPropertyAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(InstanceOfActionTag, ContextAPIWrapper, JsRTDoubleVarArgumentAction, InstanceOfAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(EqualsActionTag, ContextAPIWrapper, JsRTDoubleVarSingleScalarArgumentAction, EqualsAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(LessThanActionTag, ContextAPIWrapper, JsRTDoubleVarSingleScalarArgumentAction, LessThanAction_Execute);
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::GetPropertyIdFromSymbolTag] = { NSLogEvents::ContextExecuteKind::ContextAPINoScriptWrapper, NSLogEvents::GetPropertyIdFromSymbolAction_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::GetPropertyIdFromSymbolTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::GetPropertyIdFromSymbolTag> };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(GetPropertyIdFromSymbolTag, ContextAPINoScriptWrapper, JsRTSingleVarArgumentAction, GetPropertyIdFromSymbolAction_Execute);
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::GetPrototypeActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::GetPrototypeAction_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::GetPrototypeActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::GetPrototypeActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::GetPropertyActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::GetPropertyAction_Execute, nullptr, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Emit<NSLogEvents::EventKind::GetPropertyActionTag>, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Parse<NSLogEvents::EventKind::GetPropertyActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::GetIndexActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::GetIndexAction_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::GetIndexActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::GetIndexActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::GetOwnPropertyInfoActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::GetOwnPropertyInfoAction_Execute, nullptr, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Emit<NSLogEvents::EventKind::GetOwnPropertyInfoActionTag>, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Parse<NSLogEvents::EventKind::GetOwnPropertyInfoActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::GetOwnPropertyNamesInfoActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::GetOwnPropertyNamesInfoAction_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::GetOwnPropertyNamesInfoActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::GetOwnPropertyNamesInfoActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::GetOwnPropertySymbolsInfoActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::GetOwnPropertySymbolsInfoAction_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::GetOwnPropertySymbolsInfoActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::GetOwnPropertySymbolsInfoActionTag> };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(GetPrototypeActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, GetPrototypeAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(GetPropertyActionTag, ContextAPIWrapper, JsRTSingleVarScalarArgumentAction, GetPropertyAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(GetIndexActionTag, ContextAPIWrapper, JsRTDoubleVarArgumentAction, GetIndexAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(GetOwnPropertyInfoActionTag, ContextAPIWrapper, JsRTSingleVarScalarArgumentAction, GetOwnPropertyInfoAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(GetOwnPropertyNamesInfoActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, GetOwnPropertyNamesInfoAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(GetOwnPropertySymbolsInfoActionTag, ContextAPIWrapper, JsRTSingleVarArgumentAction, GetOwnPropertySymbolsInfoAction_Execute);
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::DefinePropertyActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::DefinePropertyAction_Execute, nullptr, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Emit<NSLogEvents::EventKind::DefinePropertyActionTag>, NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction_Parse<NSLogEvents::EventKind::DefinePropertyActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::DeletePropertyActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::DeletePropertyAction_Execute, nullptr, NSLogEvents::JsRTVarsWithBoolAndPIDArgumentAction_Emit<NSLogEvents::EventKind::DeletePropertyActionTag>, NSLogEvents::JsRTVarsWithBoolAndPIDArgumentAction_Parse<NSLogEvents::EventKind::DeletePropertyActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::SetPrototypeActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::SetPrototypeAction_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::SetPrototypeActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::SetPrototypeActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::SetPropertyActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::SetPropertyAction_Execute, nullptr, NSLogEvents::JsRTVarsWithBoolAndPIDArgumentAction_Emit<NSLogEvents::EventKind::SetPropertyActionTag>, NSLogEvents::JsRTVarsWithBoolAndPIDArgumentAction_Parse<NSLogEvents::EventKind::SetPropertyActionTag> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::SetIndexActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::SetIndexAction_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::SetIndexActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::SetIndexActionTag> };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(DefinePropertyActionTag, ContextAPIWrapper, JsRTDoubleVarSingleScalarArgumentAction, DefinePropertyAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(DeletePropertyActionTag, ContextAPIWrapper, JsRTSingleVarDoubleScalarArgumentAction, DeletePropertyAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(SetPrototypeActionTag, ContextAPIWrapper, JsRTDoubleVarArgumentAction, SetPrototypeAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(SetPropertyActionTag, ContextAPIWrapper, JsRTDoubleVarDoubleScalarArgumentAction, SetPropertyAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(SetIndexActionTag, ContextAPIWrapper, JsRTTrippleVarArgumentAction, SetIndexAction_Execute);
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::GetTypedArrayInfoActionTag] = { NSLogEvents::ContextExecuteKind::None, NSLogEvents::GetTypedArrayInfoAction_Execute, nullptr, NSLogEvents::JsRTVarsArgumentAction_Emit<NSLogEvents::EventKind::GetTypedArrayInfoActionTag>, NSLogEvents::JsRTVarsArgumentAction_Parse<NSLogEvents::EventKind::GetTypedArrayInfoActionTag> };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(GetTypedArrayInfoActionTag, None, JsRTSingleVarArgumentAction, GetTypedArrayInfoAction_Execute);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY_COMMON(GetDataViewInfoActionTag, None, JsRTSingleVarArgumentAction, GetDataViewInfoAction_Execute);
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::RawBufferCopySync] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::RawBufferCopySync_Execute, nullptr, NSLogEvents::JsRTRawBufferCopyAction_Emit, NSLogEvents::JsRTRawBufferCopyAction_Parse };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::RawBufferModifySync] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::RawBufferModifySync_Execute, NSLogEvents::JsRTRawBufferModifyAction_UnloadEventMemory<NSLogEvents::EventKind::RawBufferModifySync>, NSLogEvents::JsRTRawBufferModifyAction_Emit<NSLogEvents::EventKind::RawBufferModifySync>, NSLogEvents::JsRTRawBufferModifyAction_Parse<NSLogEvents::EventKind::RawBufferModifySync> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::RawBufferAsyncModificationRegister] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::RawBufferAsyncModificationRegister_Execute, NSLogEvents::JsRTRawBufferModifyAction_UnloadEventMemory<NSLogEvents::EventKind::RawBufferAsyncModificationRegister>, NSLogEvents::JsRTRawBufferModifyAction_Emit<NSLogEvents::EventKind::RawBufferAsyncModificationRegister>, NSLogEvents::JsRTRawBufferModifyAction_Parse<NSLogEvents::EventKind::RawBufferAsyncModificationRegister> };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::RawBufferAsyncModifyComplete] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::RawBufferAsyncModifyComplete_Execute, NSLogEvents::JsRTRawBufferModifyAction_UnloadEventMemory<NSLogEvents::EventKind::RawBufferAsyncModifyComplete>, NSLogEvents::JsRTRawBufferModifyAction_Emit<NSLogEvents::EventKind::RawBufferAsyncModifyComplete>, NSLogEvents::JsRTRawBufferModifyAction_Parse<NSLogEvents::EventKind::RawBufferAsyncModifyComplete> };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(RawBufferCopySync, ContextAPIWrapper, JsRTRawBufferCopyAction, NSLogEvents::RawBufferCopySync_Execute, nullptr, NSLogEvents::JsRTRawBufferCopyAction_Emit, NSLogEvents::JsRTRawBufferCopyAction_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(RawBufferModifySync, ContextAPIWrapper, JsRTRawBufferModifyAction, NSLogEvents::RawBufferModifySync_Execute, NSLogEvents::JsRTRawBufferModifyAction_UnloadEventMemory<NSLogEvents::EventKind::RawBufferModifySync>, NSLogEvents::JsRTRawBufferModifyAction_Emit<NSLogEvents::EventKind::RawBufferModifySync>, NSLogEvents::JsRTRawBufferModifyAction_Parse<NSLogEvents::EventKind::RawBufferModifySync>);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(RawBufferAsyncModificationRegister, ContextAPIWrapper, JsRTRawBufferModifyAction, NSLogEvents::RawBufferAsyncModificationRegister_Execute, NSLogEvents::JsRTRawBufferModifyAction_UnloadEventMemory<NSLogEvents::EventKind::RawBufferAsyncModificationRegister>, NSLogEvents::JsRTRawBufferModifyAction_Emit<NSLogEvents::EventKind::RawBufferAsyncModificationRegister>, NSLogEvents::JsRTRawBufferModifyAction_Parse<NSLogEvents::EventKind::RawBufferAsyncModificationRegister>);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(RawBufferAsyncModifyComplete, ContextAPIWrapper, JsRTRawBufferModifyAction, NSLogEvents::RawBufferAsyncModifyComplete_Execute, NSLogEvents::JsRTRawBufferModifyAction_UnloadEventMemory<NSLogEvents::EventKind::RawBufferAsyncModifyComplete>, NSLogEvents::JsRTRawBufferModifyAction_Emit<NSLogEvents::EventKind::RawBufferAsyncModifyComplete>, NSLogEvents::JsRTRawBufferModifyAction_Parse<NSLogEvents::EventKind::RawBufferAsyncModifyComplete>);
 
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::ConstructCallActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::JsRTConstructCallAction_Execute, NSLogEvents::JsRTConstructCallAction_UnloadEventMemory, NSLogEvents::JsRTConstructCallAction_Emit, NSLogEvents::JsRTConstructCallAction_Parse };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CallbackOpActionTag] = { NSLogEvents::ContextExecuteKind::None, NSLogEvents::JsRTCallbackAction_Execute, NSLogEvents::JsRTCallbackAction_UnloadEventMemory, NSLogEvents::JsRTCallbackAction_Emit, NSLogEvents::JsRTCallbackAction_Parse };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CodeParseActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPINoScriptWrapper, NSLogEvents::JsRTCodeParseAction_Execute, NSLogEvents::JsRTCodeParseAction_UnloadEventMemory, NSLogEvents::JsRTCodeParseAction_Emit, NSLogEvents::JsRTCodeParseAction_Parse };
-        this->m_eventListVTable[(uint32)NSLogEvents::EventKind::CallExistingFunctionActionTag] = { NSLogEvents::ContextExecuteKind::ContextAPIWrapper, NSLogEvents::JsRTCallFunctionAction_Execute, NSLogEvents::JsRTCallFunctionAction_UnloadEventMemory, NSLogEvents::JsRTCallFunctionAction_Emit, NSLogEvents::JsRTCallFunctionAction_Parse };
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(ConstructCallActionTag, ContextAPIWrapper, JsRTConstructCallAction, NSLogEvents::JsRTConstructCallAction_Execute, NSLogEvents::JsRTConstructCallAction_UnloadEventMemory, NSLogEvents::JsRTConstructCallAction_Emit, NSLogEvents::JsRTConstructCallAction_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(CodeParseActionTag, ContextAPINoScriptWrapper, JsRTCodeParseAction, NSLogEvents::JsRTCodeParseAction_Execute, NSLogEvents::JsRTCodeParseAction_UnloadEventMemory, NSLogEvents::JsRTCodeParseAction_Emit, NSLogEvents::JsRTCodeParseAction_Parse);
+        TTD_CREATE_EVENTLIST_VTABLE_ENTRY(CallExistingFunctionActionTag, ContextAPIWrapper, JsRTCallFunctionAction, NSLogEvents::JsRTCallFunctionAction_Execute, NSLogEvents::JsRTCallFunctionAction_UnloadEventMemory, NSLogEvents::JsRTCallFunctionAction_Emit, NSLogEvents::JsRTCallFunctionAction_Parse);
     }
 
     EventLog::EventLog(ThreadContext* threadContext)
         : m_threadContext(threadContext), m_eventSlabAllocator(TTD_SLAB_BLOCK_ALLOCATION_SIZE_MID), m_miscSlabAllocator(TTD_SLAB_BLOCK_ALLOCATION_SIZE_SMALL),
-        m_eventTimeCtr(0), m_timer(), m_runningFunctionTimeCtr(0), m_topLevelCallbackEventTime(-1), m_hostCallbackId(-1),
-        m_eventList(&this->m_eventSlabAllocator), m_eventListVTable(nullptr), m_currentReplayEventIterator(),
-        m_callStack(&HeapAllocator::Instance, 32), 
-        m_lastReturnLocation(), m_lastReturnLocationJMC(), m_breakOnFirstUserCode(false), m_pendingTTDBP(), m_activeBPId(-1), m_shouldRemoveWhenDone(false), m_activeTTDBP(), m_breakpointInfoList(&HeapAllocator::Instance), m_bpPreserveList(&HeapAllocator::Instance),
-#if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        m_diagnosticLogger(),
-#endif
+        m_eventTimeCtr(0), m_timer(), m_topLevelCallbackEventTime(-1),
+        m_eventListVTable(nullptr), m_eventList(&this->m_eventSlabAllocator), m_currentReplayEventIterator(),
         m_modeStack(), m_currentMode(TTDMode::Invalid),
         m_snapExtractor(), m_elapsedExecutionTimeSinceSnapshot(0.0),
         m_lastInflateSnapshotTime(-1), m_lastInflateMap(nullptr), m_propertyRecordList(&this->m_miscSlabAllocator),
-        m_loadedTopLevelScripts(&this->m_miscSlabAllocator), m_newFunctionTopLevelScripts(&this->m_miscSlabAllocator), m_evalTopLevelScripts(&this->m_miscSlabAllocator)
+        m_sourceInfoCount(0), m_loadedTopLevelScripts(&this->m_miscSlabAllocator), m_newFunctionTopLevelScripts(&this->m_miscSlabAllocator), m_evalTopLevelScripts(&this->m_miscSlabAllocator)
     {
         this->InitializeEventListVTable();
+        this->m_eventList.SetVTable(this->m_eventListVTable);
 
         this->m_modeStack.Push(TTDMode::Invalid);
 
@@ -647,24 +602,26 @@ namespace TTD
 
     EventLog::~EventLog()
     {
-        this->m_eventList.UnloadEventList(this->m_eventListVTable);
+        this->m_eventList.UnloadEventList();
 
-        this->UnloadRetainedData();
+        if(this->m_lastInflateMap != nullptr)
+        {
+            TT_HEAP_DELETE(InflateMap, this->m_lastInflateMap);
+            this->m_lastInflateMap = nullptr;
+        }
+
+        if(this->m_propertyRecordPinSet != nullptr)
+        {
+            this->m_propertyRecordPinSet.Unroot(this->m_propertyRecordPinSet->GetAllocator());
+        }
     }
 
     void EventLog::UnloadAllLogData()
     {
-        this->m_eventList.UnloadEventList(this->m_eventListVTable);
+        this->m_eventList.UnloadEventList();
     }
 
-#if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-    TraceLogger* EventLog::GetTraceLogger()
-    {
-        return &(this->m_diagnosticLogger);
-    }
-#endif
-
-    void EventLog::InitForTTDRecord()
+    void EventLog::InitForTTDRecord(bool debug)
     {
         //pin all the current properties so they don't move/disappear on us
         for(Js::PropertyId pid = TotalNumberOfBuiltInProperties; pid < this->m_threadContext->GetMaxPropertyId(); ++pid)
@@ -674,11 +631,21 @@ namespace TTD
         }
 
         this->SetGlobalMode(TTDMode::RecordMode);
+        if (debug)
+        {
+            this->PushMode(TTDMode::DebuggerAttachedMode);
+        }
     }
 
-    void EventLog::InitForTTDReplay(const IOStreamFunctions& iofp, size_t uriByteLength, const byte* uriBytes, bool debug)
+    void EventLog::InitForTTDReplay(TTDataIOInfo& iofp, const char* parseUri, size_t parseUriLength, bool debug)
     {
-        this->ParseLogInto(iofp, uriByteLength, uriBytes);
+        this->SetGlobalMode(TTDMode::ReplayMode);
+        if (debug)
+        {
+            this->PushMode(TTDMode::DebuggerAttachedMode);
+        }
+
+        this->ParseLogInto(iofp, parseUri, parseUriLength);
 
         Js::PropertyId maxPid = TotalNumberOfBuiltInProperties + 1;
         JsUtil::BaseDictionary<Js::PropertyId, NSSnapType::SnapPropertyRecord*, HeapAllocator> pidMap(&HeapAllocator::Instance);
@@ -699,20 +666,22 @@ namespace TTD
                 this->m_propertyRecordPinSet->AddNew(const_cast<Js::PropertyRecord*>(newPropertyRecord));
             }
         }
+    }
 
-        if(debug)
+    void EventLog::LoadLastSourceLineInfo(TTInnerLoopLastStatementInfo& lsi, TTD::TTDebuggerSourceLocation& dsl) const
+    {
+        auto iter = this->m_eventList.GetIteratorAtLast_ReplayOnly();
+        if(iter.IsValid() && iter.Current()->EventKind == NSLogEvents::EventKind::TTDInnerLoopLogWriteTag)
         {
-            this->SetGlobalMode(TTDMode::DebuggerMode);
-        }
-        else
-        {
-            this->SetGlobalMode(TTDMode::ReplayMode);
+            const NSLogEvents::TTDInnerLoopLogWriteEventLogEntry* ilevt = NSLogEvents::GetInlineEventDataAs<NSLogEvents::TTDInnerLoopLogWriteEventLogEntry, NSLogEvents::EventKind::TTDInnerLoopLogWriteTag>(iter.Current());
+            lsi.SetLastLine(ilevt->EventTime, ilevt->FunctionTime, ilevt->LoopTime, ilevt->Line, ilevt->Column);
+            dsl.SetLocationFullRaw(ilevt->SourceScriptLogId, ilevt->EventTime, ilevt->FunctionTime, ilevt->LoopTime, ilevt->TopLevelBodyId, ilevt->FunctionLine, ilevt->FunctionColumn, ilevt->Line, ilevt->Column);
         }
     }
 
     void EventLog::SetGlobalMode(TTDMode m)
     {
-        AssertMsg(m == TTDMode::RecordMode || m == TTDMode::ReplayMode || m == TTDMode::DebuggerMode, "These are the only valid global modes");
+        TTDAssert(m == TTDMode::RecordMode || m == TTDMode::ReplayMode, "These are the only valid global modes");
 
         this->m_modeStack.SetAt(0, m);
         this->UpdateComputedMode();
@@ -723,7 +692,7 @@ namespace TTD
         const JsUtil::List<Js::ScriptContext*, HeapAllocator>& contexts = this->m_threadContext->TTDContext->GetTTDContexts();
         for(int32 i = 0; i < contexts.Count(); ++i)
         {
-            AssertMsg(contexts.Item(i)->TTDSnapshotOrInflateInProgress != flag, "This is not re-entrant!!!");
+            TTDAssert(contexts.Item(i)->TTDSnapshotOrInflateInProgress != flag, "This is not re-entrant!!!");
 
             contexts.Item(i)->TTDSnapshotOrInflateInProgress = flag;
         }
@@ -731,7 +700,7 @@ namespace TTD
 
     void EventLog::PushMode(TTDMode m)
     {
-        AssertMsg(m == TTDMode::CurrentlyEnabled || m == TTDMode::ExcludedExecutionTTAction || m == TTDMode::ExcludedExecutionDebuggerAction || 
+        TTDAssert(m == TTDMode::DebuggerAttachedMode || m == TTDMode::CurrentlyEnabled || m == TTDMode::ExcludedExecutionTTAction || m == TTDMode::ExcludedExecutionDebuggerAction ||
             m == TTDMode::DebuggerSuppressGetter || m == TTDMode::DebuggerSuppressBreakpoints || m == TTDMode::DebuggerLogBreakpoints, "These are the only valid mode modifiers to push");
 
         this->m_modeStack.Push(m);
@@ -740,12 +709,17 @@ namespace TTD
 
     void EventLog::PopMode(TTDMode m)
     {
-        AssertMsg(m == TTDMode::CurrentlyEnabled || m == TTDMode::ExcludedExecutionTTAction || m == TTDMode::ExcludedExecutionDebuggerAction ||
+        TTDAssert(m == TTDMode::DebuggerAttachedMode || m == TTDMode::CurrentlyEnabled || m == TTDMode::ExcludedExecutionTTAction || m == TTDMode::ExcludedExecutionDebuggerAction ||
             m == TTDMode::DebuggerSuppressGetter || m == TTDMode::DebuggerSuppressBreakpoints || m == TTDMode::DebuggerLogBreakpoints, "These are the only valid mode modifiers to pop");
-        AssertMsg(this->m_modeStack.Peek() == m, "Push/Pop is not matched so something went wrong.");
+        TTDAssert(this->m_modeStack.Peek() == m, "Push/Pop is not matched so something went wrong.");
 
         this->m_modeStack.Pop();
         this->UpdateComputedMode();
+    }
+
+    TTDMode EventLog::GetCurrentTTDMode() const
+    {
+        return this->m_currentMode;
     }
 
     void EventLog::SetModeFlagsOnContext(Js::ScriptContext* ctx)
@@ -760,7 +734,10 @@ namespace TTD
         ctx->TTDShouldPerformReplayAction = (cm & (TTDMode::ReplayMode | TTDMode::CurrentlyEnabled | TTDMode::AnyExcludedMode)) == (TTDMode::ReplayMode | TTDMode::CurrentlyEnabled);
         ctx->TTDShouldPerformRecordOrReplayAction = (ctx->TTDShouldPerformRecordAction | ctx->TTDShouldPerformReplayAction);
 
-        ctx->TTDShouldPerformDebuggerAction = (cm & (TTDMode::DebuggerMode | TTDMode::CurrentlyEnabled | TTDMode::AnyExcludedMode)) == (TTDMode::DebuggerMode | TTDMode::CurrentlyEnabled);
+        ctx->TTDShouldPerformRecordDebuggerAction = (cm & (TTDMode::RecordDebuggerMode | TTDMode::CurrentlyEnabled | TTDMode::AnyExcludedMode)) == (TTDMode::RecordDebuggerMode | TTDMode::CurrentlyEnabled);
+        ctx->TTDShouldPerformReplayDebuggerAction = (cm & ( TTDMode::ReplayDebuggerMode | TTDMode::CurrentlyEnabled | TTDMode::AnyExcludedMode)) == (TTDMode::ReplayDebuggerMode | TTDMode::CurrentlyEnabled);
+        ctx->TTDShouldPerformRecordOrReplayDebuggerAction = (ctx->TTDShouldPerformRecordDebuggerAction | ctx->TTDShouldPerformReplayDebuggerAction);
+
         ctx->TTDShouldSuppressGetterInvocationForDebuggerEvaluation = (cm & TTDMode::DebuggerSuppressGetter) == TTDMode::DebuggerSuppressGetter;
     }
 
@@ -773,22 +750,7 @@ namespace TTD
 
     bool EventLog::IsDebugModeFlagSet() const
     {
-        return (this->m_currentMode & TTDMode::DebuggerMode) == TTDMode::DebuggerMode;
-    }
-
-    bool EventLog::ShouldDoGetterInvocationSupression() const
-    {
-        return (this->m_currentMode & TTD::TTDMode::DebuggerMode) == TTD::TTDMode::DebuggerMode;
-    }
-
-    bool EventLog::ShouldSuppressBreakpointsForTimeTravelMove() const
-    {
-        return (this->m_currentMode & TTD::TTDMode::DebuggerSuppressBreakpoints) == TTD::TTDMode::DebuggerSuppressBreakpoints;
-    }
-
-    bool EventLog::ShouldRecordBreakpointsDuringTimeTravelScan() const
-    {
-        return (this->m_currentMode & TTD::TTDMode::DebuggerLogBreakpoints) == TTD::TTDMode::DebuggerLogBreakpoints;
+        return (this->m_currentMode & TTDMode::DebuggerAttachedMode) == TTDMode::DebuggerAttachedMode;
     }
 
     void EventLog::AddPropertyRecord(const Js::PropertyRecord* record)
@@ -796,13 +758,14 @@ namespace TTD
         this->m_propertyRecordPinSet->AddNew(const_cast<Js::PropertyRecord*>(record));
     }
 
-    const NSSnapValues::TopLevelScriptLoadFunctionBodyResolveInfo* EventLog::AddScriptLoad(Js::FunctionBody* fb, Js::ModuleID moduleId, DWORD_PTR documentID, const byte* source, uint32 sourceLen, LoadScriptFlag loadFlag)
+    const NSSnapValues::TopLevelScriptLoadFunctionBodyResolveInfo* EventLog::AddScriptLoad(Js::FunctionBody* fb, Js::ModuleID moduleId, uint64 sourceContextId, const byte* source, uint32 sourceLen, LoadScriptFlag loadFlag)
     {
         NSSnapValues::TopLevelScriptLoadFunctionBodyResolveInfo* fbInfo = this->m_loadedTopLevelScripts.NextOpenEntry();
-        uint64 fCount = (this->m_loadedTopLevelScripts.Count() + this->m_newFunctionTopLevelScripts.Count() + this->m_evalTopLevelScripts.Count());
+        uint32 fCount = (this->m_loadedTopLevelScripts.Count() + this->m_newFunctionTopLevelScripts.Count() + this->m_evalTopLevelScripts.Count());
         bool isUtf8 = ((loadFlag & LoadScriptFlag_Utf8Source) == LoadScriptFlag_Utf8Source);
 
-        NSSnapValues::ExtractTopLevelLoadedFunctionBodyInfo(fbInfo, fb, fCount, moduleId, documentID, isUtf8, source, sourceLen, loadFlag, this->m_miscSlabAllocator);
+        NSSnapValues::ExtractTopLevelLoadedFunctionBodyInfo(fbInfo, fb, fCount, moduleId, sourceContextId, isUtf8, source, sourceLen, loadFlag, this->m_miscSlabAllocator);
+        this->m_sourceInfoCount = max(this->m_sourceInfoCount, fb->GetUtf8SourceInfo()->GetSourceInfoId() + 1);
 
         return fbInfo;
     }
@@ -810,9 +773,10 @@ namespace TTD
     const NSSnapValues::TopLevelNewFunctionBodyResolveInfo* EventLog::AddNewFunction(Js::FunctionBody* fb, Js::ModuleID moduleId, const char16* source, uint32 sourceLen)
     {
         NSSnapValues::TopLevelNewFunctionBodyResolveInfo* fbInfo = this->m_newFunctionTopLevelScripts.NextOpenEntry();
-        uint64 fCount = (this->m_loadedTopLevelScripts.Count() + this->m_newFunctionTopLevelScripts.Count() + this->m_evalTopLevelScripts.Count());
+        uint32 fCount = (this->m_loadedTopLevelScripts.Count() + this->m_newFunctionTopLevelScripts.Count() + this->m_evalTopLevelScripts.Count());
 
         NSSnapValues::ExtractTopLevelNewFunctionBodyInfo(fbInfo, fb, fCount, moduleId, source, sourceLen, this->m_miscSlabAllocator);
+        this->m_sourceInfoCount = max(this->m_sourceInfoCount, fb->GetUtf8SourceInfo()->GetSourceInfoId() + 1);
 
         return fbInfo;
     }
@@ -820,20 +784,26 @@ namespace TTD
     const NSSnapValues::TopLevelEvalFunctionBodyResolveInfo* EventLog::AddEvalFunction(Js::FunctionBody* fb, Js::ModuleID moduleId, const char16* source, uint32 sourceLen, uint32 grfscr, bool registerDocument, BOOL isIndirect, BOOL strictMode)
     {
         NSSnapValues::TopLevelEvalFunctionBodyResolveInfo* fbInfo = this->m_evalTopLevelScripts.NextOpenEntry();
-        uint64 fCount = (this->m_loadedTopLevelScripts.Count() + this->m_newFunctionTopLevelScripts.Count() + this->m_evalTopLevelScripts.Count());
+        uint32 fCount = (this->m_loadedTopLevelScripts.Count() + this->m_newFunctionTopLevelScripts.Count() + this->m_evalTopLevelScripts.Count());
 
         NSSnapValues::ExtractTopLevelEvalFunctionBodyInfo(fbInfo, fb, fCount, moduleId, source, sourceLen, grfscr, registerDocument, isIndirect, strictMode, this->m_miscSlabAllocator);
+        this->m_sourceInfoCount = max(this->m_sourceInfoCount, fb->GetUtf8SourceInfo()->GetSourceInfoId() + 1);
 
         return fbInfo;
     }
 
-    void EventLog::RecordTopLevelCodeAction(uint64 bodyCtrId)
+    uint32 EventLog::GetSourceInfoCount() const
+    {
+        return this->m_sourceInfoCount;
+    }
+
+    void EventLog::RecordTopLevelCodeAction(uint32 bodyCtrId)
     {
         NSLogEvents::CodeLoadEventLogEntry* clEvent = this->RecordGetInitializedEvent_DataOnly<NSLogEvents::CodeLoadEventLogEntry, NSLogEvents::EventKind::TopLevelCodeTag>();
         clEvent->BodyCounterId = bodyCtrId;
     }
 
-    uint64 EventLog::ReplayTopLevelCodeAction()
+    uint32 EventLog::ReplayTopLevelCodeAction()
     {
         const NSLogEvents::CodeLoadEventLogEntry* clEvent = this->ReplayGetReplayEvent_Helper<NSLogEvents::CodeLoadEventLogEntry, NSLogEvents::EventKind::TopLevelCodeTag>();
 
@@ -847,7 +817,7 @@ namespace TTD
         tEvent->DoPrint = doPrint;
 
 #if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.ForceFlush();
+        this->m_threadContext->TTDExecutionInfo->GetTraceLogger()->ForceFlush();
 #endif
     }
 
@@ -863,9 +833,9 @@ namespace TTD
 
         if(tEvent->InfoString.Length != infoStrLength)
         {
-            wprintf(_u("New Telemetry Msg: %ls\n"), infoStr);
-            wprintf(_u("Original Telemetry Msg: %ls\n"), tEvent->InfoString.Contents);
-            AssertMsg(false, "Telemetry messages differ??");
+            Output::Print(_u("New Telemetry Msg: %ls\n"), infoStr);
+            Output::Print(_u("Original Telemetry Msg: %ls\n"), tEvent->InfoString.Contents);
+            TTDAssert(false, "Telemetry messages differ??");
         }
         else
         {
@@ -873,9 +843,9 @@ namespace TTD
             {
                 if(tEvent->InfoString.Contents[i] != infoStr[i])
                 {
-                    wprintf(_u("New Telemetry Msg: %ls\n"), infoStr);
-                    wprintf(_u("Original Telemetry Msg: %ls\n"), tEvent->InfoString.Contents);
-                    AssertMsg(false, "Telemetry messages differ??");
+                    Output::Print(_u("New Telemetry Msg: %ls\n"), infoStr);
+                    Output::Print(_u("Original Telemetry Msg: %ls\n"), tEvent->InfoString.Contents);
+                    TTDAssert(false, "Telemetry messages differ??");
 
                     break;
                 }
@@ -884,8 +854,29 @@ namespace TTD
 #endif
 
 #if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.ForceFlush();
+        this->m_threadContext->TTDExecutionInfo->GetTraceLogger()->ForceFlush();
 #endif
+    }
+
+    void EventLog::RecordEmitLogEvent(Js::JavascriptString* uriString)
+    {
+        this->RecordGetInitializedEvent_DataOnly<NSLogEvents::ExplicitLogWriteEventLogEntry, NSLogEvents::EventKind::ExplicitLogWriteTag>();
+
+        AutoArrayPtr<char> uri(HeapNewArrayZ(char, uriString->GetLength() * 3), uriString->GetLength() * 3);
+        size_t uriLength = utf8::EncodeInto((LPUTF8)((char*)uri), uriString->GetSz(), uriString->GetLength());
+
+        this->EmitLog(uri, uriLength);
+    }
+
+    void EventLog::ReplayEmitLogEvent()
+    {
+        this->ReplayGetReplayEvent_Helper<NSLogEvents::ExplicitLogWriteEventLogEntry, NSLogEvents::EventKind::ExplicitLogWriteTag>();
+
+        //check if at end of log -- if so we are done and don't want to execute any more
+        if(!this->m_currentReplayEventIterator.IsValid())
+        {
+            this->AbortReplayReturnToHost();
+        }
     }
 
     void EventLog::RecordDateTimeEvent(double time)
@@ -930,6 +921,12 @@ namespace TTD
 
     void EventLog::RecordPropertyEnumEvent(BOOL returnCode, Js::PropertyId pid, Js::PropertyAttributes attributes, Js::JavascriptString* propertyName)
     {
+        //When we replay we can just skip this pid cause it should never matter -- but if return code is false then we need to record the "at end" info
+        if(returnCode && Js::IsInternalPropertyId(pid))
+        {
+            return;
+        }
+
         NSLogEvents::PropertyEnumStepEventLogEntry* peEvent = this->RecordGetInitializedEvent_DataOnly<NSLogEvents::PropertyEnumStepEventLogEntry, NSLogEvents::EventKind::PropertyEnumTag>();
         peEvent->ReturnCode = returnCode;
         peEvent->Pid = pid;
@@ -949,7 +946,7 @@ namespace TTD
 #endif
 
 #if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.WriteEnumAction(this->m_eventTimeCtr - 1, returnCode, pid, attributes, propertyName);
+        this->m_threadContext->TTDExecutionInfo->GetTraceLogger()->WriteEnumAction(this->m_eventTimeCtr - 1, returnCode, pid, attributes, propertyName);
 #endif
     }
 
@@ -963,14 +960,16 @@ namespace TTD
 
         if(*returnCode)
         {
-            AssertMsg(*pid != Js::Constants::NoProperty, "This is so weird we need to figure out what this means.");
+            TTDAssert(*pid != Js::Constants::NoProperty, "This is so weird we need to figure out what this means.");
+            TTDAssert(!Js::IsInternalPropertyId(*pid), "We should skip recording this.");
+
             Js::PropertyString* propertyString = requestContext->GetPropertyString(*pid);
             *propertyName = propertyString;
 
             const Js::PropertyRecord* pRecord = requestContext->GetPropertyName(*pid);
             *newIndex = obj->GetDynamicType()->GetTypeHandler()->GetPropertyIndex_EnumerateTTD(pRecord);
 
-            AssertMsg(*newIndex != Js::Constants::NoBigSlot, "If *returnCode is true then we found it during record -- but missing in replay.");
+            TTDAssert(*newIndex != Js::Constants::NoBigSlot, "If *returnCode is true then we found it during record -- but missing in replay.");
         }
         else
         {
@@ -980,7 +979,7 @@ namespace TTD
         }
 
 #if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.WriteEnumAction(this->m_eventTimeCtr - 1, *returnCode, *pid, *attributes, *propertyName);
+        this->m_threadContext->TTDExecutionInfo->GetTraceLogger()->WriteEnumAction(this->m_eventTimeCtr - 1, *returnCode, *pid, *attributes, *propertyName);
 #endif
     }
 
@@ -996,7 +995,19 @@ namespace TTD
         *pid = scEvent->Pid;
     }
 
-    NSLogEvents::EventLogEntry* EventLog::RecordExternalCallEvent(Js::JavascriptFunction* func, int32 rootDepth, uint32 argc, Js::Var* argv, bool checkExceptions)
+    void EventLog::RecordWeakCollectionContainsEvent(bool contains)
+    {
+        NSLogEvents::WeakCollectionContainsEventLogEntry* wcEvent = this->RecordGetInitializedEvent_DataOnly<NSLogEvents::WeakCollectionContainsEventLogEntry, NSLogEvents::EventKind::WeakCollectionContainsTag>();
+        wcEvent->ContainsValue = contains;
+    }
+
+    bool EventLog::ReplayWeakCollectionContainsEvent()
+    {
+        const NSLogEvents::WeakCollectionContainsEventLogEntry* wcEvent = this->ReplayGetReplayEvent_Helper<NSLogEvents::WeakCollectionContainsEventLogEntry, NSLogEvents::EventKind::WeakCollectionContainsTag>();
+        return wcEvent->ContainsValue;
+    }
+
+    NSLogEvents::EventLogEntry* EventLog::RecordExternalCallEvent(Js::JavascriptFunction* func, int32 rootDepth, const Js::Arguments& args, bool checkExceptions)
     {
         NSLogEvents::ExternalCallEventLogEntry* ecEvent = nullptr;
         NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::ExternalCallEventLogEntry, NSLogEvents::EventKind::ExternalCallTag>(&ecEvent);
@@ -1004,14 +1015,14 @@ namespace TTD
         //We never fail with an exception (instead we set the HasRecordedException in script context)
         evt->ResultStatus = 0;
 
-        NSLogEvents::ExternalCallEventLogEntry_ProcessArgs(evt, rootDepth, func, argc, argv, checkExceptions, this->m_timer.Now(), this->m_eventSlabAllocator);
+        NSLogEvents::ExternalCallEventLogEntry_ProcessArgs(evt, rootDepth, func, args, checkExceptions, this->m_eventSlabAllocator);
 
 #if ENABLE_TTD_INTERNAL_DIAGNOSTICS
         NSLogEvents::ExternalCallEventLogEntry_ProcessDiagInfoPre(evt, func, this->m_eventSlabAllocator);
 #endif
 
 #if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.WriteCall(func, true, argc, argv, this->GetLastEventTime());
+        this->m_threadContext->TTDExecutionInfo->GetTraceLogger()->WriteCall(func, true, argc, argv, this->GetLastEventTime());
 #endif
 
         return evt;
@@ -1019,56 +1030,73 @@ namespace TTD
 
     void EventLog::RecordExternalCallEvent_Complete(Js::JavascriptFunction* efunction, NSLogEvents::EventLogEntry* evt, Js::Var result)
     {
-        NSLogEvents::ExternalCallEventLogEntry_ProcessReturn(evt, result, this->GetLastEventTime(), this->m_timer.Now());
+        NSLogEvents::ExternalCallEventLogEntry_ProcessReturn(evt, result, this->GetLastEventTime());
 
 #if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.WriteReturn(efunction, result, this->GetLastEventTime());
+        this->m_threadContext->TTDExecutionInfo->GetTraceLogger()->WriteReturn(efunction, result, this->GetLastEventTime());
 #endif
     }
 
-    void EventLog::ReplayExternalCallEvent(Js::JavascriptFunction* function, uint32 argc, Js::Var* argv, Js::Var* result)
+    void EventLog::ReplayExternalCallEvent(Js::JavascriptFunction* function, const Js::Arguments& args, Js::Var* result)
     {
+        TTDAssert(result != nullptr, "Must be non-null!!!");
+        TTDAssert(*result == nullptr, "And initialized to a default value.");
+
         const NSLogEvents::ExternalCallEventLogEntry* ecEvent = this->ReplayGetReplayEvent_Helper<NSLogEvents::ExternalCallEventLogEntry, NSLogEvents::EventKind::ExternalCallTag>();
 
         Js::ScriptContext* ctx = function->GetScriptContext();
+        TTDAssert(ctx != nullptr, "Not sure how this would be possible but check just in case.");
+
         ThreadContextTTD* executeContext = ctx->GetThreadContext()->TTDContext;
 
 #if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.WriteCall(function, true, argc, argv, this->GetLastEventTime());
+        this->m_threadContext->TTDExecutionInfo->GetTraceLogger()->WriteCall(function, true, argc, argv, this->GetLastEventTime());
 #endif
 
         //make sure we log all of the passed arguments in the replay host
-        AssertMsg(argc + 1 == ecEvent->ArgCount, "Mismatch in args!!!");
+        TTDAssert(args.Info.Count + 1 == ecEvent->ArgCount, "Mismatch in args!!!");
 
         TTDVar recordedFunction = ecEvent->ArgArray[0];
         NSLogEvents::PassVarToHostInReplay(executeContext, recordedFunction, function);
 
-        for(uint32 i = 0; i < argc; ++i)
+        for(uint32 i = 0; i < args.Info.Count; ++i)
         {
-            Js::Var replayVar = argv[i];
+            Js::Var replayVar = args.Values[i];
             TTDVar recordedVar = ecEvent->ArgArray[i + 1];
             NSLogEvents::PassVarToHostInReplay(executeContext, recordedVar, replayVar);
+        }
+
+        if (args.HasNewTarget())
+        {
+            TTDAssert(ecEvent->NewTarget != nullptr, "Mismatch in new.target!!!");
+            Js::Var replayVar = args.GetNewTarget();
+            TTDVar recordedVar = ecEvent->NewTarget;
+            NSLogEvents::PassVarToHostInReplay(executeContext, recordedVar, replayVar);
+        }
+        else
+        {
+            TTDAssert(ecEvent->NewTarget == nullptr, "Mismatch in new.target!!!");
         }
 
         //replay anything that happens in the external call
         BEGIN_LEAVE_SCRIPT(ctx)
         {
-            this->ReplayActionEventSequenceThroughTime(ecEvent->AdditionalInfo->LastNestedEventTime);
+            this->ReplayActionEventSequenceThroughTime(ecEvent->LastNestedEventTime);
         }
         END_LEAVE_SCRIPT(ctx);
 
 #if ENABLE_TTD_INTERNAL_DIAGNOSTICS
-        AssertMsg(!this->m_currentReplayEventIterator.IsValid() || this->m_currentReplayEventIterator.Current()->EventTimeStamp == this->m_eventTimeCtr, "Out of Sync!!!");
+        TTDAssert(!this->m_currentReplayEventIterator.IsValid() || this->m_currentReplayEventIterator.Current()->EventTimeStamp == this->m_eventTimeCtr, "Out of Sync!!!");
 #endif
 
         *result = NSLogEvents::InflateVarInReplay(executeContext, ecEvent->ReturnValue);
 
 #if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.WriteReturn(function, *result, this->GetLastEventTime());
+        this->m_threadContext->TTDExecutionInfo->GetTraceLogger()->WriteReturn(function, *result, this->GetLastEventTime());
 #endif
 
         //if we had exception info then we need to patch it up and do what the external call did
-        if(ecEvent->AdditionalInfo->CheckExceptionStatus)
+        if(ecEvent->CheckExceptionStatus)
         {
             if(ctx->HasRecordedException())
             {
@@ -1089,7 +1117,7 @@ namespace TTD
             }
         }
 
-        if(result == nullptr)
+        if(*result == nullptr)
         {
             *result = ctx->GetLibrary()->GetUndefined();
         }
@@ -1108,8 +1136,8 @@ namespace TTD
         ecEvent->LastNestedEventTime = TTD_EVENT_MAXTIME;
 
 #if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.WriteLiteralMsg("Enqueue Task: ");
-        this->m_diagnosticLogger.WriteVar(taskVar);
+        this->m_threadContext->TTDExecutionInfo->GetTraceLogger()->WriteLiteralMsg("Enqueue Task: ");
+        this->m_threadContext->TTDExecutionInfo->GetTraceLogger()->WriteVar(taskVar);
 #endif
 
         return evt;
@@ -1137,572 +1165,38 @@ namespace TTD
         END_LEAVE_SCRIPT(ctx);
     }
 
-    void EventLog::PushCallEvent(Js::JavascriptFunction* function, uint32 argc, Js::Var* argv, bool isInFinally)
-    {
-        //Clear any previous last return frame info
-        this->m_lastReturnLocation.ClearReturnOnly();
-        if(EventLog::IsFunctionJustMyCode(function))
-        {
-            this->m_lastReturnLocationJMC.ClearReturnOnly();
-        }
-
-        this->m_runningFunctionTimeCtr++;
-
-        SingleCallCounter cfinfo;
-        cfinfo.Function = function->GetFunctionBody();
-
-#if ENABLE_TTD_INTERNAL_DIAGNOSTICS
-        cfinfo.Name = cfinfo.Function->GetExternalDisplayName();
-#endif
-
-        cfinfo.EventTime = this->m_eventTimeCtr; //don't need to advance just note what the event time was when this is called
-        cfinfo.FunctionTime = this->m_runningFunctionTimeCtr;
-        cfinfo.LoopTime = 0;
-
-        cfinfo.CurrentStatementIndex = -1;
-        cfinfo.CurrentStatementLoopTime = 0;
-
-        cfinfo.LastStatementIndex = -1;
-        cfinfo.LastStatementLoopTime = 0;
-
-        cfinfo.CurrentStatementBytecodeMin = UINT32_MAX;
-        cfinfo.CurrentStatementBytecodeMax = UINT32_MAX;
-
-        this->m_callStack.Add(cfinfo);
-
-        ////
-        //If we are running for debugger then check if we need to set a breakpoint at entry to the first function we execute
-        Js::FunctionBody* functionBody = function->GetFunctionBody();
-        Js::Utf8SourceInfo* utf8SourceInfo = functionBody->GetUtf8SourceInfo();
-
-        if(this->m_breakOnFirstUserCode && EventLog::IsFunctionJustMyCode(function))
-        {
-            this->m_breakOnFirstUserCode = false;
-
-            Js::DebugDocument* debugDocument = utf8SourceInfo->GetDebugDocument();
-            if(debugDocument != nullptr && SUCCEEDED(utf8SourceInfo->EnsureLineOffsetCacheNoThrow()))
-            {
-                ULONG lineNumber = functionBody->GetLineNumber();
-                ULONG columnNumber = functionBody->GetColumnNumber();
-                uint startOffset = functionBody->GetStatementStartOffset(0);
-                ULONG firstStatementLine;
-                LONG firstStatementColumn;
-
-                functionBody->GetLineCharOffsetFromStartChar(startOffset, &firstStatementLine, &firstStatementColumn);
-
-                charcount_t charPosition = 0;
-                charcount_t byteOffset = 0;
-                utf8SourceInfo->GetCharPositionForLineInfo(lineNumber, &charPosition, &byteOffset);
-                long ibos = charPosition + columnNumber + 1;
-
-                Js::StatementLocation statement;
-                debugDocument->GetStatementLocation(ibos, &statement);
-
-                // Don't see a use case for supporting multiple breakpoints at same location.
-                // If a breakpoint already exists, just return that
-                Js::BreakpointProbe* probe = debugDocument->FindBreakpoint(statement);
-                bool isNewBP = (probe == nullptr);
-
-                if(probe == nullptr)
-                {
-                    probe = debugDocument->SetBreakPoint(statement, BREAKPOINT_ENABLED);
-                }
-
-                TTDebuggerSourceLocation bpLocation;
-                bpLocation.SetLocation(-1, -1, -1, cfinfo.Function, firstStatementLine, firstStatementColumn);
-
-                function->GetScriptContext()->GetThreadContext()->TTDLog->SetActiveBP(probe->GetId(), isNewBP, bpLocation);
-            }
-        }
-        ////
-
-#if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.WriteCall(function, false, argc, argv, this->m_eventTimeCtr);
-#endif
-    }
-
-    void EventLog::PopCallEvent(Js::JavascriptFunction* function, Js::Var result)
-    {
-        this->m_lastReturnLocation.SetReturnLocation(this->m_callStack.Last());
-        if(EventLog::IsFunctionJustMyCode(function))
-        {
-            this->m_lastReturnLocationJMC.SetReturnLocation(this->m_callStack.Last());
-        }
-
-        this->m_runningFunctionTimeCtr++;
-        this->m_callStack.RemoveAtEnd();
-
-#if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.WriteReturn(function, result, this->m_eventTimeCtr);
-#endif
-    }
-
-    void EventLog::PopCallEventException(Js::JavascriptFunction* function)
-    {
-        //If we already have the last return as an exception then just leave it.
-        //That is where the exception was first rasied, this return is just propagating it in this return.
-
-        if(!this->m_lastReturnLocation.IsExceptionLocation())
-        {
-            this->m_lastReturnLocation.SetExceptionLocation(this->m_callStack.Last());
-        }
-
-        if(EventLog::IsFunctionJustMyCode(function) && !this->m_lastReturnLocationJMC.IsExceptionLocation())
-        {
-            this->m_lastReturnLocationJMC.SetExceptionLocation(this->m_callStack.Last());
-        }
-
-        this->m_runningFunctionTimeCtr++;
-        this->m_callStack.RemoveAtEnd();
-
-#if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.WriteReturnException(function, this->m_eventTimeCtr);
-#endif
-    }
-
-    void EventLog::ClearExceptionFrames()
-    {
-        this->m_lastReturnLocation.Clear();
-        this->m_lastReturnLocationJMC.Clear();
-    }
-
-    void EventLog::SetBreakOnFirstUserCode()
-    {
-        this->m_breakOnFirstUserCode = true;
-    }
-
-    bool EventLog::HasPendingTTDBP() const
-    {
-        return this->m_pendingTTDBP.HasValue();
-    }
-
-    int64 EventLog::GetPendingTTDBPTargetEventTime() const
-    {
-        return this->m_pendingTTDBP.GetRootEventTime();
-    }
-
-    void EventLog::GetPendingTTDBPInfo(TTDebuggerSourceLocation& BPLocation) const
-    {
-        BPLocation.SetLocation(this->m_pendingTTDBP);
-    }
-
-    void EventLog::ClearPendingTTDBPInfo()
-    {
-        this->m_pendingTTDBP.Clear();
-    }
-
-    void EventLog::SetPendingTTDBPInfo(const TTDebuggerSourceLocation& BPLocation)
-    {
-        this->m_pendingTTDBP.SetLocation(BPLocation);
-    }
-
-    bool EventLog::HasActiveBP() const
-    {
-        return this->m_activeBPId != -1;
-    }
-
-    UINT EventLog::GetActiveBPId() const
-    {
-        AssertMsg(this->HasActiveBP(), "Should check this first!!!");
-
-        return (UINT)this->m_activeBPId;
-    }
-
-    void EventLog::ClearActiveBP()
-    {
-        this->m_activeBPId = -1;
-        this->m_shouldRemoveWhenDone = false;
-        this->m_activeTTDBP.Clear();
-    }
-
-    void EventLog::SetActiveBP(UINT bpId, bool isNewBP, const TTDebuggerSourceLocation& bpLocation)
-    {
-        this->m_activeBPId = bpId;
-        this->m_shouldRemoveWhenDone = isNewBP;
-        this->m_activeTTDBP.SetLocation(bpLocation);
-    }
-
-    bool EventLog::ProcessBPInfoPreBreak(Js::FunctionBody* fb)
-    {
-        //if we aren't in debug mode then we always trigger BP's
-        if(!fb->GetScriptContext()->ShouldPerformDebuggerAction())
-        {
-            return true;
-        }
-
-        //If we are in debugger mode but are suppressing BP's for movement then suppress them
-        if(this->ShouldSuppressBreakpointsForTimeTravelMove())
-        {
-            //Check if we need to record the visit to this bp
-            if(this->ShouldRecordBreakpointsDuringTimeTravelScan())
-            {
-                this->AddCurrentLocationDuringScan();
-            }
-
-            return false;
-        }
-
-        //If we are in debug mode and don't have an active BP target then we treat BP's as usual
-        if(!this->HasActiveBP())
-        {
-            return true;
-        }
-
-        //Finally we are in debug mode and we have an active BP target so only break if the BP is satisfied
-        const SingleCallCounter& cfinfo = this->GetTopCallCounter();
-        ULONG srcLine = 0;
-        LONG srcColumn = -1;
-        uint32 startOffset = cfinfo.Function->GetStatementStartOffset(cfinfo.CurrentStatementIndex);
-        cfinfo.Function->GetSourceLineFromStartOffset_TTD(startOffset, &srcLine, &srcColumn);
-
-        bool locationOk = ((uint32)srcLine == this->m_activeTTDBP.GetLine()) & ((uint32)srcColumn == this->m_activeTTDBP.GetColumn());
-        bool ftimeOk = (this->m_activeTTDBP.GetFunctionTime() == -1) | ((uint64)this->m_activeTTDBP.GetFunctionTime() == cfinfo.FunctionTime);
-        bool ltimeOk = (this->m_activeTTDBP.GetLoopTime() == -1) | ((uint64)this->m_activeTTDBP.GetLoopTime() == cfinfo.CurrentStatementLoopTime);
-
-        return locationOk & ftimeOk & ltimeOk;
-    }
-
-    void EventLog::ProcessBPInfoPostBreak(Js::FunctionBody* fb)
-    {
-        if(!fb->GetScriptContext()->ShouldPerformDebuggerAction())
-        {
-            return;
-        }
-
-        if(this->HasActiveBP())
-        {
-            Js::DebugDocument* debugDocument = fb->GetUtf8SourceInfo()->GetDebugDocument();
-            Js::StatementLocation statement;
-            if(this->m_shouldRemoveWhenDone && debugDocument->FindBPStatementLocation(this->GetActiveBPId(), &statement))
-            {
-                debugDocument->SetBreakPoint(statement, BREAKPOINT_DELETED);
-            }
-
-            this->ClearActiveBP();
-        }
-
-        if(this->HasPendingTTDBP())
-        {
-            //Reset any step controller logic
-            fb->GetScriptContext()->GetThreadContext()->GetDebugManager()->stepController.Deactivate();
-
-            //
-            //TODO: right now we have a very simple reverse step mode of 0 we will want to add GetPendingTTDBPMoveMode logic
-            //
-            throw TTD::TTDebuggerAbortException::CreateTopLevelAbortRequest(this->GetPendingTTDBPTargetEventTime(), 0, _u("Reverse operation requested."));
-        }
-    }
-
-    void EventLog::ClearBPScanList()
-    {
-        this->m_breakpointInfoList.Clear();
-    }
-
-    void EventLog::AddCurrentLocationDuringScan()
-    {
-        TTDebuggerSourceLocation current(this->m_callStack.Last());
-        this->m_breakpointInfoList.Add(current);
-    }
-
-    bool EventLog::TryFindAndSetPreviousBP()
-    {
-        AssertMsg(this->m_pendingTTDBP.HasValue(), "This needs to have a value!!!");
-
-        const TTDebuggerSourceLocation& target(this->m_pendingTTDBP);
-
-        int32 i = 0;
-        for(; i < this->m_breakpointInfoList.Count(); ++i)
-        {
-            bool isBefore = target.IsBefore(this->m_breakpointInfoList.Item(i));
-            if(!isBefore)
-            {
-                break;
-            }
-        }
-        int32 lastBefore = i - 1;
-
-        if(lastBefore == -1)
-        {
-            return false;
-        }
-        else
-        {
-            this->m_pendingTTDBP.SetLocation(this->m_breakpointInfoList.Item(lastBefore));
-
-            return true;
-        }
-    }
-
-    void EventLog::LoadBPListForContextRecreate()
-    {
-        AssertMsg(this->m_bpPreserveList.Count() == 0, "How do we still have breakpoints in here???");
-
-        this->m_threadContext->TTDContext->MultipleScriptWarn(); // we need to get the breakpoints from all the contexts
-        Js::ProbeContainer* probeContainer = this->m_threadContext->TTDContext->GetActiveScriptContext()->GetDebugContext()->GetProbeContainer();
-
-        probeContainer->MapProbes([&](int i, Js::Probe* pProbe)
-        {
-            Js::BreakpointProbe* bp = (Js::BreakpointProbe*)pProbe;
-            if((int64)bp->GetId() != this->m_activeBPId)
-            {
-                Js::FunctionBody* body = bp->GetFunctionBody();
-                int32 bpIndex = body->GetEnclosingStatementIndexFromByteCode(bp->GetBytecodeOffset());
-
-                ULONG srcLine = 0;
-                LONG srcColumn = -1;
-                uint32 startOffset = body->GetStatementStartOffset(bpIndex);
-                body->GetSourceLineFromStartOffset_TTD(startOffset, &srcLine, &srcColumn);
-
-                TTDebuggerSourceLocation ploc;
-                ploc.SetLocation(-1, -1, -1, body, srcLine, srcColumn);
-
-                this->m_bpPreserveList.Add(ploc);
-            }
-        });
-    }
-
-    void EventLog::UnLoadBPListAfterMoveForContextRecreate()
-    {
-        this->m_bpPreserveList.Clear();
-    }
-
-    const JsUtil::List<TTDebuggerSourceLocation, HeapAllocator>& EventLog::GetRestoreBPListAfterContextRecreate()
-    {
-        return this->m_bpPreserveList;
-    }
-
-    void EventLog::UpdateLoopCountInfo()
-    {
-        SingleCallCounter& cfinfo = this->m_callStack.Last();
-        cfinfo.LoopTime++;
-    }
-
-    void EventLog::UpdateCurrentStatementInfo(uint bytecodeOffset)
-    {
-        SingleCallCounter& cfinfo = this->GetTopCallCounter();
-
-        if((cfinfo.CurrentStatementBytecodeMin <= bytecodeOffset) & (bytecodeOffset <= cfinfo.CurrentStatementBytecodeMax))
-        {
-            return;
-        }
-        else
-        {
-            Js::FunctionBody* fb = cfinfo.Function;
-
-            int32 cIndex = fb->GetEnclosingStatementIndexFromByteCode(bytecodeOffset, true);
-            AssertMsg(cIndex != -1, "Should always have a mapping.");
-
-            //we moved to a new statement
-            Js::FunctionBody::StatementMap* pstmt = fb->GetStatementMaps()->Item(cIndex);
-            bool newstmt = (cIndex != cfinfo.CurrentStatementIndex && pstmt->byteCodeSpan.begin <= (int)bytecodeOffset && (int)bytecodeOffset <= pstmt->byteCodeSpan.end);
-            if(newstmt)
-            {
-                cfinfo.LastStatementIndex = cfinfo.CurrentStatementIndex;
-                cfinfo.LastStatementLoopTime = cfinfo.CurrentStatementLoopTime;
-
-                cfinfo.CurrentStatementIndex = cIndex;
-                cfinfo.CurrentStatementLoopTime = cfinfo.LoopTime;
-
-                cfinfo.CurrentStatementBytecodeMin = (uint32)pstmt->byteCodeSpan.begin;
-                cfinfo.CurrentStatementBytecodeMax = (uint32)pstmt->byteCodeSpan.end;
-
-#if ENABLE_FULL_BC_TRACE
-                ULONG srcLine = 0;
-                LONG srcColumn = -1;
-                uint32 startOffset = cfinfo.Function->GetFunctionBody()->GetStatementStartOffset(cfinfo.CurrentStatementIndex);
-                cfinfo.Function->GetFunctionBody()->GetSourceLineFromStartOffset_TTD(startOffset, &srcLine, &srcColumn);
-
-                this->m_diagnosticLogger.WriteStmtIndex((uint32)srcLine, (uint32)srcColumn);
-#endif
-            }
-        }
-    }
-
-    void EventLog::GetTimeAndPositionForDebugger(TTDebuggerSourceLocation& sourceLocation) const
-    {
-        const SingleCallCounter& cfinfo = this->GetTopCallCounter();
-
-        ULONG srcLine = 0;
-        LONG srcColumn = -1;
-        uint32 startOffset = cfinfo.Function->GetStatementStartOffset(cfinfo.CurrentStatementIndex);
-        cfinfo.Function->GetSourceLineFromStartOffset_TTD(startOffset, &srcLine, &srcColumn);
-
-        sourceLocation.SetLocation(this->m_topLevelCallbackEventTime, cfinfo.FunctionTime, cfinfo.LoopTime, cfinfo.Function, srcLine, srcColumn);
-    }
-
-#if ENABLE_OBJECT_SOURCE_TRACKING
-    void EventLog::GetTimeAndPositionForDiagnosticObjectTracking(DiagnosticOrigin& originInfo) const
-    {
-        const SingleCallCounter& cfinfo = this->GetTopCallCounter();
-
-        ULONG srcLine = 0;
-        LONG srcColumn = -1;
-        uint32 startOffset = cfinfo.Function->GetStatementStartOffset(cfinfo.CurrentStatementIndex);
-        cfinfo.Function->GetSourceLineFromStartOffset_TTD(startOffset, &srcLine, &srcColumn);
-
-        SetDiagnosticOriginInformation(originInfo, srcLine, cfinfo.EventTime, cfinfo.FunctionTime, cfinfo.LoopTime);
-    }
-#endif
-
-    bool EventLog::GetPreviousTimeAndPositionForDebugger(TTDebuggerSourceLocation& sourceLocation) const
-    {
-        bool noPrevious = false;
-        const SingleCallCounter& cfinfo = this->GetTopCallCounter();
-
-        bool justMyCode = EventLog::IsDebuggerRunningJustMyCode(this->m_threadContext->TTDContext->GetActiveScriptContext());
-
-        //if we are at the first statement in the function then we want the parents current
-        Js::FunctionBody* fbody = nullptr;
-        int32 statementIndex = -1;
-        uint64 ftime = 0;
-        uint64 ltime = 0;
-        if(cfinfo.LastStatementIndex == -1)
-        {
-            const SingleCallCounter* cfinfoCaller = this->GetTopCallCallerCounter(justMyCode);
-
-            //check if we are at the first statement in the callback event
-            if(cfinfoCaller == nullptr)
-            {
-                //Set the position info to the current statement and return true
-                noPrevious = true;
-
-                ftime = cfinfo.FunctionTime;
-                ltime = cfinfo.CurrentStatementLoopTime;
-
-                fbody = cfinfo.Function;
-                statementIndex = cfinfo.CurrentStatementIndex;
-            }
-            else
-            {
-                ftime = cfinfoCaller->FunctionTime;
-                ltime = cfinfoCaller->CurrentStatementLoopTime;
-
-                fbody = cfinfoCaller->Function;
-                statementIndex = cfinfoCaller->CurrentStatementIndex;
-            }
-        }
-        else
-        {
-            ftime = cfinfo.FunctionTime;
-            ltime = cfinfo.LastStatementLoopTime;
-
-            fbody = cfinfo.Function;
-            statementIndex = cfinfo.LastStatementIndex;
-        }
-
-        ULONG srcLine = 0;
-        LONG srcColumn = -1;
-        uint32 startOffset = fbody->GetStatementStartOffset(statementIndex);
-        fbody->GetSourceLineFromStartOffset_TTD(startOffset, &srcLine, &srcColumn);
-
-        sourceLocation.SetLocation(this->m_topLevelCallbackEventTime, ftime, ltime, fbody, srcLine, srcColumn);
-
-        return noPrevious;
-    }
-
-    void EventLog::GetLastExecutedTimeAndPositionForDebugger(bool* markedAsJustMyCode, TTDebuggerSourceLocation& sourceLocation) const
-    {
-        *markedAsJustMyCode = false;
-        const TTLastReturnLocationInfo& cframe = EventLog::IsDebuggerRunningJustMyCode(this->m_threadContext->TTDContext->GetActiveScriptContext()) ? this->m_lastReturnLocationJMC : this->m_lastReturnLocation;
-
-        if(!cframe.IsDefined())
-        {
-            sourceLocation.Clear();
-            return;
-        }
-        else
-        {
-            ULONG srcLine = 0;
-            LONG srcColumn = -1;
-            uint32 startOffset = cframe.GetLocation().Function->GetStatementStartOffset(cframe.GetLocation().CurrentStatementIndex);
-            cframe.GetLocation().Function->GetSourceLineFromStartOffset_TTD(startOffset, &srcLine, &srcColumn);
-
-            *markedAsJustMyCode = EventLog::IsFunctionJustMyCode(cframe.GetLocation().Function);
-            sourceLocation.SetLocation(this->m_topLevelCallbackEventTime, cframe.GetLocation().FunctionTime, cframe.GetLocation().CurrentStatementLoopTime, cframe.GetLocation().Function, srcLine, srcColumn);
-        }
-    }
-
-    int64 EventLog::GetCurrentHostCallbackId() const
-    {
-        return this->m_hostCallbackId;
-    }
-
     int64 EventLog::GetCurrentTopLevelEventTime() const
     {
         return this->m_topLevelCallbackEventTime;
     }
 
-    const NSLogEvents::JsRTCallbackAction* EventLog::GetEventForHostCallbackId(bool wantRegisterOp, int64 hostIdOfInterest) const
-    {
-        if(hostIdOfInterest == -1)
-        {
-            return nullptr;
-        }
-
-        for(auto iter = this->m_currentReplayEventIterator; iter.IsValid(); iter.MovePrevious())
-        {
-            if(iter.Current()->EventKind == NSLogEvents::EventKind::CallbackOpActionTag)
-            {
-                const NSLogEvents::JsRTCallbackAction* callbackAction = NSLogEvents::GetInlineEventDataAs<NSLogEvents::JsRTCallbackAction, NSLogEvents::EventKind::CallbackOpActionTag>(iter.Current());
-                if(callbackAction->NewCallbackId == hostIdOfInterest && callbackAction->IsCreate == wantRegisterOp)
-                {
-                    return callbackAction;
-                }
-            }
-        }
-
-        return nullptr;
-    }
-
-    int64 EventLog::GetFirstEventTime(bool justMyCode) const
+    int64 EventLog::GetFirstEventTimeInLog() const
     {
         for(auto iter = this->m_eventList.GetIteratorAtFirst(); iter.IsValid(); iter.MoveNext())
         {
             if(NSLogEvents::IsJsRTActionRootCall(iter.Current()))
             {
-                if(!justMyCode)
-                {
-                    return NSLogEvents::GetTimeFromRootCallOrSnapshot(iter.Current());
-                }
-                else
-                {
-                    const NSLogEvents::JsRTCallFunctionAction* cfAction = NSLogEvents::GetInlineEventDataAs<NSLogEvents::JsRTCallFunctionAction, NSLogEvents::EventKind::CallExistingFunctionActionTag>(iter.Current());
-                    if(cfAction->AdditionalInfo->MarkedAsJustMyCode)
-                    {
-                        return NSLogEvents::GetTimeFromRootCallOrSnapshot(iter.Current());
-                    }
-                }
+                return NSLogEvents::GetTimeFromRootCallOrSnapshot(iter.Current());
             }
         }
 
         return -1;
     }
 
-    int64 EventLog::GetLastEventTime(bool justMyCode) const
+    int64 EventLog::GetLastEventTimeInLog() const
     {
-        for(auto iter = this->m_eventList.GetIteratorAtLast(); iter.IsValid(); iter.MovePrevious())
+        for(auto iter = this->m_eventList.GetIteratorAtLast_ReplayOnly(); iter.IsValid(); iter.MovePrevious_ReplayOnly())
         {
             if(NSLogEvents::IsJsRTActionRootCall(iter.Current()))
             {
-                if(!justMyCode)
-                {
-                    return NSLogEvents::GetTimeFromRootCallOrSnapshot(iter.Current());
-                }
-                else
-                {
-                    const NSLogEvents::JsRTCallFunctionAction* cfAction = NSLogEvents::GetInlineEventDataAs<NSLogEvents::JsRTCallFunctionAction, NSLogEvents::EventKind::CallExistingFunctionActionTag>(iter.Current());
-                    if(cfAction->AdditionalInfo->MarkedAsJustMyCode)
-                    {
-                        return NSLogEvents::GetTimeFromRootCallOrSnapshot(iter.Current());
-                    }
-                }
+                return NSLogEvents::GetTimeFromRootCallOrSnapshot(iter.Current());
             }
         }
 
         return -1;
     }
 
-    int64 EventLog::GetKthEventTime(uint32 k) const
+    int64 EventLog::GetKthEventTimeInLog(uint32 k) const
     {
         uint32 topLevelCount = 0;
         for(auto iter = this->m_eventList.GetIteratorAtFirst(); iter.IsValid(); iter.MoveNext())
@@ -1723,49 +1217,50 @@ namespace TTD
 
     void EventLog::ResetCallStackForTopLevelCall(int64 topLevelCallbackEventTime)
     {
-        AssertMsg(this->m_callStack.Count() == 0, "We should be at the top-level entry!!!");
-
-        this->m_runningFunctionTimeCtr = 0;
         this->m_topLevelCallbackEventTime = topLevelCallbackEventTime;
-        this->m_hostCallbackId = -1;
-
-        this->m_lastReturnLocation.Clear();
-        this->m_lastReturnLocationJMC.Clear();
     }
 
     bool EventLog::IsTimeForSnapshot() const
     {
-        return (this->m_elapsedExecutionTimeSinceSnapshot > this->m_threadContext->TTDContext->SnapInterval);
+        return this->m_threadContext->TTDContext->SnapInterval == 0   // if SnapInterval is 0, we'll always snapshot irrespective of when last one was taken
+            || (this->m_elapsedExecutionTimeSinceSnapshot > this->m_threadContext->TTDContext->SnapInterval);
     }
 
     void EventLog::PruneLogLength()
     {
-        uint32 maxEvents = this->m_threadContext->TTDContext->SnapHistoryLength;
-        auto tailIter = this->m_eventList.GetIteratorAtLast();
-        while(maxEvents != 0 && tailIter.IsValid())
+        uint32 maxSnaps = this->m_threadContext->TTDContext->SnapHistoryLength;
+        uint32 snapCount = 0;
+        for(auto iter = this->m_eventList.GetIteratorAtFirst(); iter.IsValid(); iter.MoveNext())
         {
-            if(tailIter.Current()->EventKind == NSLogEvents::EventKind::SnapshotTag)
+            if(iter.Current()->EventKind == NSLogEvents::EventKind::SnapshotTag)
             {
-                maxEvents--;
-            }
-
-            if(maxEvents != 0)
-            {
-                //don't move when we point to the last snapshot we want to preserve (have as the new eventList start)
-                tailIter.MovePrevious();
+                snapCount++;
             }
         }
 
-        if(maxEvents == 0 && tailIter.IsValid())
+        //If we have more than the desired number of snaps we will trim them off
+        if(snapCount > maxSnaps)
         {
-            auto delIter = this->m_eventList.GetIteratorAtFirst(); //we know tailIter is valid so at least 1 entry
-            while(delIter.Current() != tailIter.Current())
+            uint32 snapDelCount = snapCount - maxSnaps;
+            auto delIter = this->m_eventList.GetIteratorAtFirst();
+
+            while(true)
             {
                 NSLogEvents::EventLogEntry* evt = delIter.Current();
+                if(delIter.Current()->EventKind == NSLogEvents::EventKind::SnapshotTag)
+                {
+                    if(snapDelCount == 0)
+                    {
+                        break;
+                    }
+
+                    snapDelCount--;
+                }
+
                 TTEventList::TTEventListLink* block = delIter.GetBlock();
                 delIter.MoveNext();
 
-                this->m_eventList.DeleteFirstEntry(block, evt, this->m_eventListVTable);
+                this->m_eventList.DeleteFirstEntry(block, evt);
             }
         }
     }
@@ -1777,6 +1272,14 @@ namespace TTD
 
     void EventLog::DoSnapshotExtract()
     {
+        //force a GC to get weak containers in a consistent state
+        TTDTimer timer;
+        double startTime = timer.Now();
+        this->m_threadContext->GetRecycler()->CollectNow<CollectNowForceInThread>();
+        this->m_threadContext->TTDContext->SyncRootsBeforeSnapshot_Record();
+        double endTime = timer.Now();
+
+        //do the rest of the snapshot
         this->SetSnapshotOrInflateInProgress(true);
         this->PushMode(TTDMode::ExcludedExecutionTTAction);
 
@@ -1784,12 +1287,61 @@ namespace TTD
         //Create the event object and add it to the log
         NSLogEvents::SnapshotEventLogEntry* snapEvent = this->RecordGetInitializedEvent_DataOnly<NSLogEvents::SnapshotEventLogEntry, NSLogEvents::EventKind::SnapshotTag>();
         snapEvent->RestoreTimestamp = this->GetLastEventTime();
-        snapEvent->Snap = this->DoSnapshotExtract_Helper();
+
+        JsUtil::BaseHashSet<Js::FunctionBody*, HeapAllocator> liveTopLevelBodies(&HeapAllocator::Instance);
+        snapEvent->Snap = this->DoSnapshotExtract_Helper((endTime - startTime) / 1000.0, liveTopLevelBodies);
+
+        for(int32 i = 0; i < this->m_threadContext->TTDContext->GetTTDContexts().Count(); ++i)
+        {
+            this->m_threadContext->TTDContext->GetTTDContexts().Item(i)->TTDContextInfo->CleanUnreachableTopLevelBodies(liveTopLevelBodies);
+        }
+
+        //get info about live weak roots etc. we want to use in the replay from the snapshot into the event as well
+        snapEvent->LiveContextCount = snapEvent->Snap->GetContextList().Count();
+        snapEvent->LiveContextIdArray = nullptr;
+        if(snapEvent->LiveContextCount != 0)
+        {
+            snapEvent->LiveContextIdArray = this->m_eventSlabAllocator.SlabAllocateArray<TTD_LOG_PTR_ID>(snapEvent->LiveContextCount);
+            uint32 clpos = 0;
+            for(auto iter = snapEvent->Snap->GetContextList().GetIterator(); iter.IsValid(); iter.MoveNext())
+            {
+                snapEvent->LiveContextIdArray[clpos] = iter.Current()->ScriptContextLogId;
+                clpos++;
+            }
+        }
+
+        //walk the roots and count all of the "interesting weak ref roots"
+        snapEvent->LongLivedRefRootsCount = 0;
+        for(auto iter = snapEvent->Snap->GetRootList().GetIterator(); iter.IsValid(); iter.MoveNext())
+        {
+            const NSSnapValues::SnapRootInfoEntry* spe = iter.Current();
+            if(spe->MaybeLongLivedRoot)
+            {
+                snapEvent->LongLivedRefRootsCount++;
+            }
+        }
+
+        //Now allocate the arrays for them and do the processing
+        snapEvent->LongLivedRefRootsIdArray = nullptr; 
+        if(snapEvent->LongLivedRefRootsCount != 0)
+        {
+            snapEvent->LongLivedRefRootsIdArray = this->m_eventSlabAllocator.SlabAllocateArray<TTD_LOG_PTR_ID>(snapEvent->LongLivedRefRootsCount);
+            uint32 rpos = 0;
+            for(auto iter = snapEvent->Snap->GetRootList().GetIterator(); iter.IsValid(); iter.MoveNext())
+            {
+                const NSSnapValues::SnapRootInfoEntry* spe = iter.Current();
+                if(spe->MaybeLongLivedRoot)
+                {
+                    snapEvent->LongLivedRefRootsIdArray[rpos] = spe->LogId;
+                    rpos++;
+                }
+            }
+        }
 
         this->m_elapsedExecutionTimeSinceSnapshot = 0.0;
 
 #if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.WriteLiteralMsg("---SNAPSHOT EVENT---\n");
+        this->m_threadContext->TTDExecutionInfo->GetTraceLogger()->WriteLiteralMsg("---SNAPSHOT EVENT---\n");
 #endif
 
         this->PopMode(TTDMode::ExcludedExecutionTTAction);
@@ -1798,25 +1350,26 @@ namespace TTD
 
     void EventLog::DoRtrSnapIfNeeded()
     {
-        AssertMsg(this->m_currentReplayEventIterator.IsValid() && NSLogEvents::IsJsRTActionRootCall(this->m_currentReplayEventIterator.Current()), "Something in wrong with the event position.");
+        TTDAssert(this->m_currentReplayEventIterator.IsValid() && NSLogEvents::IsJsRTActionRootCall(this->m_currentReplayEventIterator.Current()), "Something in wrong with the event position.");
 
         this->SetSnapshotOrInflateInProgress(true);
         this->PushMode(TTDMode::ExcludedExecutionTTAction);
 
         NSLogEvents::JsRTCallFunctionAction* rootCall = NSLogEvents::GetInlineEventDataAs<NSLogEvents::JsRTCallFunctionAction, NSLogEvents::EventKind::CallExistingFunctionActionTag>(this->m_currentReplayEventIterator.Current());
-        if(rootCall->AdditionalInfo->RtRSnap == nullptr)
+        if(rootCall->AdditionalReplayInfo->RtRSnap == nullptr)
         {
             //Be careful to ensure that caller is actually doing this
             AUTO_NESTED_HANDLED_EXCEPTION_TYPE((ExceptionType)(ExceptionType_OutOfMemory | ExceptionType_JavascriptException));
 
-            rootCall->AdditionalInfo->RtRSnap = this->DoSnapshotExtract_Helper();
+            JsUtil::BaseHashSet<Js::FunctionBody*, HeapAllocator> liveTopLevelBodies(&HeapAllocator::Instance); //don't actually care about the result here
+            rootCall->AdditionalReplayInfo->RtRSnap = this->DoSnapshotExtract_Helper(0.0, liveTopLevelBodies);
         }
 
         this->PopMode(TTDMode::ExcludedExecutionTTAction);
         this->SetSnapshotOrInflateInProgress(false);
     }
 
-    int64 EventLog::FindSnapTimeForEventTime(int64 targetTime, bool allowRTR, int64* optEndSnapTime)
+    int64 EventLog::FindSnapTimeForEventTime(int64 targetTime, int64* optEndSnapTime)
     {
         int64 snapTime = -1;
         if(optEndSnapTime != nullptr)
@@ -1824,23 +1377,14 @@ namespace TTD
             *optEndSnapTime = -1;
         }
 
-        for(auto iter = this->m_eventList.GetIteratorAtLast(); iter.IsValid(); iter.MovePrevious())
+        for(auto iter = this->m_eventList.GetIteratorAtLast_ReplayOnly(); iter.IsValid(); iter.MovePrevious_ReplayOnly())
         {
             bool isSnap = false;
             bool isRoot = false;
             bool hasRtrSnap = false;
             int64 time = NSLogEvents::AccessTimeInRootCallOrSnapshot(iter.Current(), isSnap, isRoot, hasRtrSnap);
 
-            bool validSnap = false;
-            if(allowRTR)
-            {
-                validSnap = isSnap | (isRoot & hasRtrSnap);
-            }
-            else
-            {
-                validSnap = isSnap;
-            }
-
+            bool validSnap =  isSnap | (isRoot & hasRtrSnap);
             if(validSnap && time <= targetTime)
             {
                 snapTime = time;
@@ -1867,6 +1411,66 @@ namespace TTD
         return snapTime;
     }
 
+    void EventLog::GetSnapShotBoundInterval(int64 targetTime, int64* snapIntervalStart, int64* snapIntervalEnd) const
+    {
+        *snapIntervalStart = -1;
+        *snapIntervalEnd = -1;
+
+        //move the iterator to the current snapshot just before the event
+        auto iter = this->m_eventList.GetIteratorAtLast_ReplayOnly();
+        while(iter.IsValid())
+        {
+            NSLogEvents::EventLogEntry* evt = iter.Current();
+            if(evt->EventKind == NSLogEvents::EventKind::SnapshotTag)
+            {
+                NSLogEvents::SnapshotEventLogEntry* snapEvent = NSLogEvents::GetInlineEventDataAs<NSLogEvents::SnapshotEventLogEntry, NSLogEvents::EventKind::SnapshotTag>(iter.Current());
+                if(snapEvent->RestoreTimestamp <= targetTime)
+                {
+                    *snapIntervalStart = snapEvent->RestoreTimestamp;
+                    break;
+                }
+            }
+
+            iter.MovePrevious_ReplayOnly();
+        }
+
+        //now move the iter to the next snapshot
+        while(iter.IsValid())
+        {
+            NSLogEvents::EventLogEntry* evt = iter.Current();
+            if(evt->EventKind == NSLogEvents::EventKind::SnapshotTag)
+            {
+                NSLogEvents::SnapshotEventLogEntry* snapEvent = NSLogEvents::GetInlineEventDataAs<NSLogEvents::SnapshotEventLogEntry, NSLogEvents::EventKind::SnapshotTag>(iter.Current());
+                if(*snapIntervalStart < snapEvent->RestoreTimestamp)
+                {
+                    *snapIntervalEnd = snapEvent->RestoreTimestamp;
+                    break;
+                }
+            }
+
+            iter.MoveNext();
+        }
+    }
+
+    int64 EventLog::GetPreviousSnapshotInterval(int64 currentSnapTime) const
+    {
+        //move the iterator to the current snapshot just before the event
+        for(auto iter = this->m_eventList.GetIteratorAtLast_ReplayOnly(); iter.IsValid(); iter.MovePrevious_ReplayOnly())
+        {
+            NSLogEvents::EventLogEntry* evt = iter.Current();
+            if(evt->EventKind == NSLogEvents::EventKind::SnapshotTag)
+            {
+                NSLogEvents::SnapshotEventLogEntry* snapEvent = NSLogEvents::GetInlineEventDataAs<NSLogEvents::SnapshotEventLogEntry, NSLogEvents::EventKind::SnapshotTag>(iter.Current());
+                if(snapEvent->RestoreTimestamp < currentSnapTime)
+                {
+                    return snapEvent->RestoreTimestamp;
+                }
+            }
+        }
+
+        return -1;
+    }
+
     void EventLog::DoSnapshotInflate(int64 etime)
     {
         this->PushMode(TTDMode::ExcludedExecutionTTAction);
@@ -1874,7 +1478,7 @@ namespace TTD
         const SnapShot* snap = nullptr;
         int64 restoreEventTime = -1;
 
-        for(auto iter = this->m_eventList.GetIteratorAtLast(); iter.IsValid(); iter.MovePrevious())
+        for(auto iter = this->m_eventList.GetIteratorAtLast_ReplayOnly(); iter.IsValid(); iter.MovePrevious_ReplayOnly())
         {
             NSLogEvents::EventLogEntry* evt = iter.Current();
             if(evt->EventKind == NSLogEvents::EventKind::SnapshotTag)
@@ -1894,15 +1498,15 @@ namespace TTD
             {
                 const NSLogEvents::JsRTCallFunctionAction* rootEntry = NSLogEvents::GetInlineEventDataAs<NSLogEvents::JsRTCallFunctionAction, NSLogEvents::EventKind::CallExistingFunctionActionTag>(evt);
 
-                if(rootEntry->AdditionalInfo->CallEventTime == etime)
+                if(rootEntry->CallEventTime == etime)
                 {
-                    restoreEventTime = rootEntry->AdditionalInfo->CallEventTime;
-                    snap = rootEntry->AdditionalInfo->RtRSnap;
+                    restoreEventTime = rootEntry->CallEventTime;
+                    snap = rootEntry->AdditionalReplayInfo->RtRSnap;
                     break;
                 }
             }
         }
-        AssertMsg(snap != nullptr, "Log should start with a snapshot!!!");
+        TTDAssert(snap != nullptr, "Log should start with a snapshot!!!");
 
         uint32 dbgScopeCount = snap->GetDbgScopeCountNonTopLevel();
 
@@ -1930,14 +1534,23 @@ namespace TTD
             dbgScopeCount += iter.Current()->TopLevelBase.ScopeChainInfo.ScopeCount;
         }
 
+        uint32 topFunctionCount = topLevelLoadScriptMap.Count() + topLevelNewScriptMap.Count() + topLevelEvalScriptMap.Count();
+
         ThreadContextTTD* threadCtx = this->m_threadContext->TTDContext;
         const UnorderedArrayList<NSSnapValues::SnapContext, TTD_ARRAY_LIST_SIZE_XSMALL>& snpCtxs = snap->GetContextList();
 
         //check if we can reuse script contexts or we need to create new ones
         bool reuseInflateMap = (this->m_lastInflateMap != nullptr && this->m_lastInflateSnapshotTime == etime && !threadCtx->ContextCreatedOrDestoyedInReplay());
+
+        //Fast checks ok but make sure we aren't blocked by a non-restorable well known object
         if(reuseInflateMap)
         {
-            this->m_lastInflateMap->PrepForReInflate(snap->ContextCount(), snap->HandlerCount(), snap->TypeCount(), snap->PrimitiveCount() + snap->ObjectCount(), snap->BodyCount(), dbgScopeCount, snap->EnvCount(), snap->SlotArrayCount());
+            reuseInflateMap = snap->AllWellKnownObjectsReusable(this->m_lastInflateMap);
+        }
+
+        if(reuseInflateMap)
+        {
+            this->m_lastInflateMap->PrepForReInflate(snap->ContextCount(), snap->HandlerCount(), snap->TypeCount(), snap->PrimitiveCount() + snap->ObjectCount(), snap->BodyCount() + topFunctionCount, dbgScopeCount, snap->EnvCount(), snap->SlotArrayCount());
 
             //collect anything that is dead
             threadCtx->ClearRootsForSnapRestore();
@@ -1957,27 +1570,30 @@ namespace TTD
                         break;
                     }
                 }
-                AssertMsg(vCtx != nullptr, "We lost a context somehow!!!");
+                TTDAssert(vCtx != nullptr, "We lost a context somehow!!!");
 
                 NSSnapValues::InflateScriptContext(sCtx, vCtx, this->m_lastInflateMap, topLevelLoadScriptMap, topLevelNewScriptMap, topLevelEvalScriptMap);
             }
         }
         else
         {
+            bool shouldReleaseCtxs = false;
             if(this->m_lastInflateMap != nullptr)
             {
+                shouldReleaseCtxs = true;
+
                 TT_HEAP_DELETE(InflateMap, this->m_lastInflateMap);
                 this->m_lastInflateMap = nullptr;
             }
 
             this->m_lastInflateMap = TT_HEAP_NEW(InflateMap);
-            this->m_lastInflateMap->PrepForInitialInflate(this->m_threadContext, snap->ContextCount(), snap->HandlerCount(), snap->TypeCount(), snap->PrimitiveCount() + snap->ObjectCount(), snap->BodyCount(), dbgScopeCount, snap->EnvCount(), snap->SlotArrayCount());
+            this->m_lastInflateMap->PrepForInitialInflate(this->m_threadContext, snap->ContextCount(), snap->HandlerCount(), snap->TypeCount(), snap->PrimitiveCount() + snap->ObjectCount(), snap->BodyCount() + topFunctionCount, dbgScopeCount, snap->EnvCount(), snap->SlotArrayCount());
             this->m_lastInflateSnapshotTime = etime;
 
             //collect anything that is dead
-            threadCtx->ClearContextsForSnapRestore();
+            JsUtil::List<FinalizableObject*, HeapAllocator> deadCtxs(&HeapAllocator::Instance);
+            threadCtx->ClearContextsForSnapRestore(deadCtxs);
             threadCtx->ClearRootsForSnapRestore();
-            this->m_threadContext->GetRecycler()->CollectNow<CollectNowForceInThread>();
 
             //allocate and inflate into new contexts
             for(auto iter = snpCtxs.GetIterator(); iter.IsValid(); iter.MoveNext())
@@ -1991,8 +1607,17 @@ namespace TTD
             }
             threadCtx->ResetContextCreatedOrDestoyedInReplay();
 
+            if(shouldReleaseCtxs)
+            {
+                for(int32 i = 0; i < deadCtxs.Count(); ++i)
+                {
+                    threadCtx->TTDExternalObjectFunctions.pfReleaseJsRTContextCallback(deadCtxs.Item(i));
+                }
+                this->m_threadContext->GetRecycler()->CollectNow<CollectNowForceInThread>();
+            }
+
             //We don't want to have a bunch of snapshots in memory (that will get big fast) so unload all but the current one
-            for(auto iter = this->m_eventList.GetIteratorAtLast(); iter.IsValid(); iter.MovePrevious())
+            for(auto iter = this->m_eventList.GetIteratorAtLast_ReplayOnly(); iter.IsValid(); iter.MovePrevious_ReplayOnly())
             {
                 bool isSnap = false;
                 bool isRoot = false;
@@ -2024,7 +1649,7 @@ namespace TTD
         this->m_eventTimeCtr = restoreEventTime;
         if(!this->m_eventList.IsEmpty())
         {
-            this->m_currentReplayEventIterator = this->m_eventList.GetIteratorAtLast();
+            this->m_currentReplayEventIterator = this->m_eventList.GetIteratorAtLast_ReplayOnly();
 
             while(true)
             {
@@ -2038,7 +1663,7 @@ namespace TTD
                     break;
                 }
 
-                this->m_currentReplayEventIterator.MovePrevious();
+                this->m_currentReplayEventIterator.MovePrevious_ReplayOnly();
             }
 
             //we want to advance to the event immediately after the snapshot as well so do that
@@ -2047,15 +1672,12 @@ namespace TTD
                 this->m_eventTimeCtr++;
                 this->m_currentReplayEventIterator.MoveNext();
             }
-
-            //clear this out -- it shouldn't matter for most JsRT actions (alloc etc.) and should be reset by any call actions
-            this->ResetCallStackForTopLevelCall(-1);
         }
 
         this->PopMode(TTDMode::ExcludedExecutionTTAction);
 
 #if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.WriteLiteralMsg("---INFLATED SNAPSHOT---\n");
+        this->m_threadContext->TTDExecutionInfo->GetTraceLogger()->WriteLiteralMsg("---INFLATED SNAPSHOT---\n");
 #endif
     }
 
@@ -2085,13 +1707,13 @@ namespace TTD
         }
         else
         {
-            AssertMsg(eKind > NSLogEvents::EventKind::JsRTActionTag, "Either this is an invalid tag to replay directly (should be driven internally) or it is not known!!!");
+            TTDAssert(eKind > NSLogEvents::EventKind::JsRTActionTag, "Either this is an invalid tag to replay directly (should be driven internally) or it is not known!!!");
 
             this->ReplaySingleActionEventEntry();
         }
 
 #if ENABLE_TTD_INTERNAL_DIAGNOSTICS
-        AssertMsg(!this->m_currentReplayEventIterator.IsValid() || this->m_currentReplayEventIterator.Current()->EventTimeStamp == this->m_eventTimeCtr, "We are out of sync here");
+        TTDAssert(!this->m_currentReplayEventIterator.IsValid() || this->m_currentReplayEventIterator.Current()->EventTimeStamp == this->m_eventTimeCtr, "We are out of sync here");
 #endif
     }
 
@@ -2116,7 +1738,7 @@ namespace TTD
         NSLogEvents::ContextExecuteKind execKind = this->m_eventListVTable[(uint32)evt->EventKind].ContextKind;
         auto executeFP = this->m_eventListVTable[(uint32)evt->EventKind].ExecuteFP;
 
-        AssertMsg(!NSLogEvents::EventFailsWithRuntimeError(evt), "We have a failing Event in the Log -- we assume host is correct!");
+        TTDAssert(!NSLogEvents::EventFailsWithRuntimeError(evt), "We have a failing Event in the Log -- we assume host is correct!");
 
         ThreadContextTTD* executeContext = this->m_threadContext->TTDContext;
         if(execKind == NSLogEvents::ContextExecuteKind::GlobalAPIWrapper)
@@ -2128,7 +1750,7 @@ namespace TTD
 
                 executeFP(evt, executeContext);
 
-                AssertMsg(NSLogEvents::EventCompletesNormally(evt), "All my action events should exit or terminate before return so no need to loop yet but may want to later");
+                TTDAssert(NSLogEvents::EventCompletesNormally(evt), "All my action events should exit or terminate before return so no need to loop yet but may want to later");
             }
             catch(TTD::TTDebuggerAbortException)
             {
@@ -2136,7 +1758,7 @@ namespace TTD
             }
             catch(...)
             {
-                AssertMsg(false, "Encountered other kind of exception in replay??");
+                TTDAssert(false, "Encountered other kind of exception in replay??");
             }
         }
         else if(execKind == NSLogEvents::ContextExecuteKind::ContextAPIWrapper)
@@ -2144,8 +1766,9 @@ namespace TTD
             //enter/exit context wrapper -- see JsrtInternal.h
             Js::ScriptContext* ctx = executeContext->GetActiveScriptContext();
 
-            AssertMsg(ctx != nullptr, "This should be set!!!");
-            AssertMsg(ctx->GetThreadContext()->GetRecordedException() == nullptr, "Shouldn't have outstanding exceptions (assume always CheckContext when recording).");
+            TTDAssert(ctx != nullptr, "This should be set!!!");
+            TTDAssert(ctx->GetThreadContext()->GetRecordedException() == nullptr, "Shouldn't have outstanding exceptions (assume always CheckContext when recording).");
+            TTDAssert(this->m_threadContext->TTDContext->GetActiveScriptContext() == ctx, "Make sure the replay host didn't change contexts on us unexpectedly without resetting back to the correct one.");
 
             try
             {
@@ -2158,17 +1781,17 @@ namespace TTD
                 }
                 END_ENTER_SCRIPT
 
-                AssertMsg(NSLogEvents::EventCompletesNormally(evt), "All my action events should exit / terminate before return so no need to loop yet but may want to later");
+                TTDAssert(NSLogEvents::EventCompletesNormally(evt), "All my action events should exit / terminate before return so no need to loop yet but may want to later");
             }
             catch(const Js::JavascriptException& err)
             {
-                AssertMsg(NSLogEvents::EventCompletesWithException(evt), "Should see same execption here");
+                TTDAssert(NSLogEvents::EventCompletesWithException(evt), "Should see same exception here");
 
                 ctx->GetThreadContext()->SetRecordedException(err.GetAndClear());
             }
             catch(Js::ScriptAbortException)
             {
-                AssertMsg(NSLogEvents::EventCompletesWithException(evt), "Should see same execption here");
+                TTDAssert(NSLogEvents::EventCompletesWithException(evt), "Should see same exception here");
 
                 Assert(ctx->GetThreadContext()->GetRecordedException() == nullptr);
                 ctx->GetThreadContext()->SetRecordedException(ctx->GetThreadContext()->GetPendingTerminatedErrorObject());
@@ -2179,7 +1802,7 @@ namespace TTD
             }
             catch(...)
             {
-                AssertMsg(false, "Encountered other kind of exception in replay??");
+                TTDAssert(false, "Encountered other kind of exception in replay??");
             }
         }
         else if(execKind == NSLogEvents::ContextExecuteKind::ContextAPINoScriptWrapper)
@@ -2187,8 +1810,9 @@ namespace TTD
             //enter/exit context no script wrapper -- see JsrtInternal.h
             Js::ScriptContext* ctx = executeContext->GetActiveScriptContext();
 
-            AssertMsg(ctx != nullptr, "This should be set!!!");
-            AssertMsg(ctx->GetThreadContext()->GetRecordedException() == nullptr, "Shouldn't have outstanding exceptions (assume always CheckContext when recording).");
+            TTDAssert(ctx != nullptr, "This should be set!!!");
+            TTDAssert(ctx->GetThreadContext()->GetRecordedException() == nullptr, "Shouldn't have outstanding exceptions (assume always CheckContext when recording).");
+            TTDAssert(this->m_threadContext->TTDContext->GetActiveScriptContext() == ctx, "Make sure the replay host didn't change contexts on us unexpectedly without resetting back to the correct one.");
 
             try
             {
@@ -2196,18 +1820,18 @@ namespace TTD
 
                 executeFP(evt, executeContext);
 
-                AssertMsg(NSLogEvents::EventCompletesNormally(evt), "All my action events should both exit / terminate before return so no need to loop yet but may want to later");
+                TTDAssert(NSLogEvents::EventCompletesNormally(evt), "All my action events should both exit / terminate before return so no need to loop yet but may want to later");
             }
             catch(const Js::JavascriptException& err)
             {
-                AssertMsg(NSLogEvents::EventCompletesWithException(evt), "Should see same execption here");
+                TTDAssert(NSLogEvents::EventCompletesWithException(evt), "Should see same exception here");
 
-                AssertMsg(false, "Should never get JavascriptExceptionObject for ContextAPINoScriptWrapper.");
+                TTDAssert(false, "Should never get JavascriptExceptionObject for ContextAPINoScriptWrapper.");
                 ctx->GetThreadContext()->SetRecordedException(err.GetAndClear());
             }
             catch(Js::ScriptAbortException)
             {
-                AssertMsg(NSLogEvents::EventCompletesWithException(evt), "Should see same execption here");
+                TTDAssert(NSLogEvents::EventCompletesWithException(evt), "Should see same exception here");
 
                 Assert(ctx->GetThreadContext()->GetRecordedException() == nullptr);
                 ctx->GetThreadContext()->SetRecordedException(ctx->GetThreadContext()->GetPendingTerminatedErrorObject());
@@ -2218,19 +1842,19 @@ namespace TTD
             }
             catch(...)
             {
-                AssertMsg(false, "Encountered other kind of exception in replay??");
+                TTDAssert(false, "Encountered other kind of exception in replay??");
             }
         }
         else
         {
-            AssertMsg(executeContext->GetActiveScriptContext() == nullptr || !executeContext->GetActiveScriptContext()->GetThreadContext()->IsScriptActive(), "These should all be outside of script context!!!");
+            TTDAssert(executeContext->GetActiveScriptContext() == nullptr || !executeContext->GetActiveScriptContext()->GetThreadContext()->IsScriptActive(), "These should all be outside of script context!!!");
 
             //No need to move into script context just execute the action
             executeFP(evt, executeContext);
         }
 
 #if ENABLE_TTD_INTERNAL_DIAGNOSTICS
-        AssertMsg(!this->m_currentReplayEventIterator.IsValid() || this->m_currentReplayEventIterator.Current()->EventTimeStamp == this->m_eventTimeCtr, "We are out of sync here");
+        TTDAssert(!this->m_currentReplayEventIterator.IsValid() || this->m_currentReplayEventIterator.Current()->EventTimeStamp == this->m_eventTimeCtr, "We are out of sync here");
 #endif
     }
 
@@ -2277,31 +1901,19 @@ namespace TTD
 
     void EventLog::RecordJsRTSetCurrentContext(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var globalObject)
     {
-        NSLogEvents::JsRTVarsArgumentAction* sAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::SetActiveScriptContextActionTag>(&sAction);
-        sAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(globalObject);
+        NSLogEvents::JsRTSingleVarArgumentAction* sAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::SetActiveScriptContextActionTag>(&sAction);
+        NSLogEvents::SetVarItem_0(sAction, TTD_CONVERT_JSVAR_TO_TTDVAR(globalObject));
 
         actionPopper.InitializeWithEventAndEnter(evt);
-    }
-
-    void EventLog::RecordJsRTDeadScriptEvent(const DeadScriptLogTagInfo& deadCtx)
-    {
-        NSLogEvents::JsRTDestroyScriptContextAction* dAction = this->RecordGetInitializedEvent_DataOnly<NSLogEvents::JsRTDestroyScriptContextAction, NSLogEvents::EventKind::DeadScriptContextActionTag>();
-        dAction->KnownObjects = this->m_eventSlabAllocator.SlabAllocateStruct<NSLogEvents::JsRTDestroyScriptContextAction_KnownObjects>();
-
-        dAction->GlobalLogTag = deadCtx.GlobalLogTag;
-        dAction->KnownObjects->UndefinedLogTag = deadCtx.UndefinedLogTag;
-        dAction->KnownObjects->NullLogTag = deadCtx.NullLogTag;
-        dAction->KnownObjects->TrueLogTag = deadCtx.TrueLogTag;
-        dAction->KnownObjects->FalseLogTag = deadCtx.FalseLogTag;
     }
 
 #if !INT32VAR
     void EventLog::RecordJsRTCreateInteger(TTDJsRTActionResultAutoRecorder& actionPopper, int value)
     {
-        NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction* iAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction, NSLogEvents::EventKind::CreateIntegerActionTag>(&iAction);
-        iAction->u_iVal = value;
+        NSLogEvents::JsRTIntegralArgumentAction* iAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTIntegralArgumentAction, NSLogEvents::EventKind::CreateIntegerActionTag>(&iAction);
+        iAction->Scalar = value;
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(iAction->Result));
     }
@@ -2318,9 +1930,9 @@ namespace TTD
 
     void EventLog::RecordJsRTCreateBoolean(TTDJsRTActionResultAutoRecorder& actionPopper, bool value)
     {
-        NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction* bAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction, NSLogEvents::EventKind::CreateBooleanActionTag>(&bAction);
-        bAction->u_iVal = value;
+        NSLogEvents::JsRTIntegralArgumentAction* bAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTIntegralArgumentAction, NSLogEvents::EventKind::CreateBooleanActionTag>(&bAction);
+        bAction->Scalar = value;
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(bAction->Result));
     }
@@ -2336,117 +1948,117 @@ namespace TTD
 
     void EventLog::RecordJsRTCreateSymbol(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var)
     {
-        NSLogEvents::JsRTVarsArgumentAction* sAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::CreateSymbolActionTag>(&sAction);
-        sAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
+        NSLogEvents::JsRTSingleVarArgumentAction* sAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::CreateSymbolActionTag>(&sAction);
+        NSLogEvents::SetVarItem_0(sAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(sAction->Result));
     }
 
     void EventLog::RecordJsRTCreateError(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var msg)
     {
-        NSLogEvents::JsRTVarsArgumentAction* sAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::CreateErrorActionTag>(&sAction);
-        sAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(msg);
+        NSLogEvents::JsRTSingleVarArgumentAction* sAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::CreateErrorActionTag>(&sAction);
+        NSLogEvents::SetVarItem_0(sAction, TTD_CONVERT_JSVAR_TO_TTDVAR(msg));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(sAction->Result));
     }
 
     void EventLog::RecordJsRTCreateRangeError(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var msg)
     {
-        NSLogEvents::JsRTVarsArgumentAction* sAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::CreateRangeErrorActionTag>(&sAction);
-        sAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(msg);
+        NSLogEvents::JsRTSingleVarArgumentAction* sAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::CreateRangeErrorActionTag>(&sAction);
+        NSLogEvents::SetVarItem_0(sAction, TTD_CONVERT_JSVAR_TO_TTDVAR(msg));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(sAction->Result));
     }
 
     void EventLog::RecordJsRTCreateReferenceError(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var msg)
     {
-        NSLogEvents::JsRTVarsArgumentAction* sAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::CreateReferenceErrorActionTag>(&sAction);
-        sAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(msg);
+        NSLogEvents::JsRTSingleVarArgumentAction* sAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::CreateReferenceErrorActionTag>(&sAction);
+        NSLogEvents::SetVarItem_0(sAction, TTD_CONVERT_JSVAR_TO_TTDVAR(msg));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(sAction->Result));
     }
 
     void EventLog::RecordJsRTCreateSyntaxError(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var msg)
     {
-        NSLogEvents::JsRTVarsArgumentAction* sAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::CreateSyntaxErrorActionTag>(&sAction);
-        sAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(msg);
+        NSLogEvents::JsRTSingleVarArgumentAction* sAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::CreateSyntaxErrorActionTag>(&sAction);
+        NSLogEvents::SetVarItem_0(sAction, TTD_CONVERT_JSVAR_TO_TTDVAR(msg));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(sAction->Result));
     }
 
     void EventLog::RecordJsRTCreateTypeError(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var msg)
     {
-        NSLogEvents::JsRTVarsArgumentAction* sAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::CreateTypeErrorActionTag>(&sAction);
-        sAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(msg);
+        NSLogEvents::JsRTSingleVarArgumentAction* sAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::CreateTypeErrorActionTag>(&sAction);
+        NSLogEvents::SetVarItem_0(sAction, TTD_CONVERT_JSVAR_TO_TTDVAR(msg));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(sAction->Result));
     }
 
     void EventLog::RecordJsRTCreateURIError(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var msg)
     {
-        NSLogEvents::JsRTVarsArgumentAction* sAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::CreateURIErrorActionTag>(&sAction);
-        sAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(msg);
+        NSLogEvents::JsRTSingleVarArgumentAction* sAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::CreateURIErrorActionTag>(&sAction);
+        NSLogEvents::SetVarItem_0(sAction, TTD_CONVERT_JSVAR_TO_TTDVAR(msg));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(sAction->Result));
     }
 
     void EventLog::RecordJsRTVarToNumberConversion(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var)
     {
-        NSLogEvents::JsRTVarsArgumentAction* cAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::VarConvertToNumberActionTag>(&cAction);
-        cAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
+        NSLogEvents::JsRTSingleVarArgumentAction* cAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::VarConvertToNumberActionTag>(&cAction);
+        NSLogEvents::SetVarItem_0(cAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(cAction->Result));
     }
 
     void EventLog::RecordJsRTVarToBooleanConversion(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var)
     {
-        NSLogEvents::JsRTVarsArgumentAction* cAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::VarConvertToBooleanActionTag>(&cAction);
-        cAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
+        NSLogEvents::JsRTSingleVarArgumentAction* cAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::VarConvertToBooleanActionTag>(&cAction);
+        NSLogEvents::SetVarItem_0(cAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
 
         actionPopper.InitializeWithEventAndEnter(evt);
     }
 
     void EventLog::RecordJsRTVarToStringConversion(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var)
     {
-        NSLogEvents::JsRTVarsArgumentAction* cAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::VarConvertToStringActionTag>(&cAction);
-        cAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
+        NSLogEvents::JsRTSingleVarArgumentAction* cAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::VarConvertToStringActionTag>(&cAction);
+        NSLogEvents::SetVarItem_0(cAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(cAction->Result));
     }
 
     void EventLog::RecordJsRTVarToObjectConversion(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var)
     {
-        NSLogEvents::JsRTVarsArgumentAction* cAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::VarConvertToObjectActionTag>(&cAction);
-        cAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
+        NSLogEvents::JsRTSingleVarArgumentAction* cAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::VarConvertToObjectActionTag>(&cAction);
+        NSLogEvents::SetVarItem_0(cAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(cAction->Result));
     }
 
     void EventLog::RecordJsRTAddRootRef(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var)
     {
-        NSLogEvents::JsRTVarsArgumentAction* addAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::AddRootRefActionTag>(&addAction);
-        addAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
+        NSLogEvents::JsRTSingleVarArgumentAction* addAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::AddRootRefActionTag>(&addAction);
+        NSLogEvents::SetVarItem_0(addAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
 
         actionPopper.InitializeWithEventAndEnter(evt);
     }
 
-    void EventLog::RecordJsRTRemoveRootRef(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var)
+    void EventLog::RecordJsRTAddWeakRootRef(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var)
     {
-        NSLogEvents::JsRTVarsArgumentAction* removeAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::RemoveRootRefActionTag>(&removeAction);
-        removeAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
+        NSLogEvents::JsRTSingleVarArgumentAction* addAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::AddWeakRootRefActionTag>(&addAction);
+        NSLogEvents::SetVarItem_0(addAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
 
         actionPopper.InitializeWithEventAndEnter(evt);
     }
@@ -2467,34 +2079,35 @@ namespace TTD
 
     void EventLog::RecordJsRTAllocateBasicObject(TTDJsRTActionResultAutoRecorder& actionPopper)
     {
-        NSLogEvents::JsRTVarsArgumentAction* cAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::AllocateObjectActionTag>(&cAction);
+        NSLogEvents::JsRTResultOnlyAction* cAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTResultOnlyAction, NSLogEvents::EventKind::AllocateObjectActionTag>(&cAction);
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(cAction->Result));
     }
 
-    void EventLog::RecordJsRTAllocateExternalObject(TTDJsRTActionResultAutoRecorder& actionPopper)
+    void EventLog::RecordJsRTAllocateExternalObject(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var prototype)
     {
-        NSLogEvents::JsRTVarsArgumentAction* cAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::AllocateExternalObjectActionTag>(&cAction);
+        NSLogEvents::JsRTSingleVarArgumentAction* cAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::AllocateExternalObjectActionTag>(&cAction);
+        NSLogEvents::SetVarItem_0(cAction, TTD_CONVERT_JSVAR_TO_TTDVAR(prototype));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(cAction->Result));
     }
 
     void EventLog::RecordJsRTAllocateBasicArray(TTDJsRTActionResultAutoRecorder& actionPopper, uint32 length)
     {
-        NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction* cAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction, NSLogEvents::EventKind::AllocateArrayActionTag>(&cAction);
-        cAction->u_iVal = length;
+        NSLogEvents::JsRTIntegralArgumentAction* cAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTIntegralArgumentAction, NSLogEvents::EventKind::AllocateArrayActionTag>(&cAction);
+        cAction->Scalar = length;
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(cAction->Result));
     }
 
     void EventLog::RecordJsRTAllocateArrayBuffer(TTDJsRTActionResultAutoRecorder& actionPopper, uint32 size)
     {
-        NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction* cAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction, NSLogEvents::EventKind::AllocateArrayBufferActionTag>(&cAction);
-        cAction->u_iVal = size;
+        NSLogEvents::JsRTIntegralArgumentAction* cAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTIntegralArgumentAction, NSLogEvents::EventKind::AllocateArrayBufferActionTag>(&cAction);
+        cAction->Scalar = size;
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(cAction->Result));
     }
@@ -2505,46 +2118,56 @@ namespace TTD
         NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTByteBufferAction, NSLogEvents::EventKind::AllocateExternalArrayBufferActionTag>(&cAction);
         cAction->Length = size;
 
-        cAction->Buffer = this->m_eventSlabAllocator.SlabAllocateArray<byte>(cAction->Length);
-        js_memcpy_s(cAction->Buffer, cAction->Length, buff, size);
+        cAction->Buffer = nullptr; 
+        if(cAction->Length != 0)
+        {
+            cAction->Buffer = this->m_eventSlabAllocator.SlabAllocateArray<byte>(cAction->Length);
+            js_memcpy_s(cAction->Buffer, cAction->Length, buff, size);
+        }
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(cAction->Result));
     }
 
-    void EventLog::RecordJsRTAllocateFunction(TTDJsRTActionResultAutoRecorder& actionPopper, bool isNamed, Js::Var optName)
+    void EventLog::RecordJsRTAllocateFunction(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var optMetadata)
     {
-        NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction* cAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction, NSLogEvents::EventKind::AllocateFunctionActionTag>(&cAction);
-        cAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(optName);
-        cAction->u_bVal = isNamed;
+        NSLogEvents::JsRTSingleVarArgumentAction* cAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::AllocateFunctionActionTag>(&cAction);
+        NSLogEvents::SetVarItem_0(cAction, TTD_CONVERT_JSVAR_TO_TTDVAR(optMetadata));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(cAction->Result));
     }
 
     void EventLog::RecordJsRTHostExitProcess(TTDJsRTActionResultAutoRecorder& actionPopper, int32 exitCode)
     {
-        NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction* eAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction, NSLogEvents::EventKind::HostExitProcessTag>(&eAction);
-        eAction->u_iVal = exitCode;
+        NSLogEvents::JsRTIntegralArgumentAction* eAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTIntegralArgumentAction, NSLogEvents::EventKind::HostExitProcessTag>(&eAction);
+        eAction->Scalar = exitCode;
 
         actionPopper.InitializeWithEventAndEnter(evt);
     }
 
-    void EventLog::RecordJsRTGetAndClearException()
+    void EventLog::RecordJsRTGetAndClearExceptionWithMetadata(TTDJsRTActionResultAutoRecorder& actionPopper)
     {
-        this->RecordGetInitializedEvent_DataOnly<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::GetAndClearExceptionActionTag>();
+        NSLogEvents::JsRTResultOnlyAction* gcAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTResultOnlyAction, NSLogEvents::EventKind::GetAndClearExceptionWithMetadataActionTag>(&gcAction);
 
-        //
-        //TODO: Maybe we want to track OOM later
-        //
+        actionPopper.InitializeWithEventAndEnterWResult(evt, &(gcAction->Result));
+    }
+
+    void EventLog::RecordJsRTGetAndClearException(TTDJsRTActionResultAutoRecorder& actionPopper)
+    {
+        NSLogEvents::JsRTResultOnlyAction* gcAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTResultOnlyAction, NSLogEvents::EventKind::GetAndClearExceptionActionTag>(&gcAction);
+
+        actionPopper.InitializeWithEventAndEnterWResult(evt, &(gcAction->Result));
     }
 
     void EventLog::RecordJsRTSetException(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var, bool propagateToDebugger)
     {
-        NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction* spAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction, NSLogEvents::EventKind::SetExceptionActionTag>(&spAction);
-        spAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
-        spAction->u_bVal = propagateToDebugger;
+        NSLogEvents::JsRTSingleVarScalarArgumentAction* spAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarScalarArgumentAction, NSLogEvents::EventKind::SetExceptionActionTag>(&spAction);
+        NSLogEvents::SetVarItem_0(spAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
+        NSLogEvents::SetScalarItem_0(spAction, propagateToDebugger);
 
         actionPopper.InitializeWithEventAndEnter(evt);
     }
@@ -2557,49 +2180,76 @@ namespace TTD
             return;
         }
 
-        NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction* gpAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction, NSLogEvents::EventKind::HasPropertyActionTag>(&gpAction);
-        gpAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
-        gpAction->u_pid = pRecord->GetPropertyId();
+        NSLogEvents::JsRTSingleVarScalarArgumentAction* gpAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarScalarArgumentAction, NSLogEvents::EventKind::HasPropertyActionTag>(&gpAction);
+        NSLogEvents::SetVarItem_0(gpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
+        NSLogEvents::SetPropertyIdItem(gpAction, pRecord->GetPropertyId());
+
+        actionPopper.InitializeWithEventAndEnter(evt);
+    }
+
+    void EventLog::RecordJsRTHasOwnProperty(TTDJsRTActionResultAutoRecorder& actionPopper, const Js::PropertyRecord* pRecord, Js::Var var)
+    {
+        //The host may not have validated this yet (and will exit early if the check fails) so we check it here as well before getting the property id below
+        if(pRecord == nullptr || Js::IsInternalPropertyId(pRecord->GetPropertyId()))
+        {
+            return;
+        }
+
+        NSLogEvents::JsRTSingleVarScalarArgumentAction* gpAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarScalarArgumentAction, NSLogEvents::EventKind::HasOwnPropertyActionTag>(&gpAction);
+        NSLogEvents::SetVarItem_0(gpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
+        NSLogEvents::SetPropertyIdItem(gpAction, pRecord->GetPropertyId());
 
         actionPopper.InitializeWithEventAndEnter(evt);
     }
 
     void EventLog::RecordJsRTInstanceOf(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var object, Js::Var constructor)
     {
-        NSLogEvents::JsRTVarsArgumentAction* gpAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::InstanceOfActionTag>(&gpAction);
-        gpAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(object);
-        gpAction->Var2 = TTD_CONVERT_JSVAR_TO_TTDVAR(constructor);
+        NSLogEvents::JsRTDoubleVarArgumentAction* gpAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTDoubleVarArgumentAction, NSLogEvents::EventKind::InstanceOfActionTag>(&gpAction);
+        NSLogEvents::SetVarItem_0(gpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(object));
+        NSLogEvents::SetVarItem_1(gpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(constructor));
 
         actionPopper.InitializeWithEventAndEnter(evt);
     }
 
     void EventLog::RecordJsRTEquals(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var1, Js::Var var2, bool doStrict)
     {
-        NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction* gpAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction, NSLogEvents::EventKind::EqualsActionTag>(&gpAction);
-        gpAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var1);
-        gpAction->Var2 = TTD_CONVERT_JSVAR_TO_TTDVAR(var2);
-        gpAction->u_bVal = doStrict;
+        NSLogEvents::JsRTDoubleVarSingleScalarArgumentAction* gpAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTDoubleVarSingleScalarArgumentAction, NSLogEvents::EventKind::EqualsActionTag>(&gpAction);
+        NSLogEvents::SetVarItem_0(gpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var1));
+        NSLogEvents::SetVarItem_1(gpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var2));
+        NSLogEvents::SetScalarItem_0(gpAction, doStrict);
+
+        actionPopper.InitializeWithEventAndEnter(evt);
+    }
+
+    void EventLog::RecordJsRTLessThan(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var1, Js::Var var2, bool allowsEqual)
+    {
+        NSLogEvents::JsRTDoubleVarSingleScalarArgumentAction* gpAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTDoubleVarSingleScalarArgumentAction, NSLogEvents::EventKind::LessThanActionTag>(&gpAction);
+        NSLogEvents::SetVarItem_0(gpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var1));
+        NSLogEvents::SetVarItem_1(gpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var2));
+        NSLogEvents::SetScalarItem_0(gpAction, allowsEqual);
 
         actionPopper.InitializeWithEventAndEnter(evt);
     }
 
     void EventLog::RecordJsRTGetPropertyIdFromSymbol(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var sym)
     {
-        NSLogEvents::JsRTVarsArgumentAction* gpAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::GetPropertyIdFromSymbolTag>(&gpAction);
-        gpAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(sym);
+        NSLogEvents::JsRTSingleVarArgumentAction* gpAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::GetPropertyIdFromSymbolTag>(&gpAction);
+        NSLogEvents::SetVarItem_0(gpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(sym));
 
         actionPopper.InitializeWithEventAndEnter(evt);
     }
 
     void EventLog::RecordJsRTGetPrototype(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var)
     {
-        NSLogEvents::JsRTVarsArgumentAction* gpAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::GetPrototypeActionTag>(&gpAction);
-        gpAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
+        NSLogEvents::JsRTSingleVarArgumentAction* gpAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::GetPrototypeActionTag>(&gpAction);
+        NSLogEvents::SetVarItem_0(gpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(gpAction->Result));
     }
@@ -2612,20 +2262,20 @@ namespace TTD
             return;
         }
 
-        NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction* gpAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction, NSLogEvents::EventKind::GetPropertyActionTag>(&gpAction);
-        gpAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
-        gpAction->u_pid = pRecord->GetPropertyId();
+        NSLogEvents::JsRTSingleVarScalarArgumentAction* gpAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarScalarArgumentAction, NSLogEvents::EventKind::GetPropertyActionTag>(&gpAction);
+        NSLogEvents::SetVarItem_0(gpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
+        NSLogEvents::SetPropertyIdItem(gpAction, pRecord->GetPropertyId());
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(gpAction->Result));
     }
 
     void EventLog::RecordJsRTGetIndex(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var index, Js::Var var)
     {
-        NSLogEvents::JsRTVarsArgumentAction* giAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::GetIndexActionTag>(&giAction);
-        giAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
-        giAction->Var2 = TTD_CONVERT_JSVAR_TO_TTDVAR(index);
+        NSLogEvents::JsRTDoubleVarArgumentAction* giAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTDoubleVarArgumentAction, NSLogEvents::EventKind::GetIndexActionTag>(&giAction);
+        NSLogEvents::SetVarItem_0(giAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
+        NSLogEvents::SetVarItem_1(giAction, TTD_CONVERT_JSVAR_TO_TTDVAR(index));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(giAction->Result));
     }
@@ -2638,28 +2288,28 @@ namespace TTD
             return;
         }
 
-        NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction* gpAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction, NSLogEvents::EventKind::GetOwnPropertyInfoActionTag>(&gpAction);
-        gpAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
-        gpAction->u_pid = pRecord->GetPropertyId();
+        NSLogEvents::JsRTSingleVarScalarArgumentAction* gpAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarScalarArgumentAction, NSLogEvents::EventKind::GetOwnPropertyInfoActionTag>(&gpAction);
+        NSLogEvents::SetVarItem_0(gpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
+        NSLogEvents::SetPropertyIdItem(gpAction, pRecord->GetPropertyId());
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(gpAction->Result));
     }
 
     void EventLog::RecordJsRTGetOwnPropertyNamesInfo(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var)
     {
-        NSLogEvents::JsRTVarsArgumentAction* gpAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::GetOwnPropertyNamesInfoActionTag>(&gpAction);
-        gpAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
+        NSLogEvents::JsRTSingleVarArgumentAction* gpAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::GetOwnPropertyNamesInfoActionTag>(&gpAction);
+        NSLogEvents::SetVarItem_0(gpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(gpAction->Result));
     }
 
     void EventLog::RecordJsRTGetOwnPropertySymbolsInfo(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var)
     {
-        NSLogEvents::JsRTVarsArgumentAction* gpAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::GetOwnPropertySymbolsInfoActionTag>(&gpAction);
-        gpAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
+        NSLogEvents::JsRTSingleVarArgumentAction* gpAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::GetOwnPropertySymbolsInfoActionTag>(&gpAction);
+        NSLogEvents::SetVarItem_0(gpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(gpAction->Result));
     }
@@ -2672,11 +2322,11 @@ namespace TTD
             return;
         }
 
-        NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction* dpAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsWithIntegralUnionArgumentAction, NSLogEvents::EventKind::DefinePropertyActionTag>(&dpAction);
-        dpAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
-        dpAction->Var2 = TTD_CONVERT_JSVAR_TO_TTDVAR(propertyDescriptor);
-        dpAction->u_pid = pRecord->GetPropertyId();
+        NSLogEvents::JsRTDoubleVarSingleScalarArgumentAction* dpAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTDoubleVarSingleScalarArgumentAction, NSLogEvents::EventKind::DefinePropertyActionTag>(&dpAction);
+        NSLogEvents::SetVarItem_0(dpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
+        NSLogEvents::SetVarItem_1(dpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(propertyDescriptor));
+        NSLogEvents::SetPropertyIdItem(dpAction, pRecord->GetPropertyId());
 
         actionPopper.InitializeWithEventAndEnter(evt);
     }
@@ -2689,21 +2339,21 @@ namespace TTD
             return;
         }
 
-        NSLogEvents::JsRTVarsWithBoolAndPIDArgumentAction* dpAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsWithBoolAndPIDArgumentAction, NSLogEvents::EventKind::DeletePropertyActionTag>(&dpAction);
-        dpAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
-        dpAction->Pid = pRecord->GetPropertyId();
-        dpAction->BoolVal = useStrictRules;
+        NSLogEvents::JsRTSingleVarDoubleScalarArgumentAction* dpAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTSingleVarDoubleScalarArgumentAction, NSLogEvents::EventKind::DeletePropertyActionTag>(&dpAction);
+        NSLogEvents::SetVarItem_0(dpAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
+        NSLogEvents::SetPropertyIdItem(dpAction, pRecord->GetPropertyId());
+        NSLogEvents::SetScalarItem_1(dpAction, useStrictRules);
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(dpAction->Result));
     }
 
     void EventLog::RecordJsRTSetPrototype(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var, Js::Var proto)
     {
-        NSLogEvents::JsRTVarsArgumentAction* spAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::SetPrototypeActionTag>(&spAction);
-        spAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
-        spAction->Var2 = TTD_CONVERT_JSVAR_TO_TTDVAR(proto);
+        NSLogEvents::JsRTDoubleVarArgumentAction* spAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTDoubleVarArgumentAction, NSLogEvents::EventKind::SetPrototypeActionTag>(&spAction);
+        NSLogEvents::SetVarItem_0(spAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
+        NSLogEvents::SetVarItem_1(spAction, TTD_CONVERT_JSVAR_TO_TTDVAR(proto));
 
         actionPopper.InitializeWithEventAndEnter(evt);
     }
@@ -2716,41 +2366,50 @@ namespace TTD
             return;
         }
 
-        NSLogEvents::JsRTVarsWithBoolAndPIDArgumentAction* spAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsWithBoolAndPIDArgumentAction, NSLogEvents::EventKind::SetPropertyActionTag>(&spAction);
-        spAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
-        spAction->Var2 = TTD_CONVERT_JSVAR_TO_TTDVAR(val);
-        spAction->Pid = pRecord->GetPropertyId();
-        spAction->BoolVal = useStrictRules;
+        NSLogEvents::JsRTDoubleVarDoubleScalarArgumentAction* spAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTDoubleVarDoubleScalarArgumentAction, NSLogEvents::EventKind::SetPropertyActionTag>(&spAction);
+        NSLogEvents::SetVarItem_0(spAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
+        NSLogEvents::SetVarItem_1(spAction, TTD_CONVERT_JSVAR_TO_TTDVAR(val));
+        NSLogEvents::SetPropertyIdItem(spAction, pRecord->GetPropertyId());
+        NSLogEvents::SetScalarItem_1(spAction, useStrictRules);
 
         actionPopper.InitializeWithEventAndEnter(evt);
     }
 
     void EventLog::RecordJsRTSetIndex(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var var, Js::Var index, Js::Var val)
     {
-        NSLogEvents::JsRTVarsArgumentAction* spAction = nullptr;
-        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::SetIndexActionTag>(&spAction);
-        spAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
-        spAction->Var2 = TTD_CONVERT_JSVAR_TO_TTDVAR(index);
-        spAction->Var3 = TTD_CONVERT_JSVAR_TO_TTDVAR(val);
+        NSLogEvents::JsRTTrippleVarArgumentAction* spAction = nullptr;
+        NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTTrippleVarArgumentAction, NSLogEvents::EventKind::SetIndexActionTag>(&spAction);
+        NSLogEvents::SetVarItem_0(spAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
+        NSLogEvents::SetVarItem_1(spAction, TTD_CONVERT_JSVAR_TO_TTDVAR(index));
+        NSLogEvents::SetVarItem_2(spAction, TTD_CONVERT_JSVAR_TO_TTDVAR(val));
 
         actionPopper.InitializeWithEventAndEnter(evt);
     }
 
     void EventLog::RecordJsRTGetTypedArrayInfo(Js::Var var, Js::Var result)
     {
-        NSLogEvents::JsRTVarsArgumentAction* giAction = this->RecordGetInitializedEvent_DataOnly<NSLogEvents::JsRTVarsArgumentAction, NSLogEvents::EventKind::GetTypedArrayInfoActionTag>();
-        giAction->Var1 = TTD_CONVERT_JSVAR_TO_TTDVAR(var);
+        NSLogEvents::JsRTSingleVarArgumentAction* giAction = this->RecordGetInitializedEvent_DataOnly<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::GetTypedArrayInfoActionTag>();
+        NSLogEvents::SetVarItem_0(giAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
 
-        //entry/exit status should be set to clead by initialization so don't need to do anything
+        // entry/exit status should be set to clear by initialization so don't need to do anything
+        giAction->Result = TTD_CONVERT_JSVAR_TO_TTDVAR(result);
+    }
+
+    void EventLog::RecordJsRTGetDataViewInfo(Js::Var var, Js::Var result)
+    {
+        NSLogEvents::JsRTSingleVarArgumentAction* giAction = this->RecordGetInitializedEvent_DataOnly<NSLogEvents::JsRTSingleVarArgumentAction, NSLogEvents::EventKind::GetDataViewInfoActionTag>();
+        NSLogEvents::SetVarItem_0(giAction, TTD_CONVERT_JSVAR_TO_TTDVAR(var));
+
+        // entry/exit status should be set to clear by initialization so don't need to do anything
         giAction->Result = TTD_CONVERT_JSVAR_TO_TTDVAR(result);
     }
 
     void EventLog::RecordJsRTRawBufferCopySync(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var dst, uint32 dstIndex, Js::Var src, uint32 srcIndex, uint32 length)
     {
-        AssertMsg(Js::ArrayBuffer::Is(dst) && Js::ArrayBuffer::Is(src), "Not array buffer objects!!!");
-        AssertMsg(dstIndex + length <= Js::ArrayBuffer::FromVar(dst)->GetByteLength(), "Copy off end of buffer!!!");
-        AssertMsg(srcIndex + length <= Js::ArrayBuffer::FromVar(src)->GetByteLength(), "Copy off end of buffer!!!");
+        TTDAssert(Js::ArrayBuffer::Is(dst) && Js::ArrayBuffer::Is(src), "Not array buffer objects!!!");
+        TTDAssert(dstIndex + length <= Js::ArrayBuffer::FromVar(dst)->GetByteLength(), "Copy off end of buffer!!!");
+        TTDAssert(srcIndex + length <= Js::ArrayBuffer::FromVar(src)->GetByteLength(), "Copy off end of buffer!!!");
 
         NSLogEvents::JsRTRawBufferCopyAction* rbcAction = nullptr;
         NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTRawBufferCopyAction, NSLogEvents::EventKind::RawBufferCopySync>(&rbcAction);
@@ -2765,8 +2424,8 @@ namespace TTD
 
     void EventLog::RecordJsRTRawBufferModifySync(TTDJsRTActionResultAutoRecorder& actionPopper, Js::Var dst, uint32 index, uint32 count)
     {
-        AssertMsg(Js::ArrayBuffer::Is(dst), "Not array buffer object!!!");
-        AssertMsg(index + count <= Js::ArrayBuffer::FromVar(dst)->GetByteLength(), "Copy off end of buffer!!!");
+        TTDAssert(Js::ArrayBuffer::Is(dst), "Not array buffer object!!!");
+        TTDAssert(index + count <= Js::ArrayBuffer::FromVar(dst)->GetByteLength(), "Copy off end of buffer!!!");
 
         NSLogEvents::JsRTRawBufferModifyAction* rbmAction = nullptr;
         NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTRawBufferModifyAction, NSLogEvents::EventKind::RawBufferModifySync>(&rbmAction);
@@ -2824,39 +2483,23 @@ namespace TTD
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(ccAction->Result));
     }
 
-    void EventLog::RecordJsRTCallbackOperation(Js::ScriptContext* ctx, bool isCreate, bool isCancel, bool isRepeating, Js::JavascriptFunction* func, int64 callbackId)
-    {
-        NSLogEvents::JsRTCallbackAction* cbrAction = this->RecordGetInitializedEvent_DataOnly<NSLogEvents::JsRTCallbackAction, NSLogEvents::EventKind::CallbackOpActionTag>();
-        cbrAction->CurrentCallbackId = this->m_hostCallbackId;
-        cbrAction->NewCallbackId = callbackId;
-
-        //Register location is blank in record -- we only fill it in during debug replay
-
-        cbrAction->IsCreate = isCreate;
-        cbrAction->IsCancel = isCancel;
-        cbrAction->IsRepeating = isRepeating;
-
-        cbrAction->RegisterLocation = nullptr;
-    }
-
-    NSLogEvents::EventLogEntry* EventLog::RecordJsRTCodeParse(TTDJsRTActionResultAutoRecorder& actionPopper, LoadScriptFlag loadFlag, bool isUft8, const byte* script, uint32 scriptByteLength, DWORD_PTR sourceContextId, const char16* sourceUri)
+    NSLogEvents::EventLogEntry* EventLog::RecordJsRTCodeParse(TTDJsRTActionResultAutoRecorder& actionPopper, LoadScriptFlag loadFlag, bool isUft8, const byte* script, uint32 scriptByteLength, uint64 sourceContextId, const char16* sourceUri)
     {
         NSLogEvents::JsRTCodeParseAction* cpAction = nullptr;
         NSLogEvents::EventLogEntry* evt = this->RecordGetInitializedEvent<NSLogEvents::JsRTCodeParseAction, NSLogEvents::EventKind::CodeParseActionTag>(&cpAction);
-        cpAction->AdditionalInfo = this->m_eventSlabAllocator.SlabAllocateStruct<NSLogEvents::JsRTCodeParseAction_AdditionalInfo>();
 
         cpAction->BodyCtrId = 0; //initialize to known default -- should always update later or something is wrong
 
-        cpAction->AdditionalInfo->IsUtf8 = isUft8;
-        cpAction->AdditionalInfo->SourceByteLength = scriptByteLength;
+        cpAction->IsUtf8 = isUft8;
+        cpAction->SourceByteLength = scriptByteLength;
 
-        cpAction->AdditionalInfo->SourceCode = this->m_eventSlabAllocator.SlabAllocateArray<byte>(cpAction->AdditionalInfo->SourceByteLength);
-        js_memcpy_s(cpAction->AdditionalInfo->SourceCode, cpAction->AdditionalInfo->SourceByteLength, script, scriptByteLength);
+        cpAction->SourceCode = this->m_eventSlabAllocator.SlabAllocateArray<byte>(cpAction->SourceByteLength);
+        js_memcpy_s(cpAction->SourceCode, cpAction->SourceByteLength, script, scriptByteLength);
 
-        this->m_eventSlabAllocator.CopyNullTermStringInto(sourceUri, cpAction->AdditionalInfo->SourceUri);
-        cpAction->AdditionalInfo->DocumentID = sourceContextId;
+        this->m_eventSlabAllocator.CopyNullTermStringInto(sourceUri, cpAction->SourceUri);
+        cpAction->SourceContextId = sourceContextId;
 
-        cpAction->AdditionalInfo->LoadFlag = loadFlag;
+        cpAction->LoadFlag = loadFlag;
 
         actionPopper.InitializeWithEventAndEnterWResult(evt, &(cpAction->Result));
 
@@ -2870,8 +2513,7 @@ namespace TTD
 
         int64 evtTime = this->GetLastEventTime();
         int64 topLevelCallTime = (rootDepth == 0) ? evtTime : this->m_topLevelCallbackEventTime;
-        double wallTime = this->m_timer.Now();
-        NSLogEvents::JsRTCallFunctionAction_ProcessArgs(evt, rootDepth, evtTime, funcVar, argCount, args, wallTime, topLevelCallTime, this->m_eventSlabAllocator);
+        NSLogEvents::JsRTCallFunctionAction_ProcessArgs(evt, rootDepth, evtTime, funcVar, argCount, args, topLevelCallTime, this->m_eventSlabAllocator);
 
 #if ENABLE_TTD_INTERNAL_DIAGNOSTICS
         NSLogEvents::JsRTCallFunctionAction_ProcessDiagInfoPre(evt, funcVar, this->m_eventSlabAllocator);
@@ -2882,23 +2524,60 @@ namespace TTD
         return evt;
     }
 
-    void EventLog::EmitLog()
+    void EventLog::InnerLoopEmitLog(const TTDebuggerSourceLocation& writeLocation, const char* emitUri, size_t emitUriLength)
+    {
+        //Events are slab allocated with header immediately followed by payload -- we need to replicate this layout here so we allocate an array and explicitly layout.
+        //See definition of GetNextAvailableEntry and GetInlineEventDataAs for more detail.
+        byte buff[TTD_EVENT_PLUS_DATA_SIZE(NSLogEvents::TTDInnerLoopLogWriteEventLogEntry)];
+
+        NSLogEvents::EventLogEntry* entry = reinterpret_cast<NSLogEvents::EventLogEntry*>(buff);
+        NSLogEvents::EventLogEntry_Initialize<NSLogEvents::EventKind::TTDInnerLoopLogWriteTag>(entry, this->m_eventTimeCtr);
+
+        NSLogEvents::TTDInnerLoopLogWriteEventLogEntry* evt = NSLogEvents::GetInlineEventDataAs<NSLogEvents::TTDInnerLoopLogWriteEventLogEntry, NSLogEvents::EventKind::TTDInnerLoopLogWriteTag>(entry);
+
+        evt->SourceScriptLogId = writeLocation.GetScriptLogTagId();
+        evt->EventTime = writeLocation.GetRootEventTime();
+        evt->FunctionTime = writeLocation.GetFunctionTime();
+        evt->LoopTime = writeLocation.GetLoopTime();
+
+        evt->TopLevelBodyId = writeLocation.GetTopLevelBodyId();
+        evt->FunctionLine = writeLocation.GetFunctionSourceLine();
+        evt->FunctionColumn = writeLocation.GetFunctionSourceColumn();
+
+        evt->Line = writeLocation.GetSourceLine();
+        evt->Column = writeLocation.GetSourceColumn();
+
+        this->EmitLog(emitUri, emitUriLength, entry);
+    }
+
+    bool EventLog::CanWriteInnerLoopTrace() const
+    {
+        bool isInnerLoop = (this->m_currentMode & (TTDMode::RecordDebuggerMode)) == TTDMode::RecordDebuggerMode;
+        bool isEnabled = (this->m_currentMode & (TTDMode::CurrentlyEnabled)) == TTDMode::CurrentlyEnabled;
+
+        return isInnerLoop & isEnabled;
+    }
+
+    bool EventLog::SuppressDiagnosticTracesDuringInnerLoop() const
+    {
+        return (this->m_currentMode & (TTDMode::DebuggerAttachedMode)) == TTDMode::DebuggerAttachedMode;
+    }
+
+    void EventLog::EmitLog(const char* emitUri, size_t emitUriLength, NSLogEvents::EventLogEntry* optInnerLoopEvent)
     {
 #if ENABLE_BASIC_TRACE || ENABLE_FULL_BC_TRACE
-        this->m_diagnosticLogger.ForceFlush();
+        this->m_threadContext->TTDExecutionInfo->GetTraceLogger()->ForceFlush();
 #endif
 
-        const IOStreamFunctions& iofp = this->m_threadContext->TTDContext->TTDStreamFunctions;
+        TTDataIOInfo& iofp = this->m_threadContext->TTDContext->TTDataIOInfo;
+        iofp.ActiveTTUriLength = emitUriLength;
+        iofp.ActiveTTUri = emitUri;
 
-        //
-        //TODO: we want to update this so that we can output multiple snapshots to different sub-locations... also add input param with location info
-        //
-        const TTUriString& outUri = this->m_threadContext->TTDContext->TTDUri;
+        const char* logfilename = "ttdlog.log";
+        JsTTDStreamHandle logHandle = iofp.pfOpenResourceStream(iofp.ActiveTTUriLength, iofp.ActiveTTUri, strlen(logfilename), logfilename, false, true);
+        TTDAssert(logHandle != nullptr, "Failed to initialize strem for writing TTD Log.");
 
-        this->m_threadContext->TTDContext->TTDWriteInitializeFunction(outUri.UriByteLength, outUri.UriBytes);
-
-        JsTTDStreamHandle logHandle = iofp.pfGetResourceStream(outUri.UriByteLength, outUri.UriBytes, "ttdlog.log", false, true);
-        TTD_LOG_WRITER writer(logHandle, TTD_COMPRESSED_OUTPUT, iofp.pfWriteBytesToStream, iofp.pfFlushAndCloseStream);
+        TTD_LOG_WRITER writer(logHandle, iofp.pfWriteBytesToStream, iofp.pfFlushAndCloseStream);
 
         writer.WriteRecordStart();
         writer.AdjustIndent(1);
@@ -2918,6 +2597,17 @@ namespace TTD
 
         writer.WriteString(NSTokens::Key::arch, archString);
 
+        TTString platformString;
+#if defined(_WIN32)
+        this->m_miscSlabAllocator.CopyNullTermStringInto(_u("Windows"), platformString);
+#elif defined(__APPLE__)
+        this->m_miscSlabAllocator.CopyNullTermStringInto(_u("macOS"), platformString);
+#else
+        this->m_miscSlabAllocator.CopyNullTermStringInto(_u("Linux"), platformString);
+#endif
+
+        writer.WriteString(NSTokens::Key::platform, platformString, NSTokens::Separator::CommaSeparator);
+
 #if ENABLE_TTD_INTERNAL_DIAGNOSTICS
         bool diagEnabled = true;
 #else
@@ -2933,7 +2623,7 @@ namespace TTD
         writer.WriteUInt64(NSTokens::Key::usedMemory, usedSpace, NSTokens::Separator::CommaSeparator);
         writer.WriteUInt64(NSTokens::Key::reservedMemory, reservedSpace, NSTokens::Separator::CommaSeparator);
 
-        uint32 ecount = this->m_eventList.Count();
+        uint32 ecount = this->m_eventList.Count() + (optInnerLoopEvent != nullptr ? 1 : 0);
         writer.WriteLengthValue(ecount, NSTokens::Separator::CommaAndBigSpaceSeparator);
 
 #if ENABLE_TTD_INTERNAL_DIAGNOSTICS
@@ -2944,7 +2634,7 @@ namespace TTD
 
         writer.WriteSequenceStart_DefaultKey(NSTokens::Separator::CommaSeparator);
         writer.AdjustIndent(1);
-        writer.WriteSeperator(NSTokens::Separator::BigSpaceSeparator);
+        writer.WriteSeparator(NSTokens::Separator::BigSpaceSeparator);
         for(auto iter = this->m_eventList.GetIteratorAtFirst(); iter.IsValid(); iter.MoveNext())
         {
             const NSLogEvents::EventLogEntry* evt = iter.Current();
@@ -2980,7 +2670,7 @@ namespace TTD
                 {
                     writer.AdjustIndent(1);
 
-                    writer.WriteSeperator(NSTokens::Separator::BigSpaceSeparator);
+                    writer.WriteSeparator(NSTokens::Separator::BigSpaceSeparator);
                     firstElem = true;
                 }
             }
@@ -2992,7 +2682,7 @@ namespace TTD
                 if(!isJsRTCall & !isExternalCall & !isRegisterCall)
                 {
                     writer.AdjustIndent(-1);
-                    writer.WriteSeperator(NSTokens::Separator::BigSpaceSeparator);
+                    writer.WriteSeparator(NSTokens::Separator::BigSpaceSeparator);
                 }
                 writer.WriteSequenceEnd();
 
@@ -3006,35 +2696,26 @@ namespace TTD
             }
 #endif
         }
+
+        if (optInnerLoopEvent != nullptr)
+        {
+            //Emit the special event that indicates we want to break at the end of the log (with a known breakpoint time)
+            NSLogEvents::EventLogEntry_Emit(optInnerLoopEvent, this->m_eventListVTable, &writer, this->m_threadContext, NSTokens::Separator::BigSpaceSeparator);
+        }
+
         writer.AdjustIndent(-1);
         writer.WriteSequenceEnd(NSTokens::Separator::BigSpaceSeparator);
 
-        //we haven't moved the properties to their serialized form them take care of it
-        AssertMsg(this->m_propertyRecordList.Count() == 0, "We only compute this when we are ready to emit.");
-
-        for(auto iter = this->m_propertyRecordPinSet->GetIterator(); iter.IsValid(); iter.MoveNext())
-        {
-            Js::PropertyRecord* pRecord = static_cast<Js::PropertyRecord*>(iter.CurrentValue());
-            NSSnapType::SnapPropertyRecord* sRecord = this->m_propertyRecordList.NextOpenEntry();
-
-            sRecord->PropertyId = pRecord->GetPropertyId();
-            sRecord->IsNumeric = pRecord->IsNumeric();
-            sRecord->IsBound = pRecord->IsBound();
-            sRecord->IsSymbol = pRecord->IsSymbol();
-
-            this->m_miscSlabAllocator.CopyStringIntoWLength(pRecord->GetBuffer(), pRecord->GetLength(), sRecord->PropertyName);
-        }
-
         //emit the properties
-        writer.WriteLengthValue(this->m_propertyRecordList.Count(), NSTokens::Separator::CommaSeparator);
+        writer.WriteLengthValue(this->m_propertyRecordPinSet->Count(), NSTokens::Separator::CommaSeparator);
 
         writer.WriteSequenceStart_DefaultKey(NSTokens::Separator::CommaSeparator);
         writer.AdjustIndent(1);
         bool firstProperty = true;
-        for(auto iter = this->m_propertyRecordList.GetIterator(); iter.IsValid(); iter.MoveNext())
+        for(auto iter = this->m_propertyRecordPinSet->GetIterator(); iter.IsValid(); iter.MoveNext())
         {
             NSTokens::Separator sep = (!firstProperty) ? NSTokens::Separator::CommaAndBigSpaceSeparator : NSTokens::Separator::BigSpaceSeparator;
-            NSSnapType::EmitSnapPropertyRecord(iter.Current(), &writer, sep);
+            NSSnapType::EmitPropertyRecordAsSnapPropertyRecord(iter.CurrentValue(), &writer, sep);
 
             firstProperty = false;
         }
@@ -3042,6 +2723,8 @@ namespace TTD
         writer.WriteSequenceEnd(NSTokens::Separator::BigSpaceSeparator);
 
         //do top level script processing here
+        writer.WriteUInt32(NSTokens::Key::u32Val, this->m_sourceInfoCount, NSTokens::Separator::CommaSeparator);
+
         writer.WriteLengthValue(this->m_loadedTopLevelScripts.Count(), NSTokens::Separator::CommaSeparator);
         writer.WriteSequenceStart_DefaultKey(NSTokens::Separator::CommaSeparator);
         writer.AdjustIndent(1);
@@ -3089,12 +2772,21 @@ namespace TTD
         writer.WriteRecordEnd(NSTokens::Separator::BigSpaceSeparator);
 
         writer.FlushAndClose();
+
+        iofp.ActiveTTUriLength = 0;
+        iofp.ActiveTTUri = nullptr;
     }
 
-    void EventLog::ParseLogInto(const IOStreamFunctions& iofp, size_t uriByteLength, const byte* uriBytes)
+    void EventLog::ParseLogInto(TTDataIOInfo& iofp, const char* parseUri, size_t parseUriLength)
     {
-        JsTTDStreamHandle logHandle = iofp.pfGetResourceStream(uriByteLength, uriBytes, "ttdlog.log", true, false);
-        TTD_LOG_READER reader(logHandle, TTD_COMPRESSED_OUTPUT, iofp.pfReadBytesFromStream, iofp.pfFlushAndCloseStream);
+        iofp.ActiveTTUriLength = parseUriLength;
+        iofp.ActiveTTUri = parseUri;
+
+        const char* logfilename = "ttdlog.log";
+        JsTTDStreamHandle logHandle = iofp.pfOpenResourceStream(iofp.ActiveTTUriLength, iofp.ActiveTTUri, strlen(logfilename), logfilename, true, false);
+        TTDAssert(logHandle != nullptr, "Failed to initialize strem for reading TTD Log.");
+
+        TTD_LOG_READER reader(logHandle, iofp.pfReadBytesFromStream, iofp.pfFlushAndCloseStream);
 
         reader.ReadRecordStart();
 
@@ -3102,30 +2794,32 @@ namespace TTD
         reader.ReadString(NSTokens::Key::arch, this->m_miscSlabAllocator, archString);
 
 #if defined(_M_IX86)
-        AssertMsg(wcscmp(_u("x86"), archString.Contents) == 0, "Mismatch in arch between record and replay!!!");
+        TTDAssert(wcscmp(_u("x86"), archString.Contents) == 0, "Mismatch in arch between record and replay!!!");
 #elif defined(_M_X64)
-        AssertMsg(wcscmp(_u("x64"), archString.Contents) == 0, "Mismatch in arch between record and replay!!!");
+        TTDAssert(wcscmp(_u("x64"), archString.Contents) == 0, "Mismatch in arch between record and replay!!!");
 #elif defined(_M_ARM)
-        AssertMsg(wcscmp(_u("arm64"), archString.Contents) == 0, "Mismatch in arch between record and replay!!!");
+        TTDAssert(wcscmp(_u("arm64"), archString.Contents) == 0, "Mismatch in arch between record and replay!!!");
 #else
-        AssertMsg(false, "Unknown arch!!!");
+        TTDAssert(false, "Unknown arch!!!");
 #endif
+
+        //This is informational only so just read off the value and ignore
+        TTString platformString;
+        reader.ReadString(NSTokens::Key::platform, this->m_miscSlabAllocator, platformString, true);
 
         bool diagEnabled = reader.ReadBool(NSTokens::Key::diagEnabled, true);
 
 #if ENABLE_TTD_INTERNAL_DIAGNOSTICS
-        AssertMsg(diagEnabled, "Diag was enabled in record so it shoud be in replay as well!!!");
+        TTDAssert(diagEnabled, "Diag was enabled in record so it should be in replay as well!!!");
 #else
-        AssertMsg(!diagEnabled, "Diag was *not* enabled in record so it shoud *not* be in replay either!!!");
+        TTDAssert(!diagEnabled, "Diag was *not* enabled in record so it should *not* be in replay either!!!");
 #endif
 
         reader.ReadUInt64(NSTokens::Key::usedMemory, true);
         reader.ReadUInt64(NSTokens::Key::reservedMemory, true);
 
 #if ENABLE_TTD_INTERNAL_DIAGNOSTICS
-        int64 callNestingStack[32];
-        int32 stackPos = -1;
-        const int32 MaxStackPos = 32;
+        JsUtil::Stack<int64, HeapAllocator> callNestingStack(&HeapAllocator::Instance);
 
         bool doSep = false;
 #endif
@@ -3134,8 +2828,12 @@ namespace TTD
         reader.ReadSequenceStart_WDefaultKey(true);
         for(uint32 i = 0; i < ecount; ++i)
         {
-            NSLogEvents::EventLogEntry* evt = this->m_eventList.GetNextAvailableEntry();
-            NSLogEvents::EventLogEntry_Parse(evt, this->m_eventListVTable, false, this->m_threadContext, &reader, this->m_eventSlabAllocator);
+            NSLogEvents::EventKind evtKind = NSLogEvents::EventLogEntry_ParseHeader(false, &reader);
+
+            NSLogEvents::EventLogEntry* evt = this->m_eventList.GetNextAvailableEntry(this->m_eventListVTable[(uint32)evtKind].DataSize);
+            evt->EventKind = evtKind;
+
+            NSLogEvents::EventLogEntry_ParseRest(evt, this->m_eventListVTable, this->m_threadContext, &reader, this->m_eventSlabAllocator);
 
 #if ENABLE_TTD_INTERNAL_DIAGNOSTICS
             bool isJsRTCall = (evt->EventKind == NSLogEvents::EventKind::CallExistingFunctionActionTag);
@@ -3158,16 +2856,14 @@ namespace TTD
                 {
                     lastNestedTime = NSLogEvents::ExternalCbRegisterCallEventLogEntry_GetLastNestedEventTime(evt);
                 }
-                AssertMsg(stackPos < (MaxStackPos - 1), "overflow");
-                stackPos++;
-                callNestingStack[stackPos] = lastNestedTime;
+                callNestingStack.Push(lastNestedTime);
             }
 
             doSep = (!isJsRTCall & !isExternalCall & !isRegisterCall);
 
-            while(stackPos >= 0 && evt->EventTimeStamp == callNestingStack[stackPos])
+            while(callNestingStack.Count() != 0 && evt->EventTimeStamp == callNestingStack.Peek())
             {
-                stackPos--;
+                callNestingStack.Pop();
                 reader.ReadSequenceEnd();
             }
 #endif
@@ -3185,6 +2881,8 @@ namespace TTD
         reader.ReadSequenceEnd();
 
         //do top level script processing here
+        this->m_sourceInfoCount = reader.ReadUInt32(NSTokens::Key::u32Val, true);
+
         uint32 loadedScriptCount = reader.ReadLengthValue(true);
         reader.ReadSequenceStart_WDefaultKey(true);
         for(uint32 i = 0; i < loadedScriptCount; ++i)
@@ -3214,6 +2912,9 @@ namespace TTD
         //
 
         reader.ReadRecordEnd();
+
+        //After reading setup the previous event map
+        this->m_eventList.InitializePreviousEventMap();
     }
 }
 
