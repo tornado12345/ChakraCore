@@ -27,16 +27,7 @@ HRESULT JsInitializeJITServer(
         return status;
     }
 
-#ifndef NTBUILD
-    status = RpcServerRegisterIf2(
-        ServerIChakraJIT_v0_0_s_ifspec,
-        NULL,
-        NULL,
-        RPC_IF_AUTOLISTEN,
-        RPC_C_LISTEN_MAX_CALLS_DEFAULT,
-        (ULONG)-1,
-        NULL);
-#else
+#if (NTDDI_VERSION >= NTDDI_WIN8)
     status = RpcServerRegisterIf3(
         ServerIChakraJIT_v0_0_s_ifspec,
         NULL,
@@ -46,6 +37,15 @@ HRESULT JsInitializeJITServer(
         (ULONG)-1,
         NULL,
         securityDescriptor);
+#else
+    status = RpcServerRegisterIf2(
+        ServerIChakraJIT_v0_0_s_ifspec,
+        NULL,
+        NULL,
+        RPC_IF_AUTOLISTEN,
+        RPC_C_LISTEN_MAX_CALLS_DEFAULT,
+        (ULONG)-1,
+        NULL);
 #endif
     if (status != RPC_S_OK)
     {
@@ -119,85 +119,6 @@ __RPC_USER PSCRIPTCONTEXT_HANDLE_rundown(__RPC__in PSCRIPTCONTEXT_HANDLE phConte
     ServerCleanupScriptContext(nullptr, &phContext);
 }
 
-HRESULT CheckModuleAddress(HANDLE process, LPCVOID remoteImageBase, LPCVOID localImageBase)
-{
-    byte remoteImageHeader[0x1000];
-    MEMORY_BASIC_INFORMATION remoteImageInfo;
-    SIZE_T resultBytes = VirtualQueryEx(process, (LPCVOID)remoteImageBase, &remoteImageInfo, sizeof(remoteImageInfo));
-    if (resultBytes != sizeof(remoteImageInfo))
-    {
-        Assert(UNREACHED);
-        return E_ACCESSDENIED;
-    }
-    if (remoteImageInfo.BaseAddress != (PVOID)remoteImageBase)
-    {
-        Assert(UNREACHED);
-        return E_ACCESSDENIED;
-    }
-    if (remoteImageInfo.Type != MEM_IMAGE)
-    {
-        Assert(UNREACHED);
-        return E_ACCESSDENIED;
-    }
-    if (remoteImageInfo.State != MEM_COMMIT)
-    {
-        Assert(UNREACHED);
-        return E_ACCESSDENIED;
-    }
-
-    if (remoteImageInfo.RegionSize < sizeof(remoteImageHeader))
-    {
-        Assert(UNREACHED);
-        return E_ACCESSDENIED;
-    }
-
-    if (!ReadProcessMemory(process, remoteImageBase, remoteImageHeader, sizeof(remoteImageHeader), &resultBytes))
-    {
-        return HRESULT_FROM_WIN32(GetLastError());
-    }
-    if (resultBytes < sizeof(remoteImageHeader))
-    {
-        Assert(UNREACHED);
-        return E_ACCESSDENIED;
-    }
-    PIMAGE_DOS_HEADER localDosHeader = (PIMAGE_DOS_HEADER)localImageBase;
-    PIMAGE_NT_HEADERS localNtHeader = (PIMAGE_NT_HEADERS)((BYTE*)localDosHeader + localDosHeader->e_lfanew);
-
-    PIMAGE_DOS_HEADER remoteDosHeader = (PIMAGE_DOS_HEADER)remoteImageHeader;
-    PIMAGE_NT_HEADERS remoteNtHeader = (PIMAGE_NT_HEADERS)((BYTE*)remoteDosHeader + remoteDosHeader->e_lfanew);
-
-    uintptr_t remoteHeaderMax = (uintptr_t)remoteImageHeader + sizeof(remoteImageHeader);
-    uintptr_t remoteMaxRead = (uintptr_t)remoteNtHeader + sizeof(IMAGE_NT_HEADERS);
-    if (remoteMaxRead >= remoteHeaderMax || remoteMaxRead < (uintptr_t)remoteImageHeader)
-    {
-        Assert(UNREACHED);
-        return E_ACCESSDENIED;
-    }
-
-    if (localNtHeader->FileHeader.NumberOfSections != remoteNtHeader->FileHeader.NumberOfSections)
-    {
-        Assert(UNREACHED);
-        return E_ACCESSDENIED;
-    }
-    if (localNtHeader->FileHeader.NumberOfSymbols != remoteNtHeader->FileHeader.NumberOfSymbols)
-    {
-        Assert(UNREACHED);
-        return E_ACCESSDENIED;
-    }
-    if (localNtHeader->OptionalHeader.CheckSum != remoteNtHeader->OptionalHeader.CheckSum)
-    {
-        Assert(UNREACHED);
-        return E_ACCESSDENIED;
-    }
-    if (localNtHeader->OptionalHeader.SizeOfImage != remoteNtHeader->OptionalHeader.SizeOfImage)
-    {
-        Assert(UNREACHED);
-        return E_ACCESSDENIED;
-    }
-
-    return S_OK;
-}
-
 HRESULT
 ServerConnectProcess(
     handle_t binding,
@@ -229,16 +150,6 @@ ServerConnectProcess(
         return E_ACCESSDENIED;
     }
 #endif
-    hr = CheckModuleAddress(targetHandle, (LPCVOID)chakraBaseAddress, (LPCVOID)AutoSystemInfo::Data.dllLoadAddress);
-    if (FAILED(hr))
-    {
-        return hr;
-    }
-    hr = CheckModuleAddress(targetHandle, (LPCVOID)crtBaseAddress, (LPCVOID)AutoSystemInfo::Data.GetCRTHandle());
-    if (FAILED(hr))
-    {
-        return hr;
-    }
     return ProcessContextManager::RegisterNewProcess(clientPid, targetHandle, chakraBaseAddress, crtBaseAddress);
 }
 
@@ -310,6 +221,7 @@ ServerInitializeThreadContext(
         if (!PHASE_OFF1(Js::PreReservedHeapAllocPhase))
         {
             *prereservedRegionAddr = (intptr_t)contextInfo->GetPreReservedSectionAllocator()->EnsurePreReservedRegion();
+            contextInfo->SetCanCreatePreReservedSegment(*prereservedRegionAddr != 0);
         }
 #if !defined(_M_ARM)
         *jitThunkAddr = (intptr_t)contextInfo->GetJITThunkEmitter()->EnsureInitialized();
@@ -418,6 +330,11 @@ ServerAddDOMFastPathHelper(
         Assert(false);
         return RPC_S_INVALID_ARG;
     }
+    if (helper < 0 || helper >= IR::JnHelperMethodCount)
+    {
+        Assert(UNREACHED);
+        return E_ACCESSDENIED;
+    }
 
     return ServerCallWrapper(scriptContextInfo, [&]()->HRESULT
     {
@@ -519,11 +436,7 @@ ServerCloseScriptContext(
     return ServerCallWrapper(scriptContextInfo, [&]()->HRESULT
     {
 #ifdef PROFILE_EXEC
-        auto profiler = scriptContextInfo->GetCodeGenProfiler();
-        if (profiler && profiler->IsInitialized())
-        {
-            profiler->ProfilePrint(Js::Configuration::Global.flags.Profile.GetFirstPhase());
-        }
+        scriptContextInfo->GetFirstCodeGenProfiler()->ProfilePrint();
 #endif
         scriptContextInfo->Close();
         ServerContextManager::UnRegisterScriptContext(scriptContextInfo);
@@ -622,15 +535,15 @@ ServerNewInterpreterThunkBlock(
             &thunkCount
         );
 
-        emitBufferManager->CommitBufferForInterpreter(alloc, runtimeAddress, InterpreterThunkEmitter::BlockSize);
+        if (!emitBufferManager->CommitBufferForInterpreter(alloc, runtimeAddress, InterpreterThunkEmitter::BlockSize))
+        {
+            Js::Throw::OutOfMemory();
+        }
+
         // Call to set VALID flag for CFG check
         if (CONFIG_FLAG(OOPCFGRegistration))
         {
-            BYTE* callTarget = runtimeAddress;
-#ifdef _M_ARM
-            callTarget = (BYTE*)((uintptr_t)callTarget | 0x1); // Thumb-tag buffer to get actual callable value
-#endif
-            threadContext->SetValidCallTargetForCFG(callTarget);
+            emitBufferManager->SetValidCallTarget(alloc, runtimeAddress, true);
         }
 
         thunkOutput->thunkCount = thunkCount;
@@ -648,7 +561,7 @@ ServerNewInterpreterThunkBlock(
 HRESULT
 ServerIsInterpreterThunkAddr(
     /* [in] */ handle_t binding,
-    /* [in] */ PSCRIPTCONTEXT_HANDLE scriptContextInfoAddress,
+    /* [in] */ __RPC__in PSCRIPTCONTEXT_HANDLE scriptContextInfoAddress,
     /* [in] */ intptr_t address,
     /* [in] */ boolean asmjsThunk,
     /* [out] */ __RPC__out boolean * result)
@@ -676,10 +589,10 @@ ServerIsInterpreterThunkAddr(
 HRESULT
 ServerFreeAllocation(
     /* [in] */ handle_t binding,
-    /* [in] */ __RPC__in PTHREADCONTEXT_HANDLE threadContextInfo,
+    /* [in] */ __RPC__in PSCRIPTCONTEXT_HANDLE scriptContextInfo,
     /* [in] */ intptr_t codeAddress)
 {
-    ServerThreadContext * context = (ServerThreadContext*)DecodePointer(threadContextInfo);
+    ServerScriptContext* context = (ServerScriptContext*)DecodePointer(scriptContextInfo);
 
     if (context == nullptr)
     {
@@ -709,7 +622,7 @@ ServerIsNativeAddr(
 
     *result = false;
 
-    ServerThreadContext * context = (ServerThreadContext*)DecodePointer(threadContextInfo);
+    ServerThreadContext* context = (ServerThreadContext*)DecodePointer(threadContextInfo);
     if (context == nullptr)
     {
         Assert(false);
@@ -822,12 +735,10 @@ ServerRemoteCodeGen(
             Output::Flush();
         }
 
-        auto profiler = scriptContextInfo->GetCodeGenProfiler();
 #ifdef PROFILE_EXEC
-        if (profiler && !profiler->IsInitialized())
-        {
-            profiler->Initialize(pageAllocator, nullptr);
-        }
+        Js::ScriptContextProfiler* profiler = scriptContextInfo->GetCodeGenProfiler(pageAllocator);
+#else
+        Js::ScriptContextProfiler* profiler = nullptr;
 #endif
 
 #if !FLOATVAR
@@ -853,7 +764,7 @@ ServerRemoteCodeGen(
             nullptr,
             nullptr,
             jitWorkItem->GetPolymorphicInlineCacheInfo(),
-            threadContextInfo->GetCodeGenAllocators(),
+            scriptContextInfo->GetCodeGenAllocators(),
 #if !FLOATVAR
             nullptr, // number allocator
 #endif

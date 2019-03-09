@@ -58,6 +58,7 @@ Func::Func(JitArenaAllocator *alloc, JITTimeWorkItem * workItem,
     m_bailoutReturnValueSym(nullptr),
     m_hasBailedOutSym(nullptr),
     m_inlineeFrameStartSym(nullptr),
+    inlineeStart(nullptr),
     m_regsUsed(0),
     m_fg(nullptr),
     m_labelCount(0),
@@ -65,6 +66,8 @@ Func::Func(JitArenaAllocator *alloc, JITTimeWorkItem * workItem,
     m_hasCalls(false),
     m_hasInlineArgsOpt(false),
     m_canDoInlineArgsOpt(true),
+    unoptimizableArgumentsObjReference(0),
+    unoptimizableArgumentsObjReferenceInInlinees(0),
     m_doFastPaths(false),
     hasBailout(false),
     firstIRTemp(0),
@@ -72,6 +75,7 @@ Func::Func(JitArenaAllocator *alloc, JITTimeWorkItem * workItem,
     hasInstrNumber(false),
     maintainByteCodeOffset(true),
     frameSize(0),
+    topFunc(parentFunc ? parentFunc->topFunc : this),
     parentFunc(parentFunc),
     argObjSyms(nullptr),
     m_nonTempLocalVars(nullptr),
@@ -91,6 +95,7 @@ Func::Func(JitArenaAllocator *alloc, JITTimeWorkItem * workItem,
     hasInlinee(false),
     thisOrParentInlinerHasArguments(false),
     hasStackArgs(false),
+    hasArgLenAndConstOpt(false),
     hasImplicitParamLoad(false),
     hasThrow(false),
     hasNonSimpleParams(false),
@@ -105,10 +110,12 @@ Func::Func(JitArenaAllocator *alloc, JITTimeWorkItem * workItem,
     loopCount(0),
     callSiteIdInParentFunc(callSiteIdInParentFunc),
     isGetterSetter(isGetterSetter),
+    cachedInlineeFrameInfo(nullptr),
     frameInfo(nullptr),
     isTJLoopBody(false),
     m_nativeCodeDataSym(nullptr),
     isFlowGraphValid(false),
+    legalizePostRegAlloc(false),
 #if DBG
     m_callSiteCount(0),
 #endif
@@ -136,7 +143,6 @@ Func::Func(JitArenaAllocator *alloc, JITTimeWorkItem * workItem,
     , constantAddressRegOpnd(alloc)
     , lastConstantAddressRegLoadInstr(nullptr)
     , m_totalJumpTableSizeInBytesForSwitchStatements(0)
-    , slotArrayCheckTable(nullptr)
     , frameDisplayCheckTable(nullptr)
     , stackArgWithFormalsTracker(nullptr)
     , m_forInLoopBaseDepth(0)
@@ -149,6 +155,8 @@ Func::Func(JitArenaAllocator *alloc, JITTimeWorkItem * workItem,
 #ifdef RECYCLER_WRITE_BARRIER_JIT
     , m_lowerer(nullptr)
 #endif
+    , m_lazyBailOutRecordSlot(nullptr)
+    , hasLazyBailOut(false)
 {
 
     Assert(this->IsInlined() == !!runtimeInfo);
@@ -185,7 +193,7 @@ Func::Func(JitArenaAllocator *alloc, JITTimeWorkItem * workItem,
 
     if (m_workItem->Type() == JsFunctionType &&
         GetJITFunctionBody()->DoBackendArgumentsOptimization() &&
-        !GetJITFunctionBody()->HasTry())
+        (!GetJITFunctionBody()->HasTry() || this->DoOptimizeTry()))
     {
         // doBackendArgumentsOptimization bit is set when there is no eval inside a function
         // as determined by the bytecode generator.
@@ -262,7 +270,7 @@ Func::Func(JitArenaAllocator *alloc, JITTimeWorkItem * workItem,
         ObjTypeSpecFldInfo * info = GetWorkItem()->GetJITTimeInfo()->GetObjTypeSpecFldInfo(i);
         if (info != nullptr)
         {
-            Assert(info->GetObjTypeSpecFldId() < GetTopFunc()->GetWorkItem()->GetJITTimeInfo()->GetGlobalObjTypeSpecFldInfoCount());
+            AssertOrFailFast(info->GetObjTypeSpecFldId() < GetTopFunc()->GetWorkItem()->GetJITTimeInfo()->GetGlobalObjTypeSpecFldInfoCount());
             GetTopFunc()->m_globalObjTypeSpecFldInfoArray[info->GetObjTypeSpecFldId()] = info;
         }
     }
@@ -299,8 +307,10 @@ Func::Codegen(JitArenaAllocator *alloc, JITTimeWorkItem * workItem,
     Js::ScriptContextProfiler *const codeGenProfiler, const bool isBackgroundJIT)
 {
     bool rejit;
+    int rejitCounter = 0;
     do
     {
+        Assert(rejitCounter < 25);
         Func func(alloc, workItem, threadContextInfo,
             scriptContextInfo, outputData, epInfo, runtimeInfo,
             polymorphicInlineCacheInfo, codeGenAllocators, 
@@ -332,6 +342,8 @@ Func::Codegen(JitArenaAllocator *alloc, JITTimeWorkItem * workItem,
             case RejitReason::DisableStackArgOpt:
                 outputData->disableStackArgOpt = TRUE;
                 break;
+            case RejitReason::DisableStackArgLenAndConstOpt:
+                break;
             case RejitReason::DisableSwitchOptExpectingInteger:
             case RejitReason::DisableSwitchOptExpectingString:
                 outputData->disableSwitchOpt = TRUE;
@@ -358,6 +370,7 @@ Func::Codegen(JitArenaAllocator *alloc, JITTimeWorkItem * workItem,
             }
 
             rejit = true;
+            rejitCounter++;
         }
         // Either the entry point has a reference to the number now, or we failed to code gen and we
         // don't need to numbers, we can flush the completed page now.
@@ -1017,29 +1030,6 @@ Func::GetLocalsPointer() const
 
 #endif
 
-void Func::AddSlotArrayCheck(IR::SymOpnd *fieldOpnd)
-{
-    if (PHASE_OFF(Js::ClosureRangeCheckPhase, this))
-    {
-        return;
-    }
-
-    Assert(IsTopFunc());
-    if (this->slotArrayCheckTable == nullptr)
-    {
-        this->slotArrayCheckTable = SlotArrayCheckTable::New(m_alloc, 4);
-    }
-
-    PropertySym *propertySym = fieldOpnd->m_sym->AsPropertySym();
-    uint32 slot = propertySym->m_propertyId;
-    uint32 *pSlotId = this->slotArrayCheckTable->FindOrInsert(slot, propertySym->m_stackSym->m_id);
-
-    if (pSlotId && (*pSlotId == (uint32)-1 || *pSlotId < slot))
-    {
-        *pSlotId = propertySym->m_propertyId;
-    }
-}
-
 void Func::AddFrameDisplayCheck(IR::SymOpnd *fieldOpnd, uint32 slotId)
 {
     if (PHASE_OFF(Js::ClosureRangeCheckPhase, this))
@@ -1217,6 +1207,17 @@ Func::NumberInstrs()
     NEXT_INSTR_IN_FUNC;
 }
 
+#if DBG
+BVSparse<JitArenaAllocator>* Func::GetByteCodeOffsetUses(uint offset) const
+{
+    InstrByteCodeRegisterUses uses;
+    if (byteCodeRegisterUses->TryGetValue(offset, &uses))
+    {
+        return uses.bv;
+    }
+    return nullptr;
+}
+
 ///----------------------------------------------------------------------------
 ///
 /// Func::IsInPhase
@@ -1224,7 +1225,6 @@ Func::NumberInstrs()
 /// Determines whether the function is currently in the provided phase
 ///
 ///----------------------------------------------------------------------------
-#if DBG
 bool
 Func::IsInPhase(Js::Phase tag)
 {
@@ -1314,11 +1314,20 @@ Func::EndPhase(Js::Phase tag, bool dump)
     }
 #endif
 
+    if (tag == Js::RegAllocPhase)
+    {
+        this->legalizePostRegAlloc = true;
+    }
+
 #if DBG
     if (tag == Js::LowererPhase)
     {
         Assert(!this->isPostLower);
         this->isPostLower = true;
+#ifndef _M_ARM    // Need to verify ARM is clean.
+        DbCheckPostLower dbCheck(this);
+        dbCheck.CheckNestedHelperCalls();
+#endif
     }
     else if (tag == Js::RegAllocPhase)
     {
@@ -1350,28 +1359,6 @@ Func::EndPhase(Js::Phase tag, bool dump)
     }
     this->m_alloc->MergeDelayFreeList();
 #endif
-}
-
-Func const *
-Func::GetTopFunc() const
-{
-    Func const * func = this;
-    while (!func->IsTopFunc())
-    {
-        func = func->parentFunc;
-    }
-    return func;
-}
-
-Func *
-Func::GetTopFunc()
-{
-    Func * func = this;
-    while (!func->IsTopFunc())
-    {
-        func = func->parentFunc;
-    }
-    return func;
 }
 
 StackSym *
@@ -1572,6 +1559,7 @@ Func::GetOrCreateSingleTypeGuard(intptr_t typeAddr)
 void
 Func::EnsureEquivalentTypeGuards()
 {
+    AssertMsg(!PHASE_OFF(Js::EquivObjTypeSpecPhase, this), "Why do we have equivalent type guards if we don't do equivalent object type spec?");
     if (this->equivalentTypeGuards == nullptr)
     {
         this->equivalentTypeGuards = JitAnew(this->m_alloc, EquivalentTypeGuardList, this->m_alloc);
@@ -1585,6 +1573,26 @@ Func::CreateEquivalentTypeGuard(JITTypeHolder type, uint32 objTypeSpecFldId)
 
     Js::JitEquivalentTypeGuard* guard = NativeCodeDataNewNoFixup(GetNativeCodeDataAllocator(), Js::JitEquivalentTypeGuard, type->GetAddr(), this->indexedPropertyGuardCount++, objTypeSpecFldId);
 
+    this->InitializeEquivalentTypeGuard(guard);
+
+    return guard;
+}
+
+Js::JitPolyEquivalentTypeGuard*
+Func::CreatePolyEquivalentTypeGuard(uint32 objTypeSpecFldId)
+{
+    EnsureEquivalentTypeGuards();
+
+    Js::JitPolyEquivalentTypeGuard* guard = NativeCodeDataNewNoFixup(GetNativeCodeDataAllocator(), Js::JitPolyEquivalentTypeGuard, this->indexedPropertyGuardCount++, objTypeSpecFldId);
+
+    this->InitializeEquivalentTypeGuard(guard);
+
+    return guard;
+}
+
+void
+Func::InitializeEquivalentTypeGuard(Js::JitEquivalentTypeGuard * guard)
+{
     // If we want to hard code the address of the cache, we will need to go back to allocating it from the native code data allocator.
     // We would then need to maintain consistency (double write) to both the recycler allocated cache and the one on the heap.
     Js::EquivalentTypeCache* cache = nullptr;
@@ -1601,8 +1609,6 @@ Func::CreateEquivalentTypeGuard(JITTypeHolder type, uint32 objTypeSpecFldId)
     // Give the cache a back-pointer to the guard so that the guard can be cleared at runtime if necessary.
     cache->SetGuard(guard);
     this->equivalentTypeGuards->Prepend(guard);
-
-    return guard;
 }
 
 void
@@ -1659,14 +1665,14 @@ Func::LinkCtorCacheToPropertyId(Js::PropertyId propertyId, JITTimeConstructorCac
 
 JITTimeConstructorCache* Func::GetConstructorCache(const Js::ProfileId profiledCallSiteId)
 {
-    Assert(profiledCallSiteId < GetJITFunctionBody()->GetProfiledCallSiteCount());
+    AssertOrFailFast(profiledCallSiteId < GetJITFunctionBody()->GetProfiledCallSiteCount());
     Assert(this->constructorCaches != nullptr);
     return this->constructorCaches[profiledCallSiteId];
 }
 
 void Func::SetConstructorCache(const Js::ProfileId profiledCallSiteId, JITTimeConstructorCache* constructorCache)
 {
-    Assert(profiledCallSiteId < GetJITFunctionBody()->GetProfiledCallSiteCount());
+    AssertOrFailFast(profiledCallSiteId < GetJITFunctionBody()->GetProfiledCallSiteCount());
     Assert(constructorCache != nullptr);
     Assert(this->constructorCaches != nullptr);
     Assert(this->constructorCaches[profiledCallSiteId] == nullptr);
@@ -2043,6 +2049,60 @@ Func::GetForInEnumeratorArrayOffset() const
     Assert(this->m_forInLoopBaseDepth + this->GetJITFunctionBody()->GetForInLoopDepth() <= topFunc->m_forInLoopMaxDepth);
     return topFunc->m_forInEnumeratorArrayOffset
         + this->m_forInLoopBaseDepth * sizeof(Js::ForInObjectEnumerator);
+}
+
+void
+Func::SetHasLazyBailOut()
+{
+    this->hasLazyBailOut = true;
+}
+
+bool
+Func::HasLazyBailOut() const
+{
+    AssertMsg(
+        this->isPostRegAlloc,
+        "We don't know whether a function has lazy bailout until after RegAlloc"
+    );
+    return this->hasLazyBailOut;
+}
+
+void
+Func::EnsureLazyBailOutRecordSlot()
+{
+    if (this->m_lazyBailOutRecordSlot == nullptr)
+    {
+        this->m_lazyBailOutRecordSlot = StackSym::New(TyMachPtr, this);
+        this->StackAllocate(this->m_lazyBailOutRecordSlot, MachPtr);
+    }
+}
+
+StackSym *
+Func::GetLazyBailOutRecordSlot() const
+{
+    Assert(this->m_lazyBailOutRecordSlot != nullptr);
+    return this->m_lazyBailOutRecordSlot;
+}
+
+bool
+Func::ShouldDoLazyBailOut() const
+{
+#if defined(_M_X64)
+    if (!PHASE_ON1(Js::LazyBailoutPhase) ||
+        this->GetJITFunctionBody()->IsAsmJsMode() || // don't have bailouts in asm.js
+        this->HasTry() ||                            // lazy bailout in function with try/catch not supported for now
+                                                     // `EHBailoutPatchUp` set a `hasBailedOut` bit to rethrow the exception in the interpreter
+                                                     // if the instruction has ANY bailout. In the future, to implement lazy bailout with try/catch,
+                                                     // we would need to change how this bit is generated.
+        this->IsLoopBody())                          // don't do lazy bailout on jit'd loop body either
+    {
+        return false;
+    }
+
+    return true;
+#else
+    return false;
+#endif
 }
 
 #if DBG_DUMP

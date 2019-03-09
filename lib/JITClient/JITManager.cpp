@@ -67,14 +67,7 @@ JITManager::CreateBinding(
     RPC_BINDING_HANDLE_TEMPLATE_V1 bindingTemplate;
     RPC_BINDING_HANDLE_SECURITY_V1_W bindingSecurity;
 
-#ifndef NTBUILD
-    RPC_SECURITY_QOS_V4 securityQOS;
-    ZeroMemory(&securityQOS, sizeof(RPC_SECURITY_QOS_V4));
-    securityQOS.Capabilities = RPC_C_QOS_CAPABILITIES_DEFAULT;
-    securityQOS.IdentityTracking = RPC_C_QOS_IDENTITY_DYNAMIC;
-    securityQOS.ImpersonationType = RPC_C_IMP_LEVEL_IDENTIFY;
-    securityQOS.Version = 4;
-#else
+#if (NTDDI_VERSION >= NTDDI_WIN8)
     RPC_SECURITY_QOS_V5 securityQOS;
     ZeroMemory(&securityQOS, sizeof(RPC_SECURITY_QOS_V5));
     securityQOS.Capabilities = RPC_C_QOS_CAPABILITIES_DEFAULT;
@@ -82,7 +75,14 @@ JITManager::CreateBinding(
     securityQOS.ImpersonationType = RPC_C_IMP_LEVEL_IDENTIFY;
     securityQOS.Version = 5;
     securityQOS.ServerSecurityDescriptor = serverSecurityDescriptor;
-#endif // NTBUILD
+#else
+    RPC_SECURITY_QOS_V4 securityQOS;
+    ZeroMemory(&securityQOS, sizeof(RPC_SECURITY_QOS_V4));
+    securityQOS.Capabilities = RPC_C_QOS_CAPABILITIES_DEFAULT;
+    securityQOS.IdentityTracking = RPC_C_QOS_IDENTITY_DYNAMIC;
+    securityQOS.ImpersonationType = RPC_C_IMP_LEVEL_IDENTIFY;
+    securityQOS.Version = 4;
+#endif
 
     ZeroMemory(&bindingTemplate, sizeof(bindingTemplate));
     bindingTemplate.Version = 1;
@@ -223,6 +223,9 @@ JITManager::IsOOPJITEnabled() const
     return m_oopJitEnabled;
 }
 
+#pragma prefast(push)
+#pragma prefast(disable:__WARNING_RELEASING_UNHELD_LOCK_MEDIUM_CONFIDENCE, "Lock is correctly acquired and released by RAII class AutoCriticalSection")
+#pragma prefast(disable:__WARNING_CALLER_FAILING_TO_HOLD, "Lock is correctly acquired and released by RAII class AutoCriticalSection")
 HRESULT
 JITManager::ConnectRpcServer(__in HANDLE jitProcessHandle, __in_opt void* serverSecurityDescriptor, __in UUID connectionUuid)
 {
@@ -237,17 +240,20 @@ JITManager::ConnectRpcServer(__in HANDLE jitProcessHandle, __in_opt void* server
 
     HRESULT hr = E_FAIL;
 
-
-    hr = CreateBinding(jitProcessHandle, serverSecurityDescriptor, &connectionUuid, &m_rpcBindingHandle);
+    RPC_BINDING_HANDLE bindingHandle;
+    hr = CreateBinding(jitProcessHandle, serverSecurityDescriptor, &connectionUuid, &bindingHandle);
     if (FAILED(hr))
     {
         goto FailureCleanup;
     }
 
-    m_jitConnectionId = connectionUuid;
 
-    hr = ConnectProcess();
+    hr = ConnectProcess(bindingHandle);
     HandleServerCallResult(hr, RemoteCallType::StateUpdate);
+
+    // Only store the binding handle after JIT handshake, so other threads do not prematurely think we are ready to JIT
+    m_rpcBindingHandle = bindingHandle;
+    m_jitConnectionId = connectionUuid;
 
     return hr;
 
@@ -260,6 +266,7 @@ FailureCleanup:
 
     return hr;
 }
+#pragma prefast(pop)
 
 HRESULT
 JITManager::Shutdown()
@@ -286,7 +293,7 @@ JITManager::Shutdown()
 }
 
 HRESULT
-JITManager::ConnectProcess()
+JITManager::ConnectProcess(RPC_BINDING_HANDLE rpcBindingHandle)
 {
     Assert(IsOOPJITEnabled());
 
@@ -302,7 +309,7 @@ JITManager::ConnectProcess()
     RpcTryExcept
     {
         hr = ClientConnectProcess(
-            m_rpcBindingHandle,
+            rpcBindingHandle,
 #ifdef USE_RPC_HANDLE_MARSHALLING
             processHandle,
 #endif
@@ -586,7 +593,7 @@ JITManager::CloseScriptContext(
 
 HRESULT
 JITManager::FreeAllocation(
-    __in PTHREADCONTEXT_HANDLE threadContextInfoAddress,
+    __in PSCRIPTCONTEXT_HANDLE scriptContextInfoAddress,
     __in intptr_t codeAddress)
 {
     Assert(IsOOPJITEnabled());
@@ -594,7 +601,7 @@ JITManager::FreeAllocation(
     HRESULT hr = E_FAIL;
     RpcTryExcept
     {
-        hr = ClientFreeAllocation(m_rpcBindingHandle, threadContextInfoAddress, codeAddress);
+        hr = ClientFreeAllocation(m_rpcBindingHandle, scriptContextInfoAddress, codeAddress);
     }
     RpcExcept(RpcExceptionFilter(RpcExceptionCode()))
     {

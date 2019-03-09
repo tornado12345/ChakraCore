@@ -1470,7 +1470,7 @@ The sequence of things we do to allow allocations during concurrent sweep is des
 1. At the beginning of concurrrent sweep we decide if we will benefit from allowing allocations during concurrent
 sweep for any of the buckets. If there is at-least one bucket for which we think we will benefit we will turn on
 allocations during concurrent sweep. Once turned on we will attempt to enable allocations during concurrent sweep
-for all supported buckets (i.e. small/medium, normal/leaf, non-finalizable buckets.write barrrier bickets are supported
+for all supported buckets (i.e. small/medium, normal/leaf, non-finalizable buckets.write barrier buckets are supported
 as well.).
 2. If allocations are turned on during concurrent sweep, we will see if there are any allocable blocks in the
 heapBlockList after the nextAllocableBlockHead. If we find any such blocks, we move them to a SLIST that the
@@ -1541,7 +1541,8 @@ HeapBucketT<TBlockType>::PrepareForAllocationsDuringConcurrentSweep(TBlockType *
                 if (this->GetRecycler()->GetRecyclerFlagsTable().Trace.IsEnabled(Js::ConcurrentSweepPhase) && CONFIG_FLAG_RELEASE(Verbose))
                 {
                     size_t currentHeapBlockCount = QueryDepthInterlockedSList(allocableHeapBlockListHead);
-                    Output::Print(_u("[GC #%d] [HeapBucket 0x%p] Starting allocations during  concurrent sweep with %d blocks. [CollectionState: %d] \n"), this->GetRecycler()->collectionCount, this, currentHeapBlockCount, this->GetRecycler()->collectionState);
+                    CollectionState collectionState = this->GetRecycler()->collectionState;
+                    Output::Print(_u("[GC #%d] [HeapBucket 0x%p] Starting allocations during  concurrent sweep with %d blocks. [CollectionState: %d] \n"), this->GetRecycler()->collectionCount, this, currentHeapBlockCount, collectionState);
                     Output::Print(_u("[GC #%d] [HeapBucket 0x%p] The heapBlockList has %d blocks. Total heapBlockCount is %d.\n\n"), this->GetRecycler()->collectionCount, this, HeapBlockList::Count(this->heapBlockList), this->heapBlockCount);
                 }
 #endif
@@ -1790,7 +1791,8 @@ HeapBucketT<TBlockType>::FinishConcurrentSweep()
 #ifdef RECYCLER_TRACE
         if (this->GetRecycler()->GetRecyclerFlagsTable().Trace.IsEnabled(Js::ConcurrentSweepPhase) && CONFIG_FLAG_RELEASE(Verbose))
         {
-            Output::Print(_u("[GC #%d] [HeapBucket 0x%p] starting FinishConcurrentSweep [CollectionState: %d] \n"), this->GetRecycler()->collectionCount, this, this->GetRecycler()->collectionState);
+            CollectionState collectionState = this->GetRecycler()->collectionState;
+            Output::Print(_u("[GC #%d] [HeapBucket 0x%p] starting FinishConcurrentSweep [CollectionState: %d] \n"), this->GetRecycler()->collectionCount, this, collectionState);
         }
 #endif
 
@@ -1827,7 +1829,8 @@ HeapBucketT<TBlockType>::AppendAllocableHeapBlockList(TBlockType * list)
 #ifdef RECYCLER_TRACE
     if (this->GetRecycler()->GetRecyclerFlagsTable().Trace.IsEnabled(Js::ConcurrentSweepPhase) && CONFIG_FLAG_RELEASE(Verbose))
     {
-        Output::Print(_u("[GC #%d] [HeapBucket 0x%p] in AppendAllocableHeapBlockList [CollectionState: %d] \n"), this->GetRecycler()->collectionCount, this, this->GetRecycler()->collectionState);
+        CollectionState collectionState = this->GetRecycler()->collectionState;
+        Output::Print(_u("[GC #%d] [HeapBucket 0x%p] in AppendAllocableHeapBlockList [CollectionState: %d] \n"), this->GetRecycler()->collectionCount, this, collectionState);
     }
 #endif
     // Add the list to the end of the current list
@@ -2422,7 +2425,7 @@ template <class TBlockAttributes>
 void
 HeapBucketGroup<TBlockAttributes>::StartAllocationDuringConcurrentSweep()
 {
-    // If there were no allocable heap blocks we would not have started alllocations. Stop allocations, only if we started allocations for each of these buckets.
+    // If there were no allocable heap blocks we would not have started allocations. Stop allocations, only if we started allocations for each of these buckets.
     if (heapBucket.IsAllocationStopped())
     {
         heapBucket.StartAllocationDuringConcurrentSweep();

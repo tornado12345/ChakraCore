@@ -8,6 +8,8 @@
 // if the size changed here.
 #pragma once
 
+class ChakraEngine;
+
 namespace Js
 {
     class EngineInterfaceObject;
@@ -19,7 +21,8 @@ namespace Js
 
     public:
         JavascriptLibraryBase(GlobalObject* globalObject):
-            globalObject(globalObject)
+            globalObject(globalObject),
+            chakraEngine(nullptr)
         {
         }
         Var GetPI() { return pi; }
@@ -47,6 +50,7 @@ namespace Js
         JavascriptFunction* GetDateConstructor() { return dateConstructor; }
         JavascriptFunction* GetFunctionConstructor() { return functionConstructor; }
         JavascriptFunction* GetNumberConstructor() { return numberConstructor; }
+        JavascriptFunction* GetBigIntConstructor() { return bigIntConstructor; }
         JavascriptRegExpConstructor* GetRegExpConstructor() { return regexConstructor; }
         JavascriptFunction* GetStringConstructor() { return stringConstructor; }
         JavascriptFunction* GetArrayBufferConstructor() { return arrayBufferConstructor; }
@@ -107,6 +111,7 @@ namespace Js
         DynamicObject* GetDatePrototype() { return datePrototype; }
         DynamicObject* GetFunctionPrototype() { return functionPrototype; }
         DynamicObject* GetNumberPrototype() { return numberPrototype; }
+        DynamicObject* GetBigIntPrototype() { return bigintPrototype; }
         DynamicObject* GetSIMDBool8x16Prototype()  { return simdBool8x16Prototype;  }
         DynamicObject* GetSIMDBool16x8Prototype()  { return simdBool16x8Prototype;  }
         DynamicObject* GetSIMDBool32x4Prototype()  { return simdBool32x4Prototype;  }
@@ -146,6 +151,9 @@ namespace Js
         DynamicObject* GetURIErrorPrototype() const { return uriErrorPrototype; }
         PropertyId GetPropertyIdSymbolIterator() { return PropertyIds::_symbolIterator; };
         PropertyId GetPropertyIdSymbolToStringTag() { return PropertyIds::_symbolToStringTag; };
+        PropertyId GetPropertyIdSymbolUnscopables() { return PropertyIds::_symbolUnscopables; };
+
+        bool IsChakraEngine() const { return chakraEngine != nullptr; }
 
     protected:
         Field(GlobalObject*) globalObject;
@@ -170,6 +178,7 @@ namespace Js
         Field(RuntimeFunction*) dateConstructor;
         Field(RuntimeFunction*) functionConstructor;
         Field(RuntimeFunction*) numberConstructor;
+        Field(RuntimeFunction*) bigIntConstructor;
         Field(RuntimeFunction*) objectConstructor;
         Field(RuntimeFunction*) symbolConstructor;
         Field(JavascriptRegExpConstructor*) regexConstructor;
@@ -239,6 +248,7 @@ namespace Js
         Field(DynamicObject*) datePrototype;
         Field(DynamicObject*) functionPrototype;
         Field(DynamicObject*) numberPrototype;
+        Field(DynamicObject*) bigintPrototype;
         Field(ObjectPrototypeObject*) objectPrototype;
         Field(DynamicObject*) regexPrototype;
         Field(DynamicObject*) stringPrototype;
@@ -314,6 +324,7 @@ namespace Js
 
     public:
         Field(ScriptContext*) scriptContext;
+        Field(ChakraEngine*) chakraEngine;
 
     private:
         virtual void Dispose(bool isShutdown) override;
@@ -329,6 +340,14 @@ namespace Js
         Field(JavascriptFunction*) getStackTrace;
 #ifdef EDIT_AND_CONTINUE
         Field(JavascriptFunction*) editSource;
+#endif
+        Field(JavascriptFunction*) mathMin;
+        Field(JavascriptFunction*) mathMax;
+
+#ifdef ENABLE_JS_BUILTINS
+    public:
+        JavascriptFunction* GetMathMinFunction() const { return mathMin; }
+        JavascriptFunction* GetMathMaxFunction() const { return mathMax; }
 #endif
     };
 }

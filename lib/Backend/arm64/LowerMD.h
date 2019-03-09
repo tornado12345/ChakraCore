@@ -61,6 +61,8 @@ public:
     static const Js::OpCode MDCallOpcode;
     static const Js::OpCode MDImulOpcode;
     static const Js::OpCode MDLea;
+    static const Js::OpCode MDSpecBlockNEOpcode;
+    static const Js::OpCode MDSpecBlockFNEOpcode;
 
 public:
             void            Init(Lowerer *lowerer);
@@ -91,9 +93,10 @@ public:
 #endif
             void            GenerateTaggedZeroTest( IR::Opnd * opndSrc, IR::Instr * instrInsert, IR::LabelInstr * labelHelper = nullptr);
             bool            GenerateObjectTest(IR::Opnd * opndSrc, IR::Instr * insertInstr, IR::LabelInstr * labelTarget, bool fContinueLabel = false);
-            bool            GenerateFastCmSrEqConst(IR::Instr *instr);
-            bool            GenerateFastCmXxI4(IR::Instr *instr);
-            bool            GenerateFastCmXxR8(IR::Instr *instr) { Assert(UNREACHED); return nullptr; }
+            bool            GenerateFastCmSrXxConst(IR::Instr *instr);
+            void            GenerateFastCmXxI4(IR::Instr *instr);
+            void            GenerateFastCmXxR8(IR::Instr *instr);
+            void            GenerateFastCmXx(IR::Instr *instr);
             bool            GenerateFastCmXxTaggedInt(IR::Instr *instr, bool isInHelper = false);
             IR::Instr *     GenerateConvBool(IR::Instr *instr);
             void            GenerateClz(IR::Instr * instr);
@@ -248,7 +251,9 @@ public:
 
             void                GenerateMemInit(IR::RegOpnd * opnd, int32 offset, size_t value, IR::Instr * insertBeforeInstr, bool isZeroed = false);
 
-            static void            InsertObjectPoison(IR::Opnd* poisonedOpnd, IR::BranchInstr* branchInstr, IR::Instr* insertInstr);
+            static void         InsertObjectPoison(IR::Opnd* poisonedOpnd, IR::BranchInstr* branchInstr, IR::Instr* insertInstr, bool isForStore);
+            IR::BranchInstr*    InsertMissingItemCompareBranch(IR::Opnd* compareSrc, IR::Opnd* missingItemOpnd, Js::OpCode opcode, IR::LabelInstr* target, IR::Instr* insertBeforeInstr);
+
 private:
     static  IR::Instr *     ChangeToAssign(IR::Instr * instr, IRType destType);
     void GenerateAssignForBuiltinArg(

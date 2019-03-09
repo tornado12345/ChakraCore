@@ -390,7 +390,7 @@ namespace Js
         // Constructor
         AsmJsModuleArg(PropertyName name, ArgType type) : AsmJsSymbol(name, symbolType), mArgType(type) { }
         // Accessor
-        inline const ArgType GetArgType()const { return mArgType; }
+        inline ArgType GetArgType()const { return mArgType; }
 
         // AsmJsSymbol interface
     public:
@@ -993,10 +993,9 @@ namespace Js
         }
 
         Wasm::WasmReaderInfo* GetWasmReaderInfo() const {return mWasmReaderInfo;}
-        void SetWasmReaderInfo(Wasm::WasmReaderInfo* reader) {mWasmReaderInfo = reader;}
+        void SetWasmReaderInfo(Wasm::WasmReaderInfo* reader) { Assert(reader);  mWasmReaderInfo = reader; }
         WebAssemblyModule* GetWebAssemblyModule() const { return mWasmModule; }
-        void SetWebAssemblyModule(WebAssemblyModule * module) { mWasmModule= module; }
-        bool IsWasmDeferredParse() const { return mWasmReaderInfo != nullptr; }
+        void SetWebAssemblyModule(WebAssemblyModule * module) { mWasmModule = module; }
 #endif
     };
 };

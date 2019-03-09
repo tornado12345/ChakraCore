@@ -48,18 +48,23 @@ public:
     static BGParseManager* GetBGParseManager();
     static void DeleteBGParseManager();
     static DWORD GetNextCookie();
+    static DWORD IncCompleted();
+    static DWORD IncFailed();
 
     HRESULT QueueBackgroundParse(LPCUTF8 pszSrc, size_t cbLength, char16 *fullPath, DWORD* dwBgParseCookie);
-    HRESULT GetInputFromCookie(DWORD cookie, LPCUTF8* ppszSrc, size_t* pcbLength);
+    HRESULT GetInputFromCookie(DWORD cookie, LPCUTF8* ppszSrc, size_t* pcbLength, WCHAR** sourceUrl);
     HRESULT GetParseResults(
         Js::ScriptContext* scriptContextUI,
         DWORD cookie,
         LPCUTF8 pszSrc,
         SRCINFO const * pSrcInfo,
-        Js::ParseableFunctionInfo** ppFunc,
+        Js::FunctionBody** ppFunc,
         CompileScriptException* pse,
-        size_t& srcLength
+        size_t& srcLength,
+        Js::Utf8SourceInfo* utf8SourceInfo,
+        uint& sourceIndex
     );
+    bool DiscardParseResults(DWORD cookie, void* buffer);
 
     virtual bool Process(JsUtil::Job *const job, JsUtil::ParallelThreadData *threadData) override;
     virtual void JobProcessed(JsUtil::Job *const job, const bool succeeded) override;
@@ -70,7 +75,7 @@ public:
     bool WasAddedToJobProcessor(JsUtil::Job *const job) const;
 
 private:
-    BGParseWorkItem * FindJob(DWORD dwCookie, bool waitForResults);
+    BGParseWorkItem * FindJob(DWORD dwCookie, bool waitForResults, bool removeJob);
 
     // BGParseWorkItem job can be in one of 3 states, based on which linked list it is in:
     // - queued - JobProcessor::jobs
@@ -80,6 +85,8 @@ private:
     JsUtil::DoublyLinkedList<BGParseWorkItem> workitemsProcessed;
 
     static DWORD s_lastCookie;
+    static DWORD s_completed;
+    static DWORD s_failed;
     static BGParseManager* s_BGParseManager;
     static CriticalSection s_staticMemberLock;
 };
@@ -99,18 +106,28 @@ public:
     ~BGParseWorkItem();
 
     void ParseUTF8Core(Js::ScriptContext* scriptContext);
+    HRESULT DeserializeParseResults(
+        Js::ScriptContext* scriptContextUI,
+        LPCUTF8 pszSrc,
+        SRCINFO const * pSrcInfo,
+        Js::Utf8SourceInfo* utf8SourceInfo,
+        Js::FunctionBody** functionBodyReturn,
+        size_t& srcLength,
+        uint& sourceIndex
+    );
     void TransferCSE(CompileScriptException* pse);
 
     void CreateCompletionEvent();
     void WaitForCompletion();
-    void JobProcessed();
+    void JobProcessed(const bool succeeded);
+
+    void Discard() { discarded = true; }
+    bool IsDiscarded() const { return discarded; }
 
     DWORD GetCookie() const { return cookie; }
     const byte* GetScriptSrc() const { return script; }
     size_t GetScriptLength() const { return cb; }
-    byte * GetReturnBuffer() const{ return bufferReturn; }
-    HRESULT GetParseHR() const { return parseHR; }
-    size_t GetParseSourceLength() const { return parseSourceLength; }
+    WCHAR* GetScriptPath() const { return path; }
 
 private:
     // This cookie is the public identifier for this parser work
@@ -125,7 +142,11 @@ private:
     CompileScriptException cse;
     HRESULT parseHR;
     size_t parseSourceLength;
-    Event* complete; 
+    Event* complete;
+    
+    // True when this workitem was discarded while processing. This instance
+    // will free itself after it has been processed.
+    bool discarded;
 
     // Output data
     byte * bufferReturn;

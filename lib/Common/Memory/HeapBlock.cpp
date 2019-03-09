@@ -3,95 +3,9 @@
 // Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.
 //-------------------------------------------------------------------------------------------------------
 #include "CommonMemoryPch.h"
-#ifdef __clang__
+#if defined(__clang__) && !defined(_MSC_VER)
 #include <cxxabi.h>
 #endif
-
-
-#if ENABLE_MEM_STATS
-MemStats::MemStats()
-    : objectByteCount(0), totalByteCount(0)
-{}
-
-void MemStats::Reset()
-{
-    objectByteCount = 0;
-    totalByteCount = 0;
-}
-
-size_t MemStats::FreeBytes() const
-{
-    return totalByteCount - objectByteCount;
-}
-
-double MemStats::UsedRatio() const
-{
-    return (double)objectByteCount / totalByteCount;
-}
-
-void MemStats::Aggregate(const MemStats& other)
-{
-    objectByteCount += other.objectByteCount;
-    totalByteCount += other.totalByteCount;
-}
-
-#ifdef DUMP_FRAGMENTATION_STATS
-HeapBucketStats::HeapBucketStats()
-    : totalBlockCount(0), objectCount(0), finalizeCount(0)
-{}
-
-void HeapBucketStats::Reset()
-{
-    MemStats::Reset();
-    totalBlockCount = 0;
-    objectCount = 0;
-    finalizeCount = 0;
-}
-
-void HeapBucketStats::Dump() const
-{
-    Output::Print(_u("%5d %7d %7d %11lu %11lu %11lu   %6.2f%%\n"),
-        totalBlockCount, objectCount, finalizeCount,
-        static_cast<ULONG>(objectByteCount),
-        static_cast<ULONG>(FreeBytes()),
-        static_cast<ULONG>(totalByteCount),
-        UsedRatio() * 100);
-}
-#endif
-
-void HeapBucketStats::PreAggregate()
-{
-    // When first enter Pre-Aggregate state, clear data and mark state.
-    if (!(totalByteCount & 1))
-    {
-        Reset();
-        totalByteCount |= 1;
-    }
-}
-
-void HeapBucketStats::BeginAggregate()
-{
-    // If was Pre-Aggregate state, keep data and clear state
-    if (totalByteCount & 1)
-    {
-        totalByteCount &= ~1;
-    }
-    else
-    {
-        Reset();
-    }
-}
-
-void HeapBucketStats::Aggregate(const HeapBucketStats& other)
-{
-    MemStats::Aggregate(other);
-#ifdef DUMP_FRAGMENTATION_STATS
-    totalBlockCount += other.totalBlockCount;
-    objectCount += other.objectCount;
-    finalizeCount += other.finalizeCount;
-#endif
-}
-#endif  // ENABLE_MEM_STATS
 
 //========================================================================================================
 // HeapBlock
@@ -558,7 +472,9 @@ SmallHeapBlockT<TBlockAttributes>::ReleasePagesShutdown(Recycler * recycler)
 
     // Don't release the page in shut down, the page allocator will release them faster
     // Leaf block's allocator need not be closed
-    Assert(this->IsLeafBlock() || this->GetPageAllocator()->IsClosed());
+    // For non-large normal heap blocks ReleasePagesShutdown could be called during shutdown cleanup when the block is still pending concurrent
+    // sweep i.e. it resides in the pendingSweepList of the RecyclerSweep instance. In this case the page allocator may not have been closed yet.
+    Assert(this->IsLeafBlock() || this->GetPageAllocator()->IsClosed() || this->isPendingConcurrentSweep);
 #endif
 
 }
@@ -968,7 +884,7 @@ void HeapBlock::PrintVerifyMarkFailure(Recycler* recycler, char* objectAddress, 
     if (Recycler::DoProfileAllocTracker())
     {
         // need CheckMemoryLeak or KeepRecyclerTrackData flag to have the tracker data and show following detailed info
-#ifdef __clang__
+#if  defined(__clang__) && !defined(_MSC_VER)
         auto getDemangledName = [](const type_info* typeinfo) ->const char*
         {
             int status;
@@ -1446,7 +1362,8 @@ SmallHeapBlockT<TBlockAttributes>::Sweep(RecyclerSweep& recyclerSweep, bool queu
         if (recycler->GetRecyclerFlagsTable().Trace.IsEnabled(Js::ConcurrentSweepPhase) && CONFIG_FLAG_RELEASE(Verbose))
         {
             SweepState stateReturned = (this->freeCount == 0) ? SweepStateFull : state;
-            Output::Print(_u("[GC #%d] [HeapBucket 0x%p] HeapBlock 0x%p %s %d [CollectionState: %d] \n"), recycler->collectionCount, this->heapBucket, this, _u("[**37**] heapBlock swept. State returned:"), stateReturned, recycler->collectionState);
+            CollectionState collectionState = recycler->collectionState;
+            Output::Print(_u("[GC #%d] [HeapBucket 0x%p] HeapBlock 0x%p %s %d [CollectionState: %d] \n"), recycler->collectionCount, this->heapBucket, this, _u("[**37**] heapBlock swept. State returned:"), stateReturned, collectionState);
         }
 #endif
         return (this->freeCount == 0) ? SweepStateFull : state;
@@ -1511,7 +1428,8 @@ SmallHeapBlockT<TBlockAttributes>::Sweep(RecyclerSweep& recyclerSweep, bool queu
         if (recycler->GetRecyclerFlagsTable().Trace.IsEnabled(Js::ConcurrentSweepPhase) && CONFIG_FLAG_RELEASE(Verbose))
         {
             SweepState stateReturned = (this->freeCount == 0) ? SweepStateFull : state;
-            Output::Print(_u("[GC #%d] [HeapBucket 0x%p] HeapBlock 0x%p %s %d [CollectionState: %d] \n"), recycler->collectionCount, this->heapBucket, this, _u("[**38**] heapBlock swept. State returned:"), stateReturned, recycler->collectionState);
+            CollectionState collectionState = recycler->collectionState;
+            Output::Print(_u("[GC #%d] [HeapBucket 0x%p] HeapBlock 0x%p %s %d [CollectionState: %d] \n"), recycler->collectionCount, this->heapBucket, this, _u("[**38**] heapBlock swept. State returned:"), stateReturned, collectionState);
         }
 #endif
         // We always need to check the free count as we may have allocated from this block during concurrent sweep.

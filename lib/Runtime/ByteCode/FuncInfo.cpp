@@ -53,8 +53,8 @@ FuncInfo::FuncInfo(
     firstTmpReg(Js::Constants::NoRegister),
     curTmpReg(Js::Constants::NoRegister),
     argsPlaceHolderSlotCount(0),
-    originalAttributes(Js::FunctionInfo::Attributes::None),
 
+    canDefer(false),
     callsEval(false),
     childCallsEval(false),
     hasArguments(false),
@@ -76,6 +76,7 @@ FuncInfo::FuncInfo(
 
     constantToRegister(alloc, 17),
     stringToRegister(alloc, 17),
+    bigintToRegister(alloc, 17),
     doubleConstantToRegister(alloc, 17),
     stringTemplateCallsiteRegisterMap(alloc, 17),
 
@@ -91,6 +92,7 @@ FuncInfo::FuncInfo(
     rootObjectStoreInlineCacheMap(nullptr),
     inlineCacheMap(nullptr),
     referencedPropertyIdToMapIndex(nullptr),
+    callSiteToCallApplyCallSiteMap(nullptr),
     valueOfStoreCacheIds(),
     toStringStoreCacheIds(),
     slotProfileIdMap(alloc),
@@ -118,9 +120,9 @@ FuncInfo::FuncInfo(
     {
         // Disable (re-)deferral of this function temporarily. Add it to the list of FuncInfo's to be processed when 
         // byte code gen is done.
-        this->originalAttributes = byteCodeFunction->GetAttributes();
+        this->canDefer = !!(byteCodeFunction->GetAttributes() & Js::FunctionInfo::Attributes::CanDefer);
         byteCodeGenerator->AddFuncInfoToFinalizationSet(this);
-        byteCodeFunction->SetAttributes((Js::FunctionInfo::Attributes)(this->originalAttributes & ~Js::FunctionInfo::Attributes::CanDefer));
+        byteCodeFunction->SetAttributes((Js::FunctionInfo::Attributes)(byteCodeFunction->GetAttributes() & ~Js::FunctionInfo::Attributes::CanDefer));
     }
 }
 
@@ -474,6 +476,15 @@ CapturedSymMap *FuncInfo::EnsureCapturedSymMap()
         this->capturedSymMap = Anew(alloc, CapturedSymMap, alloc);
     }
     return this->capturedSymMap;
+}
+
+CallSiteToCallApplyCallSiteMap * FuncInfo::EnsureCallSiteToCallApplyCallSiteMap()
+{
+    if (this->callSiteToCallApplyCallSiteMap == nullptr)
+    {
+        this->callSiteToCallApplyCallSiteMap = Anew(alloc, CallSiteToCallApplyCallSiteMap, alloc);
+    }
+    return this->callSiteToCallApplyCallSiteMap;
 }
 
 void FuncInfo::SetHasMaybeEscapedNestedFunc(DebugOnly(char16 const * reason))

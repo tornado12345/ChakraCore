@@ -6,9 +6,10 @@
 #include "Common/UInt32Math.h"
 #include "Common/NumberUtilities.inl"
 #include <intsafe.h>
+#include "Core/JitHelperUtils.h"
 
-namespace Js
-{
+using namespace Js;
+
     // The VS2013 linker treats this as a redefinition of an already
     // defined constant and complains. So skip the declaration if we're compiling
     // with VS2013 or below.
@@ -16,6 +17,7 @@ namespace Js
     // Redeclare static constants
     const UINT64 NumberConstantsBase::k_Nan;
     const UINT32 NumberConstantsBase::k_Nan32;
+    const UINT64 NumberConstantsBase::k_NegativeNan;
     const INT64 NumberUtilitiesBase::Pos_InvalidInt64;
     const INT64 NumberUtilitiesBase::Neg_InvalidInt64;
     const uint64 NumberConstants::k_PosInf;
@@ -58,6 +60,7 @@ namespace Js
     const double NumberConstants::MAX_VALUE = *(double*)(&NumberConstants::k_PosMax);
     const double NumberConstants::MIN_VALUE = *(double*)(&NumberConstants::k_PosMin);
     const double NumberConstants::NaN = *(double*)(&NumberConstants::k_Nan);
+    const double NumberConstants::NegativeNaN = *(double*)(&NumberConstants::k_NegativeNan);
     const double NumberConstants::NEGATIVE_INFINITY= *(double*)(&NumberConstants::k_NegInf);
     const double NumberConstants::POSITIVE_INFINITY= *(double*)(&NumberConstants::k_PosInf );
     const double NumberConstants::NEG_ZERO= *(double*)(&NumberConstants::k_NegZero );
@@ -338,6 +341,7 @@ namespace Js
 
     double NumberUtilities::Modulus(double dblLeft, double dblRight)
     {
+        JIT_HELPER_NOT_REENTRANT_NOLOCK_HEADER(Op_Rem_Double);
         double value = 0;
 
         if (!Js::NumberUtilities::IsFinite(dblRight))
@@ -365,6 +369,7 @@ namespace Js
         }
 
         return value;
+        JIT_HELPER_END(Op_Rem_Double);
     }
 
     int32 NumberUtilities::LwFromDblNearest(double dbl)
@@ -681,8 +686,8 @@ namespace Js
     double NumberUtilities::StrToDbl(const EncodedChar * psz, const EncodedChar **ppchLim, Js::ScriptContext *const scriptContext)
     {
         Assert(scriptContext);
-        bool likelyInt = true;
-        return Js::NumberUtilities::StrToDbl<EncodedChar>(psz, ppchLim, likelyInt);
+        LikelyNumberType likelyType = LikelyNumberType::Int;
+        return Js::NumberUtilities::StrToDbl<EncodedChar>(psz, ppchLim, likelyType);
     }
 
     template double NumberUtilities::StrToDbl<char16>(const char16 * psz, const char16 **ppchLim, Js::ScriptContext *const scriptContext);
@@ -693,4 +698,3 @@ namespace Js
     template double NumberUtilities::DblFromBinary<utf8char_t>(const utf8char_t *psz, const utf8char_t **ppchLim);
     template double NumberUtilities::DblFromOctal<char16>(const char16 *psz, const char16 **ppchLim);
     template double NumberUtilities::DblFromOctal<utf8char_t>(const utf8char_t *psz, const utf8char_t **ppchLim);
-}

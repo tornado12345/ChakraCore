@@ -15,7 +15,7 @@ EXDEF2    (NOPASMJS          , InvalidOpCode, Empty                             
   DEF2    ( NOPASMJS         , Label        , Empty                                              )
   DEF2    ( BR_ASM           , AsmBr        , OP_Br                                              )
 
-  DEF2_WMS( FALLTHROUGH_ASM  , LdSlotArr    ,  /* Common case with LdSlot */                     )
+  DEF2_WMS( FALLTHROUGH_ASM  , LdSlotArr    , /* Common case with LdSlot */                      )
   DEF3_WMS( CUSTOM_ASMJS     , LdSlot       , OP_LdAsmJsSlot               , ElementSlot         )
 
 // Function Calls
@@ -256,7 +256,7 @@ EXDEF2_WMS( F1toF1Mem        , Trunc_Flt        , Wasm::WasmMath::Trunc<float>  
 EXDEF2_WMS( F1toF1Mem        , Nearest_Flt      , Wasm::WasmMath::Nearest<float>                     )
 EXDEF2_WMS( D1toD1Mem        , Trunc_Db         , Wasm::WasmMath::Trunc<double>                      )
 EXDEF2_WMS( D1toD1Mem        , Nearest_Db       , Wasm::WasmMath::Nearest<double>                    )
-EXDEF2_WMS( VtoI1Mem         , CurrentMemory_Int, OP_GetMemorySize                                   )
+EXDEF2_WMS( VtoI1Mem         , MemorySize_Int   , OP_GetMemorySize                                   )
 EXDEF2_WMS( I1toI1Mem        , GrowMemory       , OP_GrowMemory                                      )
 EXDEF2    ( EMPTYASMJS       , Unreachable_Void , OP_Unreachable                                     )
 EXDEF2_WMS( D1toI1Ctx        , Conv_Check_DTI   , Wasm::WasmMath::F64ToI32<false /* saturating */>  )
@@ -420,7 +420,7 @@ EXDEF2_WMS( SIMD_B8_1U8_2toU8_1     , Simd128_Select_U8   , Js::SIMDInt32x4Opera
 EXDEF2_WMS( SIMD_B16_1U16_2toU16_1   , Simd128_Select_U16  , Js::SIMDInt32x4Operation::OpSelect         )
 
   // args out, copy value to outParams
-EXDEF3_WMS   ( CUSTOM_ASMJS      , Simd128_ArgOut_F4       , (OP_InvalidWasmTypeConversion<Wasm::WasmTypes::M128,true>)  , Reg1Float32x4_1)
+EXDEF3_WMS   ( CUSTOM_ASMJS      , Simd128_ArgOut_F4       , (OP_InvalidWasmTypeConversion<Wasm::WasmTypes::V128,true>)  , Reg1Float32x4_1)
 EXDEF2_WMS   ( SIMD_F4_1toR1Mem  , Simd128_I_ArgOut_F4     , OP_I_SetOutAsmSimd                          )
   DEF2_WMS   ( SIMD_I4_1toR1Mem  , Simd128_I_ArgOut_I4     , OP_I_SetOutAsmSimd                          )
 

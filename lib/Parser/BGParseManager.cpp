@@ -14,9 +14,13 @@
 #include "Base/ScriptContext.h"
 #include "ByteCodeSerializer.h"
 
+#define BGPARSE_FLAGS (fscrGlobalCode | fscrWillDeferFncParse | fscrCanDeferFncParse | fscrCreateParserState)
+
 // Global, process singleton
 BGParseManager* BGParseManager::s_BGParseManager = nullptr;
 DWORD           BGParseManager::s_lastCookie = 0;
+DWORD           BGParseManager::s_completed = 0;
+DWORD           BGParseManager::s_failed = 0;
 CriticalSection BGParseManager::s_staticMemberLock;
 
 // Static member management
@@ -49,6 +53,17 @@ DWORD BGParseManager::GetNextCookie()
     return ++s_lastCookie;
 }
 
+DWORD BGParseManager::IncCompleted()
+{
+    AutoCriticalSection lock(&s_staticMemberLock);
+    return ++s_completed;
+}
+DWORD BGParseManager::IncFailed()
+{
+    AutoCriticalSection lock(&s_staticMemberLock);
+    return ++s_failed;
+}
+
 
 // Note: runs on any thread
 BGParseManager::BGParseManager()
@@ -79,13 +94,16 @@ BGParseManager::~BGParseManager()
     }
 }
 
-// Returns the BGParseWorkItem that matches the provided cookie
+// Returns the BGParseWorkItem that matches the provided cookie. Parameters have the following impact:
+// - waitForResults: creates an event on the returned WorkItem that the caller can wait for
+// - removeJob: removes the job from the list that contained it, and marks it for discard if it is processing
 // Note: runs on any thread
-BGParseWorkItem* BGParseManager::FindJob(DWORD dwCookie, bool waitForResults)
+BGParseWorkItem* BGParseManager::FindJob(DWORD dwCookie, bool waitForResults, bool removeJob)
 {
-    AutoOptionalCriticalSection autoLock(Processor()->GetCriticalSection());
-
     Assert(dwCookie != 0);
+    Assert(!waitForResults || !removeJob);
+
+    AutoOptionalCriticalSection autoLock(Processor()->GetCriticalSection());
     BGParseWorkItem* matchedWorkitem = nullptr;
 
     // First, look among processed jobs
@@ -94,6 +112,10 @@ BGParseWorkItem* BGParseManager::FindJob(DWORD dwCookie, bool waitForResults)
         if (item->GetCookie() == dwCookie)
         {
             matchedWorkitem = item;
+            if (removeJob)
+            {
+                this->workitemsProcessed.Unlink(matchedWorkitem);
+            }
         }
     }
 
@@ -105,6 +127,13 @@ BGParseWorkItem* BGParseManager::FindJob(DWORD dwCookie, bool waitForResults)
             if (item->GetCookie() == dwCookie)
             {
                 matchedWorkitem = item;
+                if (removeJob)
+                {
+                    this->workitemsProcessing.Unlink(matchedWorkitem);
+                    // Since the job is still processing, it cannot be freed immediately. Mark it as discarded so
+                    // that it can be freed later.
+                    matchedWorkitem->Discard();
+                }
             }
         }
 
@@ -123,6 +152,11 @@ BGParseWorkItem* BGParseManager::FindJob(DWORD dwCookie, bool waitForResults)
                 }
                 return true;
             });
+
+            if (removeJob && matchedWorkitem != nullptr)
+            {
+                Processor()->RemoveJob(matchedWorkitem);
+            }
         }
 
         // Since this job isn't already processed and the caller needs the results, create an event
@@ -180,16 +214,27 @@ HRESULT BGParseManager::QueueBackgroundParse(LPCUTF8 pszSrc, size_t cbLength, ch
 
 // Returns the data provided when the parse was queued
 // Note: runs on any thread, but the buffer lifetimes are not guaranteed after parse results are returned
-HRESULT BGParseManager::GetInputFromCookie(DWORD cookie, LPCUTF8* ppszSrc, size_t* pcbLength)
+HRESULT BGParseManager::GetInputFromCookie(DWORD cookie, LPCUTF8* ppszSrc, size_t* pcbLength, WCHAR** sourceUrl)
 {
     HRESULT hr = E_FAIL;
 
     // Find the job associated with this cookie
-    BGParseWorkItem* workitem = FindJob(cookie, false);
+    BGParseWorkItem* workitem = FindJob(cookie, false /*waitForResults*/, false /*removeJob*/);
     if (workitem != nullptr)
     {
-        (*ppszSrc) = workitem->GetScriptSrc();
-        (*pcbLength) = workitem->GetScriptLength();
+        if (ppszSrc != nullptr)
+        {
+            (*ppszSrc) = workitem->GetScriptSrc();
+        }
+        if (pcbLength != nullptr)
+        {
+            (*pcbLength) = workitem->GetScriptLength();
+        }
+        if (sourceUrl != nullptr)
+        {
+            (*sourceUrl) = workitem->GetScriptPath();
+        }
+
         hr = S_OK;
     }
 
@@ -198,7 +243,16 @@ HRESULT BGParseManager::GetInputFromCookie(DWORD cookie, LPCUTF8* ppszSrc, size_
 
 // Deserializes the background parse results into this thread
 // Note: *must* run on a UI/Execution thread with an available ScriptContext
-HRESULT BGParseManager::GetParseResults(Js::ScriptContext* scriptContextUI, DWORD cookie, LPCUTF8 pszSrc, SRCINFO const * pSrcInfo, Js::ParseableFunctionInfo** ppFunc, CompileScriptException* pse, size_t& srcLength)
+HRESULT BGParseManager::GetParseResults(
+    Js::ScriptContext* scriptContextUI,
+    DWORD cookie,
+    LPCUTF8 pszSrc,
+    SRCINFO const * pSrcInfo,
+    Js::FunctionBody** ppFunc,
+    CompileScriptException* pse,
+    size_t& srcLength,
+    Js::Utf8SourceInfo* utf8SourceInfo,
+    uint& sourceIndex)
 {
     // TODO: Is there a way to cache the environment from which serialization begins to
     // determine whether or not deserialization will succeed? Specifically, being able
@@ -208,30 +262,28 @@ HRESULT BGParseManager::GetParseResults(Js::ScriptContext* scriptContextUI, DWOR
     HRESULT hr = E_FAIL;
 
     // Find the job associated with this cookie
-    BGParseWorkItem* workitem = FindJob(cookie, true);
+    BGParseWorkItem* workitem = FindJob(cookie, true /*waitForResults*/, false /*removeJob*/);
     if (workitem != nullptr)
     {
         // Synchronously wait for the job to complete
         workitem->WaitForCompletion();
-
-        Field(Js::FunctionBody*) functionBody = nullptr;
-        hr = workitem->GetParseHR();
-        if (hr == S_OK)
+        
+        Js::FunctionBody* functionBody = nullptr;
+        hr = workitem->DeserializeParseResults(scriptContextUI, pszSrc, pSrcInfo, utf8SourceInfo, &functionBody, srcLength, sourceIndex);
+        (*ppFunc) = functionBody;
+        if (pse != nullptr)
         {
-            srcLength = workitem->GetParseSourceLength();
-            hr = Js::ByteCodeSerializer::DeserializeFromBuffer(
-                scriptContextUI,
-                0, // flags
-                (const byte *)pszSrc,
-                pSrcInfo,
-                workitem->GetReturnBuffer(),
-                nullptr, // nativeModule
-                &functionBody
-            );
+            workitem->TransferCSE(pse);
         }
 
-        *ppFunc = functionBody;
-        workitem->TransferCSE(pse);
+        if (hr == S_OK)
+        {
+            BGParseManager::IncCompleted();
+        }
+        else
+        {
+            BGParseManager::IncFailed();
+        }
     }
 
     if (PHASE_TRACE1(Js::BgParsePhase))
@@ -239,7 +291,7 @@ HRESULT BGParseManager::GetParseResults(Js::ScriptContext* scriptContextUI, DWOR
         Js::Tick now = Js::Tick::Now();
         Output::Print(
             _u("[BgParse: End   -- cookie: %04d on thread 0x%X at %.2f ms -- hr: 0x%X]\n"),
-            workitem->GetCookie(),
+            workitem != nullptr ? workitem->GetCookie() : -1,
             ::GetCurrentThreadId(),
             now.ToMilliseconds(),
             hr
@@ -249,13 +301,53 @@ HRESULT BGParseManager::GetParseResults(Js::ScriptContext* scriptContextUI, DWOR
     return hr;
 }
 
+// Finds and removes the workitem associated with the provided cookie. If the workitem is processed
+// or not yet processed, the workitem is simply removed and freed. If the workitem is being processed,
+// it is removed from the list and will be freed after the job is processed (with its script source
+// buffer).
+// Returns true when the caller should free the script source buffer. Otherwise, when false is returned,
+// the workitem is responsible for freeing the script source buffer.
+bool BGParseManager::DiscardParseResults(DWORD cookie, void* buffer)
+{
+    BGParseWorkItem* workitem = FindJob(cookie, false /*waitForResults*/, true /*removeJob*/);
+    bool callerOwnsSourceBuffer = true;
+    if (workitem != nullptr)
+    {
+        Assert(buffer == workitem->GetScriptSrc());
+
+        if (!workitem->IsDiscarded())
+        {
+            HeapDelete(workitem);
+        }
+        else
+        {
+            callerOwnsSourceBuffer = false;
+        }
+    }
+
+    if (PHASE_TRACE1(Js::BgParsePhase))
+    {
+        Js::Tick now = Js::Tick::Now();
+        Output::Print(
+            _u("[BgParse: Discard -- cookie: %04d on thread 0x%X at %.2f ms, workitem: 0x%p, workitem owns buffer: %u]\n"),
+            cookie,
+            ::GetCurrentThreadId(),
+            now.ToMilliseconds(),
+            workitem,
+            !callerOwnsSourceBuffer
+        );
+    }
+
+    return callerOwnsSourceBuffer;
+}
+
 // Overloaded function called by JobProcessor to do work
 // Note: runs on background thread
 bool BGParseManager::Process(JsUtil::Job *const job, JsUtil::ParallelThreadData *threadData) 
 {
 #if ENABLE_BACKGROUND_JOB_PROCESSOR
     Assert(job->Manager() == this);
-
+    
     // Create script context on this thread
     ThreadContext* threadContext = ThreadBoundThreadContextManager::EnsureContextForCurrentThread();
 
@@ -299,12 +391,29 @@ void BGParseManager::JobProcessed(JsUtil::Job *const job, const bool succeeded)
     BGParseWorkItem* workItem = (BGParseWorkItem*)job;
     if (succeeded)
     {
-        Assert(this->workitemsProcessing.Contains(workItem));
-        this->workitemsProcessing.Unlink(workItem);
+        Assert(!this->workitemsProcessed.Contains(workItem));
+        if (this->workitemsProcessing.Contains(workItem))
+        {
+            // Move this processed workitem from the processing list to
+            // the processed list
+            this->workitemsProcessing.Unlink(workItem);
+            this->workitemsProcessed.LinkToEnd(workItem);
+        }
+        else
+        {
+            // If this workitem isn't in the processing queue, it should
+            // already be discarded
+            Assert(workItem->IsDiscarded());
+        }
+    }
+    else
+    {
+        // When the manager is shutting down, workitems are processed through the JobProcessor
+        // without executing (i.e., !succeeded). So, mark it for discard so that it can be freed.
+        workItem->Discard();
     }
 
-    this->workitemsProcessed.LinkToEnd(workItem);
-    workItem->JobProcessed();
+    workItem->JobProcessed(succeeded);
 }
 
 // Define needed for jobs.inl
@@ -339,7 +448,8 @@ BGParseWorkItem::BGParseWorkItem(
     parseSourceLength(0),
     bufferReturn(nullptr),
     bufferReturnBytes(0),
-    complete(nullptr)
+    complete(nullptr),
+    discarded(false)
 {
     this->cookie = BGParseManager::GetNextCookie();
 
@@ -353,6 +463,18 @@ BGParseWorkItem::~BGParseWorkItem()
     if (this->complete != nullptr)
     {
         HeapDelete(this->complete);
+    }
+
+    if (this->bufferReturn != nullptr)
+    {
+        ::CoTaskMemFree(this->bufferReturn);
+    }
+
+    if (this->discarded)
+    {
+        // When this workitem has been discarded, this is the last reference
+        // to the script source, so free it now during destruction.
+        ::HeapFree(GetProcessHeap(), 0, (void*)this->script);
     }
 }
 
@@ -386,27 +508,42 @@ void BGParseWorkItem::ParseUTF8Core(Js::ScriptContext* scriptContext)
     }
 
     SRCINFO si = {
-        /* sourceContextInfo   */ sourceContextInfo,
-        /* dlnHost             */ 0,
-        /* ulColumnHost        */ 0,
-        /* lnMinHost           */ 0,
-        /* ichMinHost          */ 0,
-        /* ichLimHost          */ (ULONG)0,
-        /* ulCharOffset        */ 0,
-        /* mod                 */ 0,
-        /* grfsi               */ 0
+        sourceContextInfo,
+        0, // dlnHost
+        0, // ulColumnHost
+        0, // lnMinHost
+        0, // ichMinHost
+        static_cast<ULONG>(cb / sizeof(utf8char_t)), // ichLimHost
+        0, // ulCharOffset
+        kmodGlobal, // mod
+        0 // grfsi
     };
 
-    // Currently always called from a try-catch
     ENTER_PINNED_SCOPE(Js::Utf8SourceInfo, sourceInfo);
-    sourceInfo = Js::Utf8SourceInfo::NewWithNoCopy(scriptContext, (LPUTF8)this->script, (int32)this->cb, static_cast<int32>(this->cb), &si, false);
-    LEAVE_PINNED_SCOPE();
+    sourceInfo = Js::Utf8SourceInfo::NewWithNoCopy(scriptContext, (LPUTF8)this->script, (int32)this->cb, static_cast<int32>(this->cb), &si, false);    
 
-    // what's a better name for "fIsOriginalUtf8Source?" what if i want to say "isutf8source" but not "isoriginal"?
     charcount_t cchLength = 0;
     uint sourceIndex = 0;
     Js::ParseableFunctionInfo * func = nullptr;
-    this->parseHR = scriptContext->CompileUTF8Core(sourceInfo, &si, true, this->script, this->cb, fscrGlobalCode, &this->cse, cchLength, this->parseSourceLength, sourceIndex, &func);
+
+    Parser ps(scriptContext);
+    this->parseHR = scriptContext->CompileUTF8Core(
+        ps,
+        sourceInfo,
+        &si,
+        true, // fOriginalUtf8Code
+        this->script,
+        this->cb,
+        BGPARSE_FLAGS,
+        &this->cse,
+        cchLength,
+        this->parseSourceLength,
+        sourceIndex,
+        &func,
+        nullptr // pDataCache
+    );
+
+
     if (this->parseHR == S_OK)
     {
         BEGIN_TEMP_ALLOCATOR(tempAllocator, scriptContext, _u("BGParseWorkItem"));
@@ -418,10 +555,9 @@ void BGParseWorkItem::ParseUTF8Core(Js::ScriptContext* scriptContext)
             this->script,
             functionBody,
             functionBody->GetHostSrcInfo(),
-            true,
             &this->bufferReturn,
             &this->bufferReturnBytes,
-            0
+            GENERATE_BYTE_CODE_PARSER_STATE | GENERATE_BYTE_CODE_COTASKMEMALLOC
         );
         END_TEMP_ALLOCATOR(tempAllocator, scriptContext);
         Assert(this->parseHR == S_OK);
@@ -431,6 +567,63 @@ void BGParseWorkItem::ParseUTF8Core(Js::ScriptContext* scriptContext)
         Assert(this->cse.ei.bstrSource != nullptr);
         Assert(func == nullptr);
     }
+
+    LEAVE_PINNED_SCOPE();
+}
+
+// Deserializes the background parse results into this thread
+// Note: *must* run on a UI/Execution thread with an available ScriptContext
+HRESULT BGParseWorkItem::DeserializeParseResults(
+    Js::ScriptContext* scriptContextUI,
+    LPCUTF8 pszSrc,
+    SRCINFO const * pSrcInfo,
+    Js::Utf8SourceInfo* utf8SourceInfo,
+    Js::FunctionBody** functionBodyReturn,
+    size_t& srcLength,
+    uint& sourceIndex
+)
+{
+    HRESULT hr = this->parseHR;
+    if (hr == S_OK)
+    {
+        if (utf8SourceInfo == nullptr)
+        {
+            scriptContextUI->MakeUtf8SourceInfo(
+                this->script,
+                this->cb,
+                pSrcInfo,
+                &utf8SourceInfo,
+                LoadScriptFlag_Utf8Source,
+                nullptr // Var scriptSource
+            );
+        }
+
+        srcLength = this->parseSourceLength;
+        sourceIndex = scriptContextUI->SaveSourceNoCopy(utf8SourceInfo, (int)srcLength, false /*isCesu8*/);
+        Assert(sourceIndex != Js::Constants::InvalidSourceIndex);
+
+        Field(Js::FunctionBody*) functionBody = nullptr;
+        hr = Js::ByteCodeSerializer::DeserializeFromBuffer(
+            scriptContextUI,
+            BGPARSE_FLAGS,
+            (const byte *)pszSrc,
+            pSrcInfo,
+            this->bufferReturn,
+            nullptr, // nativeModule
+            &functionBody,
+            sourceIndex
+        );
+
+        if (hr == S_OK)
+        {
+            // The buffer is now owned by the output of DeserializeFromBuffer
+            (*functionBodyReturn) = functionBody;
+            this->bufferReturn = nullptr;
+            this->bufferReturnBytes = 0;
+        }
+    }
+
+    return hr;
 }
 
 void BGParseWorkItem::CreateCompletionEvent()
@@ -440,9 +633,26 @@ void BGParseWorkItem::CreateCompletionEvent()
 }
 
 // Upon notification of job processed, set the event for those waiting for this job to complete
-void BGParseWorkItem::JobProcessed()
+void BGParseWorkItem::JobProcessed(const bool succeeded)
 {
-    if (this->complete != nullptr)
+    Assert(Manager()->Processor()->GetCriticalSection()->IsLocked());
+
+    if (IsDiscarded())
+    {
+        Js::Tick now = Js::Tick::Now();
+        Output::Print(
+            _u("[BgParse: Discard Before GetResults -- cookie: %04d on thread 0x%X at %.2f ms]\n"),
+            GetCookie(),
+            ::GetCurrentThreadId(),
+            now.ToMilliseconds()
+        );
+
+        // When a workitem has been discarded while processing, there are now other
+        // references to it, so free it now
+        Assert((this->Next() == nullptr && this->Previous() == nullptr) || !succeeded);
+        HeapDelete(this);
+    }
+    else if (this->complete != nullptr)
     {
         this->complete->Set();
     }

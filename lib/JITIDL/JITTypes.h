@@ -78,7 +78,7 @@ typedef unsigned char boolean;
 #define __JITTypes_h__
 
 // TODO: OOP JIT, how do we make this better?
-const int VTABLE_COUNT = 49;
+const int VTABLE_COUNT = 51;
 const int EQUIVALENT_TYPE_CACHE_SIZE = 8;
 
 typedef IDL_DEF([context_handle]) void * PTHREADCONTEXT_HANDLE;
@@ -137,6 +137,13 @@ typedef struct FixedFieldIDL
     IDL_Field(CHAKRA_WB_PTR) environmentAddr;
 } FixedFieldIDL;
 
+typedef struct ObjTypeSpecPolymorphicInfoIDL
+{
+    IDL_Field(unsigned short) slotIndex;
+    IDL_Field(boolean) usesAuxSlot;
+    IDL_PAD1(0)
+} ObjTypeSpecPolymorphicInfoIDL;
+
 typedef struct JITTimeConstructorCacheIDL
 {
     IDL_Field(boolean) skipNewScObject;
@@ -161,18 +168,20 @@ typedef struct ObjTypeSpecFldIDL
 {
     IDL_Field(unsigned short) flags;
     IDL_Field(unsigned short) slotIndex;
+    IDL_Field(unsigned short) polymorphicInfoCount;
     IDL_Field(unsigned short) fixedFieldCount;
     IDL_Field(unsigned short) fixedFieldInfoArraySize; // 1 (when fixedFieldCount is 0) or fixedFieldCount
+    IDL_PAD2(0)
     IDL_Field(int) propertyId;
     IDL_Field(int) typeId;
     IDL_Field(unsigned int) id;
-    X64_PAD4(0)
     IDL_Field(CHAKRA_WB_PTR) protoObjectAddr;
     IDL_Field(CHAKRA_WB_PTR) propertyGuardValueAddr;
     IDL_Field(EquivalentTypeSetIDL *) typeSet;
     IDL_Field(TypeIDL *) initialType;
     IDL_Field(JITTimeConstructorCacheIDL *) ctorCache;
     IDL_DEF([size_is(fixedFieldInfoArraySize)]) IDL_Field(FixedFieldIDL *) fixedFieldInfoArray;
+    IDL_DEF([size_is(polymorphicInfoCount)]) IDL_Field(ObjTypeSpecPolymorphicInfoIDL *) polymorphicInfoArray;
 } ObjTypeSpecFldIDL;
 
 typedef struct PinnedTypeRefsIDL
@@ -205,6 +214,15 @@ typedef struct BVSparseNodeIDL
     __int64 data;
 } BVSparseNodeIDL;
 
+typedef struct CallbackInfoIDL
+{
+    byte argInfoButs;
+    IDL_PAD1(0)
+    IDL_PAD2(1)
+    unsigned int sourceId;
+    unsigned int functionId;
+} CallbackInfoIDL;
+
 typedef struct CallSiteIDL
 {
     unsigned short bitFields;
@@ -213,6 +231,17 @@ typedef struct CallSiteIDL
     unsigned int sourceId;
     unsigned int functionId;
 } CallSiteIDL;
+
+typedef struct CallApplyCallSiteIDL
+{
+    unsigned short bitFields;
+    unsigned short returnType;
+    unsigned int ldFldInlineCacheId;
+    unsigned int sourceId;
+    unsigned int functionId;
+    unsigned short callSiteId;
+    IDL_PAD2(0)
+} CallApplyCallSiteIDL;
 
 typedef struct ThisIDL
 {
@@ -276,6 +305,7 @@ typedef struct ProfileDataIDL
 
     unsigned short profiledSlotCount;
     unsigned short profiledCallSiteCount;
+    unsigned short profiledCallbackCount;
 
     unsigned short profiledReturnTypeCount;
     unsigned short profiledDivOrRemCount;
@@ -301,6 +331,8 @@ typedef struct ProfileDataIDL
     IDL_DEF([size_is(profiledSlotCount)]) unsigned short * slotData;
 
     IDL_DEF([size_is(profiledCallSiteCount)]) CallSiteIDL * callSiteData;
+
+    IDL_DEF([size_is(profiledCallbackCount)]) CallbackInfoIDL * callbackData;
 
     IDL_DEF([size_is(profiledReturnTypeCount)]) unsigned short * returnTypeData;
 
@@ -536,7 +568,8 @@ typedef struct FunctionBodyDataIDL
     unsigned short inParamCount;
     unsigned short argUsedForBranch;
     unsigned short profiledCallSiteCount;
-    IDL_PAD2(0)
+    unsigned short callSiteToCallApplyCallSiteArrayCount;
+    unsigned short profiledCallApplyCallSiteCount;
     unsigned int funcNumber;
     unsigned int sourceContextId;
     unsigned int nestedCount;
@@ -602,6 +635,8 @@ typedef struct FunctionBodyDataIDL
 
     IDL_DEF([size_is(functionSlotsInCachedScopeCount)]) unsigned int * slotIdInCachedScopeToNestedIndexArray;
 
+    IDL_DEF([size_is(callSiteToCallApplyCallSiteArrayCount)]) unsigned short * callSiteToCallApplyCallSiteArray;
+
     ProfileDataIDL * profileData;
 
     AsmJsDataIDL * asmJsData;
@@ -646,7 +681,11 @@ typedef struct FunctionJITTimeDataIDL
 
     IDL_DEF([size_is(ldFldInlineeCount)]) struct FunctionJITTimeDataIDL ** ldFldInlinees;
 
-    X64_PAD4(1)
+    IDL_DEF([size_is(inlineeCount)]) struct FunctionJITTimeDataIDL ** callbackInlinees;
+
+    unsigned int callApplyTargetInlineeCount;
+    IDL_DEF([size_is(callApplyTargetInlineeCount)]) struct FunctionJITTimeDataIDL ** callApplyTargetInlinees;
+
     unsigned int objTypeSpecFldInfoCount;
     IDL_DEF([size_is(objTypeSpecFldInfoCount)]) ObjTypeSpecFldIDL ** objTypeSpecFldInfoArray;
 
@@ -657,6 +696,7 @@ typedef struct FunctionJITTimeDataIDL
     CHAKRA_PTR functionInfoAddr;
     CHAKRA_PTR callsCountAddress;
     CHAKRA_PTR weakFuncRef;
+    CHAKRA_PTR entryPointInfoAddr;
 } FunctionJITTimeDataIDL;
 
 #if !FLOATVAR

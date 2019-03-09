@@ -269,10 +269,10 @@ namespace Js
         void CallI(OpCode op, RegSlot returnValueRegister, RegSlot functionRegister, ArgSlot givenArgCount, ProfileId callSiteId, CallFlags callFlags = CallFlags_None);
         void CallIExtended(OpCode op, RegSlot returnValueRegister, RegSlot functionRegister, ArgSlot givenArgCount, CallIExtendedOptions options, const void *buffer, uint byteCount, ProfileId callSiteId, CallFlags callFlags = CallFlags_None);
         void RemoveEntryForRegSlotFromCacheIdMap(RegSlot functionRegister);
-        void Element(OpCode op, RegSlot value, RegSlot instance, RegSlot element, bool instanceAtReturnRegOK = false);
+        void Element(OpCode op, RegSlot value, RegSlot instance, RegSlot element, bool instanceAtReturnRegOK = false, bool forceStrictMode = false);
         void ElementUnsigned1(OpCode op, RegSlot value, RegSlot instance, uint32 element);
-        void Property(OpCode op, RegSlot Value, RegSlot Instance, PropertyIdIndexType propertyIdIndex);
-        void ScopedProperty(OpCode op, RegSlot Value, PropertyIdIndexType propertyIdIndex);
+        void Property(OpCode op, RegSlot Value, RegSlot Instance, PropertyIdIndexType propertyIdIndex, bool forceStrictMode = false);
+        void ScopedProperty(OpCode op, RegSlot Value, PropertyIdIndexType propertyIdIndex, bool forceStrictMode = false);
         void Slot(OpCode op, RegSlot value, RegSlot instance, uint32 slotId);
         void Slot(OpCode op, RegSlot value, RegSlot instance, uint32 slotId, ProfileId profileId);
         void SlotI1(OpCode op, RegSlot value, uint32 slotId1);
@@ -322,6 +322,7 @@ namespace Js
         template <typename SizePolicy> bool TryWriteElementSlot(OpCode op, RegSlot value, RegSlot instance, uint32 slotId);
         template <typename SizePolicy> bool TryWriteElementSlotI1(OpCode op, RegSlot value, uint32 slotId);
         template <typename SizePolicy> bool TryWriteElementSlotI2(OpCode op, RegSlot value, uint32 slotId1, uint32 slotId2);
+        template <typename SizePolicy> bool TryWriteElementSlotI3(OpCode op, RegSlot value, RegSlot instance, uint32 slotId, RegSlot homeObj);
         template <typename SizePolicy> bool TryWriteElementU(OpCode op, RegSlot instance, PropertyIdIndexType index);
         template <typename SizePolicy> bool TryWriteElementScopedU(OpCode op, PropertyIdIndexType index);
         template <typename SizePolicy> bool TryWriteElementRootU(OpCode op, PropertyIdIndexType index);
@@ -345,8 +346,8 @@ namespace Js
         uint InsertAuxiliaryData(const void* buffer, uint byteCount);
 
         void InitClass(RegSlot constructor, RegSlot extends = Js::Constants::NoRegister);
-        void NewFunction(RegSlot destinationRegister, uint index, bool isGenerator);
-        void NewInnerFunction(RegSlot destinationRegister, uint index, RegSlot environmentRegister, bool isGenerator);
+        void NewFunction(RegSlot destinationRegister, uint index, bool isGenerator, RegSlot homeObjLocation);
+        void NewInnerFunction(RegSlot destinationRegister, uint index, RegSlot environmentRegister, bool isGenerator, RegSlot homeObjLocation);
         ByteCodeLabel DefineLabel();
         void MarkLabel(ByteCodeLabel labelID);
         void StartStatement(ParseNode* node, uint32 tmpRegCount);
@@ -360,6 +361,7 @@ namespace Js
         void SetCurrent(uint offset, DataChunk * chunk) { m_byteCodeData.SetCurrent(offset, chunk); }
         bool ShouldIncrementCallSiteId(OpCode op);
         inline void SetCallSiteCount(Js::ProfileId callSiteId) { this->m_functionWrite->SetProfiledCallSiteCount(callSiteId); }
+        inline void SetCallApplyCallsiteCount(Js::ProfileId count) { this->m_functionWrite->SetProfiledCallApplyCallSiteCount(count); }
 
         // Debugger methods.
         DebuggerScope* RecordStartScopeObject(DiagExtraScopesType scopeType, RegSlot scopeLocation = Js::Constants::NoRegister, int* index = nullptr);
@@ -423,12 +425,8 @@ namespace Js
 namespace JsUtil
 {
     template <>
-    class ValueEntry<Js::ByteCodeWriter::CacheIdUnit>: public BaseValueEntry<Js::ByteCodeWriter::CacheIdUnit>
+    inline void ClearValue<Js::ByteCodeWriter::CacheIdUnit>::Clear(Js::ByteCodeWriter::CacheIdUnit* value)
     {
-    public:
-        void Clear()
-        {
-            this->value = 0;
-        }
-    };
-};
+        *value = 0;
+    }
+}

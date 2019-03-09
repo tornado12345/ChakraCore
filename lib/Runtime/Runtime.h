@@ -98,6 +98,9 @@ namespace Js
     class JavascriptBooleanObject;
     class JavascriptSymbol;
     class JavascriptSymbolObject;
+#ifdef _CHAKRACOREBUILD
+    class CustomExternalWrapperObject;
+#endif
     class JavascriptProxy;
     class JavascriptReflect;
     class JavascriptEnumeratorIterator;
@@ -126,6 +129,7 @@ namespace Js
     class JavascriptGenerator;
     class LiteralString;
     class JavascriptStringObject;
+    class JavascriptBigIntObject;
     struct PropertyDescriptor;
     class Type;
     class DynamicType;
@@ -138,9 +142,10 @@ namespace Js
     class IndexPropertyDescriptor;
     class DynamicObject;
     class ArrayObject;
-    class WithScopeObject;
+    class UnscopablesWrapperObject;
     class SpreadArgument;
     class JavascriptString;
+    class JavascriptBigInt;
     class StringCopyInfo;
     class StringCopyInfoStack;
     class ObjectPrototypeObject;
@@ -280,7 +285,11 @@ namespace Js
     class AsmJSByteCodeGenerator;
     enum AsmJSMathBuiltinFunction: int;
     //////////////////////////////////////////////////////////////////////////
+#if ENABLE_WEAK_REFERENCE_REGIONS
+    template <typename T> using WeakPropertyIdMap = JsUtil::WeakReferenceRegionDictionary<PropertyId, T*, PrimeSizePolicy>;
+#else
     template <typename T> using WeakPropertyIdMap = JsUtil::WeakReferenceDictionary<PropertyId, T, PrimeSizePolicy>;
+#endif
     typedef WeakPropertyIdMap<PropertyString> PropertyStringCacheMap;
     typedef WeakPropertyIdMap<JavascriptSymbol> SymbolCacheMap;
 
@@ -371,8 +380,9 @@ enum tagDEBUG_EVENT_INFO_TYPE
 #include "Types/TypeId.h"
 
 #include "Base/Constants.h"
-#include "Language/ConstructorCache.h"
 #include "BackendApi.h"
+#include "Language/PropertyGuard.h"
+#include "Language/ConstructorCache.h"
 #include "ByteCode/OpLayoutsCommon.h"
 #include "ByteCode/OpLayouts.h"
 #include "ByteCode/OpLayoutsAsmJs.h"
@@ -466,6 +476,8 @@ enum tagDEBUG_EVENT_INFO_TYPE
 #define CHAKRATEL_LANGSTATS_INC_BUILTINCOUNT(builtin)
 #define CHAKRATEL_LANGSTATS_INC_LANGFEATURECOUNT(esVersion, feature, m_scriptContext)
 #endif
+
+#include "Library/DelayFreeArrayBufferHelper.h"
 #include "Base/ThreadContext.h"
 
 #include "Base/StackProber.h"
@@ -505,6 +517,7 @@ enum tagDEBUG_EVENT_INFO_TYPE
 #include "Library/SharedArrayBuffer.h"
 #include "Library/TypedArray.h"
 #include "Library/JavascriptBoolean.h"
+#include "Library/JavascriptBigInt.h"
 #include "Library/WebAssemblyEnvironment.h"
 #include "Library/WebAssemblyTable.h"
 #include "Library/WebAssemblyMemory.h"
@@ -517,6 +530,9 @@ enum tagDEBUG_EVENT_INFO_TYPE
 #include "Types/ScriptFunctionType.h"
 #include "Library/ScriptFunction.h"
 
+#ifdef _CHAKRACOREBUILD
+#include "Library/CustomExternalWrapperObject.h"
+#endif
 #include "Library/JavascriptProxy.h"
 
 #if ENABLE_TTD
@@ -541,6 +557,8 @@ enum tagDEBUG_EVENT_INFO_TYPE
 #include "Language/AsmJsModule.h"
 #include "Language/AsmJs.h"
 
+#include "Core/JitHelperUtils.h"
+
 //
 // .inl files
 //
@@ -550,7 +568,6 @@ enum tagDEBUG_EVENT_INFO_TYPE
 #include "Language/JavascriptConversion.inl"
 #include "Types/RecyclableObject.inl"
 #include "Types/DynamicObject.inl"
-#include "Library/JavascriptBoolean.inl"
 #include "Library/JavascriptArray.inl"
 #include "Library/SparseArraySegment.inl"
 #include "Library/JavascriptNumber.inl"

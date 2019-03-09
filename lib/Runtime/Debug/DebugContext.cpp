@@ -13,8 +13,8 @@ namespace Js
         diagProbesContainer(nullptr),
         isClosed(false),
         debuggerMode(DebuggerMode::NotDebugging),
-        isDebuggerRecording(true),
-        isReparsingSource(false)
+        isReparsingSource(false),
+        isDebuggerRecording(true)
     {
         Assert(scriptContext != nullptr);
     }
@@ -238,8 +238,10 @@ namespace Js
                         {
                             pFuncBody->ReinitializeExecutionModeAndLimits();
                         }
+                        pFuncBody->UpdateEntryPointsOnDebugReparse();
                     });
                 }
+
                 return false;
             }
 
@@ -330,6 +332,7 @@ namespace Js
                     {
                         pFuncBody->ReinitializeExecutionModeAndLimits();
                     }
+                    pFuncBody->UpdateEntryPointsOnDebugReparse();
                 });
             }
 

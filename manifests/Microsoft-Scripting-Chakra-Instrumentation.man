@@ -1382,11 +1382,19 @@
                     />
                 <data
                     inType="win:UInt32"
-                    name="ScannedBytes"
+                    name="ScannedCount"
                     />
                 <data
                     inType="win:UInt32"
-                    name="ClearedBytes"
+                    name="ClearedCount"
+                    />
+                <data
+                    inType="win:UInt32"
+                    name="RegionScannedCount"
+                    />
+                    <data
+                    inType="win:UInt32"
+                    name="RegionClearedCount"
                     />
                 </template>
                 <template tid="GCClearInlineCacheData">
@@ -3224,7 +3232,7 @@
                     opcode="win:Stop"
                     symbol="JSCRIPT_GC_SWEEP_WEAKREF_STOP"
                     task="Jscript_GC_SweepWeakRef"
-                    template="GCInThreadSweepData"
+                    template="GCPhase"
                     value="130"
                     />
                 <event
@@ -3809,7 +3817,7 @@
                     opcode="win:Stop"
                     symbol="MEMPROTECT_GC_SWEEP_WEAKREF_STOP"
                     task="Memprotect_GC_SweepWeakRef"
-                    template="GCInThreadSweepData"
+                    template="GCPhase"
                     value="203"
                     />
                 <event

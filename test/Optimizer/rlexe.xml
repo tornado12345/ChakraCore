@@ -1263,6 +1263,12 @@
   </test>
   <test>
     <default>
+      <files>boundCheckHoistBug.js</files>
+      <compile-flags>-mic:1 -off:simplejit</compile-flags>
+    </default>
+  </test>
+  <test>
+    <default>
       <files>Miscellaneous_MaxInterpret.js</files>
       <baseline>Miscellaneous_MaxInterpret.baseline</baseline>
       <compile-flags>-bgJit- -minInterpretCount:1 -maxInterpretCount:1 -off:simpleJit</compile-flags>
@@ -1462,13 +1468,41 @@
   <test>
     <default>
       <files>test146.js</files>
-      <compile-flags>-off:bailonnoprofile</compile-flags>
+      <compile-flags>-off:bailonnoprofile -off:earlyreferenceerrors</compile-flags>
     </default>
   </test>
   <test>
     <default>
       <files>test147.js</files>
       <compile-flags>-off:aggressiveinttypespec</compile-flags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>test148.js</files>
+      <compile-flags>-mic:1 -off:simplejit</compile-flags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>test149.js</files>
+      <compile-flags>-mic:1 -off:simplejit -bgjit- -force:fixdataprops -lic:1</compile-flags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>test150.js</files>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>test151.js</files>
+      <compile-flags>-off:usefixeddataprops -off:objtypespec</compile-flags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>test152.js</files>
     </default>
   </test>
   <test>
@@ -1490,7 +1524,77 @@
       <files>mul_rejit_bug.js</files>
       <baseline>mul_rejit_bug.baseline</baseline>
       <compile-flags>-mic:1 -oopjit- -bgJit- -off:simplejit -trace:rejit</compile-flags>
+      <tags>exclude_dynapogo,exclude_nonative,exclude_serialized</tags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>testsimplepathbrfold.js</files>
+      <compile-flags>-maxinterpretcount:1 -maxsimplejitruncount:1 -oopjit- -trace:pathdepbranchfolding -bgjit-</compile-flags>
+      <baseline>testsimplepathbrfold.baseline</baseline>
       <tags>exclude_dynapogo,exclude_nonative</tags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>bugsimplepathbrfold.js</files>
+      <compile-flags>-maxinterpretcount:1 -maxsimplejitruncount:1 -oopjit-</compile-flags>
+      <baseline>bugsimplepathbrfold.baseline</baseline>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>bugsimplepathbrfold1.js</files>
+      <compile-flags>-maxinterpretcount:1 -maxsimplejitruncount:1 -oopjit-</compile-flags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>bugsimplepathbrfold3.js</files>
+      <compile-flags>-maxsimplejitruncount:1 -maxinterpretcount:1 -forcejitloopbody -oopjit-</compile-flags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>bugsimplepathbrfold4.js</files>
+      <compile-flags> -loopinterpretcount:1 -bgjit- -maxsimplejitruncount:1 -maxinterpretcount:1 -oopjit-</compile-flags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>bugsimplepathbrfoldgetter.js</files>
+      <baseline>bugsimplepathbrfoldgetter.baseline</baseline>
+      <tags>exclude_dynapogo,exclude_nonative</tags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>bcebug.js</files>
+      <compile-flags>-mic:1 -off:simplejit -bgjit- -lic:1</compile-flags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>rembug.js</files>
+      <compile-flags>-maxinterpretcount:1 -maxsimplejitruncount:1  -loopinterpretcount:1 -oopjit- -bgjit-</compile-flags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>pathdepbug.js</files>
+      <compile-flags>-maxinterpretcount:1 -maxsimplejitruncount:1  -on:CaptureByteCodeRegUse  -off:aggressiveinttypespec</compile-flags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>lengthsymstorebug.js</files>
+      <compile-flags>-mic:1 -off:simplejit</compile-flags>
+    </default>
+  </test>
+  <test>
+    <default>
+      <files>valuetypegap.js</files>
+      <compile-flags>-maxinterpretcount:1 -maxsimplejitruncount:1 -force:inline</compile-flags>
     </default>
   </test>
 </regress-exe>

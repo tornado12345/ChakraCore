@@ -30,6 +30,7 @@ PHASE(All)
         PHASE(ScanAhead)
         PHASE_DEFAULT_OFF(ParallelParse)
         PHASE(EarlyReferenceErrors)
+        PHASE(EarlyErrorOnAssignToCall)
         PHASE(BgParse)
     PHASE(ByteCode)
         PHASE(CachedScope)
@@ -86,6 +87,7 @@ PHASE(All)
             PHASE(InlineApply)
             PHASE(InlineApplyTarget)
             PHASE(InlineApplyWithoutArrayArg)
+            PHASE(InlineAnyCallApplyTarget)
             PHASE(BailOutOnNotStackArgs)
             PHASE(InlineCall)
             PHASE(InlineCallTarget)
@@ -99,6 +101,7 @@ PHASE(All)
             PHASE(InlineArgsOpt)
                 PHASE(RemoveInlineFrame)
             PHASE(InlinerConstFold)
+            PHASE_DEFAULT_ON(InlineCallbacks)
     PHASE(ExecBOIFastPath)
         PHASE(FGBuild)
             PHASE(OptimizeTryFinally)
@@ -106,7 +109,9 @@ PHASE(All)
             PHASE(TailDup)
         PHASE(FGPeeps)
         PHASE(GlobOpt)
+            PHASE(PathDepBranchFolding)
             PHASE(OptimizeTryCatch)
+            PHASE_DEFAULT_ON(CaptureByteCodeRegUse)
             PHASE(Backward)
                 PHASE(TrackIntUsage)
                 PHASE(TrackNegativeZero)
@@ -116,6 +121,7 @@ PHASE(All)
             PHASE(Forward)
                 PHASE(ValueTable)
                 PHASE(ValueNumbering)
+                PHASE(AVTInPrePass)
                 PHASE(PathDependentValues)
                     PHASE(TrackRelativeIntBounds)
                         PHASE(BoundCheckElimination)
@@ -138,6 +144,7 @@ PHASE(All)
                 PHASE(Invariants)
                 PHASE(FieldCopyProp)
                 PHASE(FieldPRE)
+                PHASE(MakeObjSymLiveInLandingPad)
                 PHASE(HostOpt)
                 PHASE(ObjTypeSpec)
                     PHASE(ObjTypeSpecNewObj)
@@ -150,13 +157,17 @@ PHASE(All)
                     PHASE(TraceObjTypeSpecWriteGuards)
                     PHASE(LiveOutFields)
                     PHASE(DisabledObjTypeSpec)
+                    PHASE(DepolymorphizeInlinees)
                     PHASE(ReuseAuxSlotPtr)
+                    PHASE(PolyEquivTypeGuard)
+                    PHASE(DeadStoreTypeChecksOnStores)
                     #if DBG
                         PHASE(SimulatePolyCacheWithOneTypeForFunction)
                     #endif
                 PHASE(CheckThis)
                 PHASE(StackArgOpt)
                 PHASE(StackArgFormalsOpt)
+                PHASE(StackArgLenConstOpt)
                 PHASE(IndirCopyProp)
                 PHASE(ArrayCheckHoist)
                     PHASE(ArrayMissingValueCheckHoist)
@@ -178,6 +189,7 @@ PHASE(All)
                 PHASE(UseFixedDataProps)
                 PHASE(UseFixedDataPropsInInliner)
                 PHASE(LazyBailout)
+                    PHASE(LazyBailoutOnImplicitCalls)
                     PHASE(LazyFixedDataBailout)
                     PHASE(LazyFixedTypeBailout)
                 PHASE(FixedMethods)
@@ -203,6 +215,7 @@ PHASE(All)
                     PHASE(MarkTempNumber)
                     PHASE(MarkTempObject)
                     PHASE(MarkTempNumberOnTempObject)
+                PHASE(SpeculationPropagationAnalysis)
         PHASE(DumpGlobOptInstr) // Print the Globopt instr string in post lower dumps
         PHASE(Lowerer)
             PHASE(FastPath)
@@ -249,6 +262,7 @@ PHASE(All)
         PHASE(PrologEpilog)
         PHASE(InsertNOPs)
         PHASE(Encoder)
+            PHASE(Assembly)
             PHASE(Emitter)
             PHASE(DebugBreak)
 #if defined(_M_IX86) || defined(_M_X64)
@@ -267,6 +281,7 @@ PHASE(All)
             PHASE(FastIndirectEval)
         PHASE(IdleDecommit)
         PHASE(IdleCollect)
+        PHASE(Marshal)
         PHASE(MemoryAllocation)
 #ifdef RECYCLER_PAGE_HEAP
             PHASE(PageHeap)
@@ -328,8 +343,8 @@ PHASE(All)
             PHASE(ObjectHeaderInliningForObjectLiterals)
             PHASE(ObjectHeaderInliningForEmptyObjects)
         PHASE(OptUnknownElementName)
-#if DBG_DUMP
         PHASE(TypePropertyCache)
+#if DBG_DUMP
         PHASE(InlineSlots)
 #endif
         PHASE(DynamicProfile)
@@ -375,6 +390,7 @@ PHASE(All)
         PHASE(ShareTypesWithAttributes)
         PHASE(ShareAccessorTypes)
         PHASE(ShareFuncTypes)
+        PHASE(ShareCrossSiteFuncTypes)
         PHASE(ConditionalCompilation)
         PHASE(InterpreterProfile)
         PHASE(InterpreterAutoProfile)
@@ -387,6 +403,7 @@ PHASE(All)
         PHASE(PerfHint)
         PHASE(TypeShareForChangePrototype)
         PHASE(DeferSourceLoad)
+        PHASE(DataCache)
         PHASE(ObjectMutationBreakpoint)
         PHASE(NativeCodeData)
         PHASE(XData)
@@ -423,7 +440,10 @@ PHASE(All)
 #define DEFAULT_CONFIG_WasmMaxTableSize     (10000000)
 #define DEFAULT_CONFIG_WasmThreads          (false)
 #define DEFAULT_CONFIG_WasmMultiValue       (false)
+#define DEFAULT_CONFIG_WasmSignExtends      (true)
+#define DEFAULT_CONFIG_WasmNontrapping      (true)
 #define DEFAULT_CONFIG_WasmExperimental     (false)
+#define DEFAULT_CONFIG_BgParse              (false)
 #define DEFAULT_CONFIG_BgJitDelayFgBuffer   (0)
 #define DEFAULT_CONFIG_BgJitPendingFuncCap  (31)
 #define DEFAULT_CONFIG_CurrentSourceInfo    (true)
@@ -431,6 +451,8 @@ PHASE(All)
 #define DEFAULT_CONFIG_HybridFgJit          (false)
 #define DEFAULT_CONFIG_HybridFgJitBgQueueLengthThreshold (32)
 #define DEFAULT_CONFIG_Prejit               (false)
+#define DEFAULT_CONFIG_ParserStateCache     (false)
+#define DEFAULT_CONFIG_CompressParserStateCache (false)
 #define DEFAULT_CONFIG_DeferTopLevelTillFirstCall (true)
 #define DEFAULT_CONFIG_DirectCallTelemetryStats (false)
 #define DEFAULT_CONFIG_errorStackTrace      (true)
@@ -438,7 +460,6 @@ PHASE(All)
 #define DEFAULT_CONFIG_PrintLineColumnInfo (false)
 #define DEFAULT_CONFIG_ForceDecommitOnCollect (false)
 #define DEFAULT_CONFIG_ForceDeferParse      (false)
-#define DEFAULT_CONFIG_ForceCreateParserState (false)
 #define DEFAULT_CONFIG_NoDeferParse         (false)
 #define DEFAULT_CONFIG_ForceDynamicProfile  (false)
 #define DEFAULT_CONFIG_ForceExpireOnNonCacheCollect (false)
@@ -504,14 +525,43 @@ PHASE(All)
 #define DEFAULT_CONFIG_MaxJitThreadCount        (2)
 #define DEFAULT_CONFIG_ForceMaxJitThreadCount   (false)
 
+#ifdef ENABLE_SPECTRE_RUNTIME_MITIGATIONS
 #define DEFAULT_CONFIG_MitigateSpectre (true)
+
+#define DEFAULT_CONFIG_AddMaskingBlocks (true)
 
 #define DEFAULT_CONFIG_PoisonVarArrayLoad (true)
 #define DEFAULT_CONFIG_PoisonIntArrayLoad (true)
 #define DEFAULT_CONFIG_PoisonFloatArrayLoad (true)
 #define DEFAULT_CONFIG_PoisonTypedArrayLoad (true)
 #define DEFAULT_CONFIG_PoisonStringLoad (true)
-#define DEFAULT_CONFIG_PoisonObjects (true)
+#define DEFAULT_CONFIG_PoisonObjectsForLoads (true)
+
+#define DEFAULT_CONFIG_PoisonVarArrayStore (true)
+#define DEFAULT_CONFIG_PoisonIntArrayStore (true)
+#define DEFAULT_CONFIG_PoisonFloatArrayStore (true)
+#define DEFAULT_CONFIG_PoisonTypedArrayStore (true)
+#define DEFAULT_CONFIG_PoisonStringStore (true)
+#define DEFAULT_CONFIG_PoisonObjectsForStores (true)
+#else
+#define DEFAULT_CONFIG_MitigateSpectre (false)
+
+#define DEFAULT_CONFIG_AddMaskingBlocks (false)
+
+#define DEFAULT_CONFIG_PoisonVarArrayLoad (false)
+#define DEFAULT_CONFIG_PoisonIntArrayLoad (false)
+#define DEFAULT_CONFIG_PoisonFloatArrayLoad (false)
+#define DEFAULT_CONFIG_PoisonTypedArrayLoad (false)
+#define DEFAULT_CONFIG_PoisonStringLoad (false)
+#define DEFAULT_CONFIG_PoisonObjectsForLoads (false)
+
+#define DEFAULT_CONFIG_PoisonVarArrayStore (false)
+#define DEFAULT_CONFIG_PoisonIntArrayStore (false)
+#define DEFAULT_CONFIG_PoisonFloatArrayStore (false)
+#define DEFAULT_CONFIG_PoisonTypedArrayStore (false)
+#define DEFAULT_CONFIG_PoisonStringStore (false)
+#define DEFAULT_CONFIG_PoisonObjectsForStores (false)
+#endif
 
 #ifdef RECYCLER_PAGE_HEAP
 #define DEFAULT_CONFIG_PageHeap             ((Js::Number) PageHeapMode::PageHeapModeOff)
@@ -523,6 +573,7 @@ PHASE(All)
 #define DEFAULT_CONFIG_LowMemoryCap         (0xB900000) // 185 MB - based on memory cap for process on low-capacity device
 #define DEFAULT_CONFIG_NewPagesCapDuringBGSweeping    (15000 * 4)
 #define DEFAULT_CONFIG_MaxSingleAllocSizeInMB  (2048)
+#define DEFAULT_CONFIG_AllocationPolicyLimit    (-1)
 
 #define DEFAULT_CONFIG_MaxCodeFill          (500)
 #define DEFAULT_CONFIG_MaxLoopsPerFunction  (10)
@@ -537,6 +588,8 @@ PHASE(All)
 #define DEFAULT_CONFIG_RegexTracing         (false)
 #define DEFAULT_CONFIG_RegexProfile         (false)
 #define DEFAULT_CONFIG_RegexDebug           (false)
+#define DEFAULT_CONFIG_RegexDebugAST        (true)
+#define DEFAULT_CONFIG_RegexDebugAnnotatedAST (true)
 #define DEFAULT_CONFIG_RegexBytecodeDebug   (false)
 #define DEFAULT_CONFIG_RegexOptimize        (true)
 #define DEFAULT_CONFIG_DynamicRegexMruListSize (16)
@@ -564,6 +617,7 @@ PHASE(All)
 #endif
 #define DEFAULT_CONFIG_JitRepro                (false)
 #define DEFAULT_CONFIG_LdChakraLib             (false)
+#define DEFAULT_CONFIG_TestChakraLib           (false)
 #define DEFAULT_CONFIG_EntryPointInfoRpcData   (false)
 
 // ES6 DEFAULT BEHAVIOR
@@ -605,12 +659,17 @@ PHASE(All)
 #define DEFAULT_CONFIG_ES6Spread               (true)
 #define DEFAULT_CONFIG_ES6String               (true)
 #define DEFAULT_CONFIG_ES6StringPrototypeFixes (true)
+#define DEFAULT_CONFIG_ES2018ObjectRestSpread  (false)
+
+#ifndef DEFAULT_CONFIG_ES6PrototypeChain
 #ifdef COMPILE_DISABLE_ES6PrototypeChain
     // If ES6PrototypeChain needs to be disabled by compile flag, DEFAULT_CONFIG_ES6PrototypeChain should be false
     #define DEFAULT_CONFIG_ES6PrototypeChain       (false)
 #else
-    #define DEFAULT_CONFIG_ES6PrototypeChain       (false)
+    #define DEFAULT_CONFIG_ES6PrototypeChain       (true)
 #endif
+#endif
+
 #define DEFAULT_CONFIG_ES6ToPrimitive          (true)
 #define DEFAULT_CONFIG_ES6ToLength             (true)
 #define DEFAULT_CONFIG_ES6ToStringTag          (true)
@@ -618,6 +677,10 @@ PHASE(All)
 #define DEFAULT_CONFIG_ES6UnicodeVerbose       (true)
 #define DEFAULT_CONFIG_ES6Unscopables          (true)
 #define DEFAULT_CONFIG_ES6RegExSticky          (true)
+#define DEFAULT_CONFIG_ES2018RegExDotAll       (true)
+#define DEFAULT_CONFIG_ESBigInt                (false)
+#define DEFAULT_CONFIG_ESSymbolDescription     (true)
+#define DEFAULT_CONFIG_ESGlobalThis            (true)
 #ifdef COMPILE_DISABLE_ES6RegExPrototypeProperties
     // If ES6RegExPrototypeProperties needs to be disabled by compile flag, DEFAULT_CONFIG_ES6RegExPrototypeProperties should be false
     #define DEFAULT_CONFIG_ES6RegExPrototypeProperties (false)
@@ -637,6 +700,7 @@ PHASE(All)
 #define DEFAULT_CONFIG_ES7ValuesEntries        (true)
 #define DEFAULT_CONFIG_ESObjectGetOwnPropertyDescriptors (true)
 #define DEFAULT_CONFIG_ESDynamicImport         (false)
+#define DEFAULT_CONFIG_ESExportNsAs            (true)
 
 #define DEFAULT_CONFIG_ESSharedArrayBuffer     (false)
 
@@ -648,7 +712,6 @@ PHASE(All)
 #define DEFAULT_CONFIG_TraceAsyncDebugCalls     (false)
 #define DEFAULT_CONFIG_ForcePostLowerGlobOptInstrString (false)
 #define DEFAULT_CONFIG_EnumerateSpecialPropertiesInDebugger (true)
-#define DEFAULT_CONFIG_ESDynamicImport         (false)
 
 #define DEFAULT_CONFIG_MaxJITFunctionBytecodeByteLength (4800000)
 #define DEFAULT_CONFIG_MaxJITFunctionBytecodeCount (120000)
@@ -700,6 +763,9 @@ PHASE(All)
 #define DEFAULT_CONFIG_MinBailOutsBeforeRejitForLoops 2         // Minimum number of bailouts for a single bailout record after which a rejit is considered
 #define DEFAULT_CONFIG_RejitMaxBailOutCount 500         // Maximum number of bailouts for a single bailout record after which rejit is forced.
 
+#if DBG
+#define DEFAULT_CONFIG_ValidateIntRanges (false)
+#endif
 
 #define DEFAULT_CONFIG_Sse                  (-1)
 
@@ -720,7 +786,7 @@ PHASE(All)
 #define DEFAULT_CONFIG_DisableDebugObject (false)
 #define DEFAULT_CONFIG_DumpHeap (false)
 #define DEFAULT_CONFIG_PerfHintLevel (1)
-#define DEFAULT_CONFIG_OOPJITMissingOpts (true)
+#define DEFAULT_CONFIG_OOPJITMissingOpts (false)
 #define DEFAULT_CONFIG_OOPCFGRegistration (true)
 #define DEFAULT_CONFIG_CrashOnOOPJITFailure (false)
 #define DEFAULT_CONFIG_ForceJITCFGCheck (false)
@@ -739,7 +805,7 @@ PHASE(All)
 #define DEFAULT_CONFIG_LibraryStackFrameDebugger    (false)
 
 #define DEFAULT_CONFIG_FuncObjectInlineCacheThreshold   (2) // Maximum number of inline caches a function body may have to allow for inline caches to be allocated on the function object.
-#define DEFAULT_CONFIG_ShareInlineCaches (true)
+#define DEFAULT_CONFIG_ShareInlineCaches (false)
 #define DEFAULT_CONFIG_InlineCacheInvalidationListCompactionThreshold (4)
 #define DEFAULT_CONFIG_ConstructorCacheInvalidationThreshold (500)
 
@@ -923,6 +989,8 @@ FLAGNR(Boolean, WasmIgnoreResponse    , "Ignore the type of the Response object"
 FLAGNR(Number,  WasmMaxTableSize      , "Maximum size allowed to the WebAssembly.Table", DEFAULT_CONFIG_WasmMaxTableSize)
 FLAGNR(Boolean, WasmThreads           , "Enable WebAssembly threads feature", DEFAULT_CONFIG_WasmThreads)
 FLAGNR(Boolean, WasmMultiValue        , "Use new WebAssembly multi-value", DEFAULT_CONFIG_WasmMultiValue)
+FLAGNR(Boolean, WasmSignExtends       , "Use new WebAssembly sign extension operators", DEFAULT_CONFIG_WasmSignExtends)
+FLAGNR(Boolean, WasmNontrapping, "Enable non-trapping float-to-int conversions in WebAssembly", DEFAULT_CONFIG_WasmNontrapping)
 
 // WebAssembly Experimental Features
 // Master WasmExperimental flag to activate WebAssembly experimental features
@@ -932,9 +1000,7 @@ FLAGR(Boolean, WasmExperimental, "Enable WebAssembly experimental features", DEF
 // Turning on the parent causes the child flag to take on their default value (aka on)
 // In Edge, we manually turn on the individual child flags
 // Not having the DEFAULT_CONFIG_XXXX macro ensures we use CONFIG_FLAG_RELEASE instead of CONFIG_FLAG
-FLAGPR_EXPERIMENTAL_WASM(Boolean, WasmSignExtends , "Use new WebAssembly sign extension operators")
 FLAGPR_EXPERIMENTAL_WASM(Boolean, WasmSimd        , "Enable SIMD in WebAssembly")
-FLAGPR_EXPERIMENTAL_WASM(Boolean, WasmNontrapping, "Enable non-trapping float-to-int conversions in WebAssembly")
 
 FLAGNR(Boolean, AssertBreak           , "Debug break on assert", false)
 FLAGNR(Boolean, AssertPopUp           , "Pop up asserts (default: false)", false)
@@ -954,7 +1020,7 @@ FLAGR (NumberSet, BailOutByteCode     , "Byte code location to insert BailOut. U
 #endif
 FLAGNR(Boolean, Benchmark             , "Disable security code which introduce variability in benchmarks", false)
 FLAGR (Boolean, BgJit                 , "Background JIT. Disable to force heuristic-based foreground JITting. (default: true)", true)
-FLAGR (Boolean, BgParse               , "Background Parse. Disable to force all parsing to occur on UI thread. (default: false)", false)
+FLAGR (Boolean, BgParse               , "Background Parse. Disable to force all parsing to occur on UI thread. (default: true)", DEFAULT_CONFIG_BgParse)
 FLAGNR(Number,  BgJitDelay            , "Delay to wait for speculative jitting before starting script execution", DEFAULT_CONFIG_BgJitDelay)
 FLAGNR(Number,  BgJitDelayFgBuffer    , "When speculatively jitting in the foreground thread, do so for (BgJitDelay - BgJitDelayBuffer) milliseconds", DEFAULT_CONFIG_BgJitDelayFgBuffer)
 FLAGNR(Number,  BgJitPendingFuncCap   , "Disable delay if pending function count larger then cap", DEFAULT_CONFIG_BgJitPendingFuncCap)
@@ -992,6 +1058,8 @@ FLAGNR(NumberTrioSet,  StatementDebugBreak, "Index of the statement where you wa
 FLAGNR(Phases,  DebugBreakOnPhaseBegin, "Break into debugger at the beginning of given phase for listed function", )
 
 FLAGNR(Boolean, DebugWindow           , "Send console output to debugger window", false)
+FLAGNR(Boolean, ParserStateCache      , "Enable creation of parser state cache", DEFAULT_CONFIG_ParserStateCache)
+FLAGNR(Boolean, CompressParserStateCache, "Enable compression of the parser state cache", DEFAULT_CONFIG_CompressParserStateCache)
 FLAGNR(Boolean, DeferTopLevelTillFirstCall      , "Enable tracking of deferred top level functions in a script file, until the first function of the script context is parsed.", DEFAULT_CONFIG_DeferTopLevelTillFirstCall)
 FLAGNR(Number,  DeferParse            , "Minimum size of defer-parsed script (non-zero only: use /nodeferparse do disable", 0)
 FLAGNR(Boolean, DirectCallTelemetryStats, "Enables logging stats for direct call telemetry", DEFAULT_CONFIG_DirectCallTelemetryStats)
@@ -1046,6 +1114,8 @@ FLAGNR(Boolean, JitRepro              , "Add Function.invokeJit to execute codeg
 FLAGNR(Boolean, EntryPointInfoRpcData , "Keep encoded rpc buffer for jitted function on EntryPointInfo until cleanup", DEFAULT_CONFIG_EntryPointInfoRpcData)
 
 FLAGNR(Boolean, LdChakraLib           , "Access to the Chakra internal library with the __chakraLibrary keyword", DEFAULT_CONFIG_LdChakraLib)
+FLAGNR(Boolean, TestChakraLib         , "Access to the Chakra internal library with the __chakraLibrary keyword without global access restriction", DEFAULT_CONFIG_TestChakraLib)
+
 // ES6 (BLUE+1) features/flags
 
 // Master ES6 flag to enable STABLE ES6 features/flags
@@ -1082,7 +1152,7 @@ FLAGPR           (Boolean, ES6, ES6IsConcatSpreadable  , "Enable ES6 isConcatSpr
 FLAGPR           (Boolean, ES6, ES6Math                , "Enable ES6 Math extensions"                               , DEFAULT_CONFIG_ES6Math)
 
 #ifndef COMPILE_DISABLE_ESDynamicImport
-    #define COMPILE_DISABLE_ESDynamicImport 0
+#define COMPILE_DISABLE_ESDynamicImport 0
 #endif
 FLAGPR_REGOVR_EXP(Boolean, ES6, ESDynamicImport        , "Enable dynamic import"                                    , DEFAULT_CONFIG_ESDynamicImport)
 
@@ -1096,11 +1166,9 @@ FLAGPR           (Boolean, ES6, ES6Rest                , "Enable ES6 Rest parame
 FLAGPR           (Boolean, ES6, ES6Spread              , "Enable ES6 Spread support"                                , DEFAULT_CONFIG_ES6Spread)
 FLAGPR           (Boolean, ES6, ES6String              , "Enable ES6 String extensions"                             , DEFAULT_CONFIG_ES6String)
 FLAGPR           (Boolean, ES6, ES6StringPrototypeFixes, "Enable ES6 String.prototype fixes"                        , DEFAULT_CONFIG_ES6StringPrototypeFixes)
+FLAGPR           (Boolean, ES6, ES2018ObjectRestSpread , "Enable ES2018 Object Rest/Spread"                         , DEFAULT_CONFIG_ES2018ObjectRestSpread)
 
-#ifndef COMPILE_DISABLE_ES6PrototypeChain
-    #define COMPILE_DISABLE_ES6PrototypeChain 0
-#endif
-FLAGPR_REGOVR_EXP(Boolean, ES6, ES6PrototypeChain      , "Enable ES6 prototypes (Example: Date prototype is object)", DEFAULT_CONFIG_ES6PrototypeChain)
+FLAGPR           (Boolean, ES6, ES6PrototypeChain      , "Enable ES6 prototypes (Example: Date prototype is object)", DEFAULT_CONFIG_ES6PrototypeChain)
 FLAGPR           (Boolean, ES6, ES6ToPrimitive         , "Enable ES6 ToPrimitive symbol"                            , DEFAULT_CONFIG_ES6ToPrimitive)
 FLAGPR           (Boolean, ES6, ES6ToLength            , "Enable ES6 ToLength fixes"                                , DEFAULT_CONFIG_ES6ToLength)
 FLAGPR           (Boolean, ES6, ES6ToStringTag         , "Enable ES6 ToStringTag symbol"                            , DEFAULT_CONFIG_ES6ToStringTag)
@@ -1108,6 +1176,8 @@ FLAGPR           (Boolean, ES6, ES6Unicode             , "Enable ES6 Unicode 6.0
 FLAGPR           (Boolean, ES6, ES6UnicodeVerbose      , "Enable ES6 Unicode 6.0 verbose failure output"            , DEFAULT_CONFIG_ES6UnicodeVerbose)
 FLAGPR           (Boolean, ES6, ES6Unscopables         , "Enable ES6 With Statement Unscopables"                    , DEFAULT_CONFIG_ES6Unscopables)
 FLAGPR           (Boolean, ES6, ES6RegExSticky         , "Enable ES6 RegEx sticky flag"                             , DEFAULT_CONFIG_ES6RegExSticky)
+FLAGPR           (Boolean, ES6, ES2018RegExDotAll      , "Enable ES2018 RegEx dotAll flag"                          , DEFAULT_CONFIG_ES2018RegExDotAll)
+FLAGPR           (Boolean, ES6, ESExportNsAs           , "Enable ES experimental export * as name"                  , DEFAULT_CONFIG_ESExportNsAs)
 
 #ifndef COMPILE_DISABLE_ES6RegExPrototypeProperties
     #define COMPILE_DISABLE_ES6RegExPrototypeProperties 0
@@ -1120,6 +1190,7 @@ FLAGPR_REGOVR_EXP(Boolean, ES6, ES6RegExPrototypeProperties, "Enable ES6 propert
 
 // When we enable ES6RegExSymbols check all String and Regex built-ins which are inlined in JIT and make sure the helper
 // sets implicit call flag before calling into script
+// Also, the corresponding helpers in JnHelperMethodList.h should be marked as being reentrant
 FLAGPR_REGOVR_EXP(Boolean, ES6, ES6RegExSymbols        , "Enable ES6 RegExp symbols"                                , DEFAULT_CONFIG_ES6RegExSymbols)
 
 FLAGPR           (Boolean, ES6, ES6HasInstance         , "Enable ES6 @@hasInstance symbol"                          , DEFAULT_CONFIG_ES6HasInstance)
@@ -1129,6 +1200,7 @@ FLAGPR           (Boolean, ES6, ESObjectGetOwnPropertyDescriptors, "Enable Objec
 #ifndef COMPILE_DISABLE_ESSharedArrayBuffer
     #define COMPILE_DISABLE_ESSharedArrayBuffer 0
 #endif
+
 FLAGPR_REGOVR_EXP(Boolean, ES6, ESSharedArrayBuffer    , "Enable SharedArrayBuffer"                                 , DEFAULT_CONFIG_ESSharedArrayBuffer)
 
 // /ES6 (BLUE+1) features/flags
@@ -1139,6 +1211,15 @@ FLAGPR_REGOVR_EXP(Boolean, ES6, ESSharedArrayBuffer    , "Enable SharedArrayBuff
 FLAGNR(Boolean, WinRTDelegateInterfaces , "Treat WinRT Delegates as Interfaces when determining their resolvability.", DEFAULT_CONFIG_WinRTDelegateInterfaces)
 FLAGR(Boolean, WinRTAdaptiveApps        , "Enable the adaptive apps feature, allowing for variable projection."      , DEFAULT_CONFIG_WinRTAdaptiveApps)
 #endif
+
+// ES BigInt flag
+FLAGR(Boolean, ESBigInt, "Enable ESBigInt flag", DEFAULT_CONFIG_ESBigInt)
+
+// ES Symbol.prototype.description flag
+FLAGR(Boolean, ESSymbolDescription, "Enable Symbol.prototype.description", DEFAULT_CONFIG_ESSymbolDescription)
+
+//ES globalThis flag
+FLAGR(Boolean, ESGlobalThis, "Enable globalThis", DEFAULT_CONFIG_ESGlobalThis)
 
 // This flag to be removed once JITing generator functions is stable
 FLAGNR(Boolean, JitES6Generators        , "Enable JITing of ES6 generators", false)
@@ -1158,7 +1239,6 @@ FLAGNR(Boolean, ForceCleanCacheOnCollect, "Force cleaning of dynamic caches on c
 FLAGNR(Boolean, ForceGCAfterJSONParse, "Force GC to happen after JSON parsing", DEFAULT_CONFIG_ForceGCAfterJSONParse)
 FLAGNR(Boolean, ForceDecommitOnCollect, "Force decommit collect", DEFAULT_CONFIG_ForceDecommitOnCollect)
 FLAGNR(Boolean, ForceDeferParse       , "Defer parsing of all function bodies", DEFAULT_CONFIG_ForceDeferParse)
-FLAGNR(Boolean, ForceCreateParserState , "Force creation of parser state", DEFAULT_CONFIG_ForceCreateParserState)
 FLAGNR(Boolean, ForceDiagnosticsMode  , "Enable diagnostics mode and debug interpreter loop", false)
 FLAGNR(Boolean, ForceGetWriteWatchOOM , "Force GetWriteWatch to go into OOM codepath in HeapBlockMap rescan", false)
 FLAGNR(Boolean, ForcePostLowerGlobOptInstrString, "Force tracking of globopt instr string post lower", DEFAULT_CONFIG_ForcePostLowerGlobOptInstrString)
@@ -1253,10 +1333,12 @@ FLAGNR(Phases,  Memspect,              "Enables memspect tracking to perform mem
 FLAGNR(Number,  PolymorphicInlineThreshold     , "Maximum size in bytecodes of a polymorphic inline candidate", DEFAULT_CONFIG_PolymorphicInlineThreshold)
 FLAGNR(Boolean, PrimeRecycler         , "Prime the recycler first", DEFAULT_CONFIG_PrimeRecycler)
 FLAGNR(Boolean, PrivateHeap           , "Use HeapAlloc with a private heap", DEFAULT_CONFIG_PrivateHeap)
+FLAGNR(Boolean, TraceEngineRefcount   , "Output traces for ScriptEngine AddRef/Release to debug lifetime management", false)
 #if defined(CHECK_MEMORY_LEAK) || defined(LEAK_REPORT)
 FLAGNR(Boolean, LeakStackTrace ,        "Include stack trace on leaked pinned object and heap objects", false)
 FLAGNR(Boolean, ForceMemoryLeak ,       "Fake leak some memory to test leak report and check memory leak", false)
 #endif
+FLAGNR(Boolean, DumpAfterFinalGC, "Collect a process dump after calling finalgc", false)
 FLAGNR(Boolean, ForceOldDateAPI       , "Force Chakra to use old dates API regardless of availability of a new one", DEFAULT_CONFIG_ForceOldDateAPI)
 
 FLAGNR(Number,  JitLoopBodyHotLoopThreshold    , "Number of times loop has to be iterated in jitloopbody before it is determined as hot", DEFAULT_CONFIG_JitLoopBodyHotLoopThreshold)
@@ -1267,12 +1349,21 @@ FLAGNR(Boolean, ForceMaxJitThreadCount, "Force the number of parallel jit thread
 
 FLAGR(Boolean, MitigateSpectre, "Use mitigations for Spectre", DEFAULT_CONFIG_MitigateSpectre)
 
+FLAGPR(Boolean, MitigateSpectre, AddMaskingBlocks, "Optimize Spectre mitigations by masking on loop out edges", DEFAULT_CONFIG_AddMaskingBlocks)
+
 FLAGPR(Boolean, MitigateSpectre, PoisonVarArrayLoad, "Poison loads from Var arrays", DEFAULT_CONFIG_PoisonVarArrayLoad)
 FLAGPR(Boolean, MitigateSpectre, PoisonIntArrayLoad, "Poison loads from Int arrays", DEFAULT_CONFIG_PoisonIntArrayLoad)
 FLAGPR(Boolean, MitigateSpectre, PoisonFloatArrayLoad, "Poison loads from Float arrays", DEFAULT_CONFIG_PoisonFloatArrayLoad)
 FLAGPR(Boolean, MitigateSpectre, PoisonTypedArrayLoad, "Poison loads from TypedArrays", DEFAULT_CONFIG_PoisonTypedArrayLoad)
 FLAGPR(Boolean, MitigateSpectre, PoisonStringLoad, "Poison indexed loads from strings", DEFAULT_CONFIG_PoisonStringLoad)
-FLAGPR(Boolean, MitigateSpectre, PoisonObjects, "Poison objects after type checks", DEFAULT_CONFIG_PoisonObjects)
+FLAGPR(Boolean, MitigateSpectre, PoisonObjectsForLoads, "Poison objects after type checks for loads", DEFAULT_CONFIG_PoisonObjectsForLoads)
+
+FLAGPR(Boolean, MitigateSpectre, PoisonVarArrayStore, "Poison stores to Var arrays", DEFAULT_CONFIG_PoisonVarArrayStore)
+FLAGPR(Boolean, MitigateSpectre, PoisonIntArrayStore, "Poison stores to Int arrays", DEFAULT_CONFIG_PoisonIntArrayStore)
+FLAGPR(Boolean, MitigateSpectre, PoisonFloatArrayStore, "Poison stores to Float arrays", DEFAULT_CONFIG_PoisonFloatArrayStore)
+FLAGPR(Boolean, MitigateSpectre, PoisonTypedArrayStore, "Poison stores to TypedArrays", DEFAULT_CONFIG_PoisonTypedArrayStore)
+FLAGPR(Boolean, MitigateSpectre, PoisonStringStore, "Poison indexed stores to strings", DEFAULT_CONFIG_PoisonStringStore)
+FLAGPR(Boolean, MitigateSpectre, PoisonObjectsForStores, "Poison objects after type checks for stores", DEFAULT_CONFIG_PoisonObjectsForStores)
 
 FLAGNR(Number,  MinInterpretCount     , "Minimum number of times a function must be interpreted", 0)
 FLAGNR(Number,  MinSimpleJitRunCount  , "Minimum number of times a function must be run in simple jit", 0)
@@ -1381,6 +1472,9 @@ FLAGNR(Boolean, ProfileEvalMap        , "Profile eval map statistics", false)
 FLAGNR(Boolean, ProfileBailOutRecordMemory, "Profile bailout record memory statistics", false)
 #endif
 
+#if DBG
+FLAGNR(Boolean, ValidateIntRanges, "Validate at runtime int ranges/bounds determined by the globopt", DEFAULT_CONFIG_ValidateIntRanges)
+#endif
 FLAGNR(Number,  RejitMaxBailOutCount, "Maximum number of bailouts for a bailout record after which rejit is forced", DEFAULT_CONFIG_RejitMaxBailOutCount)
 FLAGNR(Number,  CallsToBailoutsRatioForRejit, "Ratio of function calls to bailouts above which a rejit is considered", DEFAULT_CONFIG_CallsToBailoutsRatioForRejit)
 FLAGNR(Number,  LoopIterationsToBailoutsRatioForRejit, "Ratio of loop iteration count to bailouts above which a rejit of the loop body is considered", DEFAULT_CONFIG_LoopIterationsToBailoutsRatioForRejit)
@@ -1429,6 +1523,7 @@ FLAGNR(Boolean, RecyclerVerifyMark    , "verify concurrent gc", false)
 #endif
 FLAGR (Number,  LowMemoryCap          , "Memory cap indicating a low-memory process", DEFAULT_CONFIG_LowMemoryCap)
 FLAGNR(Number,  NewPagesCapDuringBGSweeping, "New pages count allowed to be allocated during background sweeping", DEFAULT_CONFIG_NewPagesCapDuringBGSweeping)
+FLAGR (Number,  AllocPolicyLimit      , "Memory allocation policy limit in MB (default: -1, which means no allocation policy limit).", DEFAULT_CONFIG_AllocationPolicyLimit)
 #ifdef RUNTIME_DATA_COLLECTION
 FLAGNR(String,  RuntimeDataOutputFile, "Filename to write the dynamic profile info", nullptr)
 #endif
@@ -1501,6 +1596,8 @@ FLAGNR(Boolean, ValidateHeapEnum      , "Validate that heap enumeration is repor
 FLAGR (Boolean, RegexTracing          , "Trace all Regex invocations to the output.", DEFAULT_CONFIG_RegexTracing)
 FLAGR (Boolean, RegexProfile          , "Collect usage statistics on all Regex invocations.", DEFAULT_CONFIG_RegexProfile)
 FLAGR (Boolean, RegexDebug            , "Trace compilation of UnifiedRegex expressions.", DEFAULT_CONFIG_RegexDebug)
+FLAGR (Boolean, RegexDebugAST         , "Display Regex AST (requires -RegexDebug to view). [default on]", DEFAULT_CONFIG_RegexDebugAST)
+FLAGR (Boolean, RegexDebugAnnotatedAST, "Display Regex Annotated AST (requires -RegexDebug and -RegexDebugAST to view). [default on]", DEFAULT_CONFIG_RegexDebugAnnotatedAST)
 FLAGR (Boolean, RegexBytecodeDebug    , "Display layout of UnifiedRegex bytecode (requires -RegexDebug to view).", DEFAULT_CONFIG_RegexBytecodeDebug)
 FLAGR (Boolean, RegexOptimize         , "Optimize regular expressions in the unified Regex system (default: true)", DEFAULT_CONFIG_RegexOptimize)
 FLAGR (Number,  DynamicRegexMruListSize, "Size of the MRU list for dynamic regexes", DEFAULT_CONFIG_DynamicRegexMruListSize)
@@ -1508,7 +1605,7 @@ FLAGR (Number,  DynamicRegexMruListSize, "Size of the MRU list for dynamic regex
 
 FLAGR (Boolean, OptimizeForManyInstances, "Optimize script engine for many instances (low memory footprint per engine, assume low spare CPU cycles) (default: false)", DEFAULT_CONFIG_OptimizeForManyInstances)
 FLAGNR(Boolean, EnableArrayTypeMutation, "Enable force array type mutation on re-entrant region", DEFAULT_CONFIG_EnableArrayTypeMutation)
-FLAGNR(Number,  ArrayMutationTestSeed, "Seed used for the array mutation", 0)
+FLAGNR(Number, ArrayMutationTestSeed, "Seed used for the array mutation", 0)
 FLAGNR(Phases,  TestTrace             , "Test trace for the given phase", )
 FLAGNR(Boolean, EnableEvalMapCleanup, "Enable cleaning up the eval map", true)
 #ifdef PROFILE_MEM
@@ -1615,6 +1712,12 @@ FLAGNR(Boolean, EnableBGFreeZero, "Use to turn off background freeing and zeroin
 FLAGNR(Boolean, KeepRecyclerTrackData, "Keep recycler track data after sweep until reuse", DEFAULT_CONFIG_KeepRecyclerTrackData)
 
 FLAGNR(Number, MaxSingleAllocSizeInMB, "Max size(in MB) in single allocation", DEFAULT_CONFIG_MaxSingleAllocSizeInMB)
+
+#ifdef ENABLE_BASIC_TELEMETRY
+FLAGR(String, TelemetryRunType, "Value sent with telemetry events indicating origin class of data.  E.g., if data was triggered from Edge Crawler.", _u(""))
+FLAGR(String, TelemetryDiscriminator1, "Value sent with telemetry events. Used to identify filter telemetry data to specific runs.", _u(""))
+FLAGR(String, TelemetryDiscriminator2, "Value sent with telemetry events. Used to identify filter telemetry data to specific runs.", _u(""))
+#endif
 
 #undef FLAG_REGOVR_EXP
 #undef FLAG_EXPERIMENTAL

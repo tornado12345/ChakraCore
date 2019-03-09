@@ -169,8 +169,8 @@ WASM_MEMSTORE_OPCODE(I64StoreMem8,  0x3c, L_IL, true, Js::ArrayBufferView::TYPE_
 WASM_MEMSTORE_OPCODE(I64StoreMem16, 0x3d, L_IL, true, Js::ArrayBufferView::TYPE_INT16_TO_INT64, "i64.store16")
 WASM_MEMSTORE_OPCODE(I64StoreMem32, 0x3e, L_IL, true, Js::ArrayBufferView::TYPE_INT32_TO_INT64, "i64.store32")
 
-WASM_MISC_OPCODE(CurrentMemory, 0x3f, I_I, true, "current_memory")
-WASM_MISC_OPCODE(GrowMemory,    0x40, I_I, true, "grow_memory")
+WASM_MISC_OPCODE(MemorySize, 0x3f, I_I, true, "memory.size")
+WASM_MISC_OPCODE(MemoryGrow,    0x40, I_I, true, "memory.grow")
 
 // Constants
 WASM_MISC_OPCODE(I32Const,     0x41, Limit, true, "i32.const")
@@ -339,11 +339,12 @@ WASM_UNARY__OPCODE(F32ReinterpretI32, 0xbe, F_I , Reinterpret_ITF, true, "f32.re
 WASM_UNARY__OPCODE(F64ReinterpretI64, 0xbf, D_L , Reinterpret_LTD, true, "f64.reinterpret/i64")
 
 // New sign extend operators
-WASM_UNARY__OPCODE(I32Extend8_s , 0xc0, I_I, I32Extend8_s , CONFIG_FLAG_RELEASE(WasmSignExtends), "i32.extend8_s")
-WASM_UNARY__OPCODE(I32Extend16_s, 0xc1, I_I, I32Extend16_s, CONFIG_FLAG_RELEASE(WasmSignExtends), "i32.extend16_s")
-WASM_UNARY__OPCODE(I64Extend8_s , 0xc2, L_L, I64Extend8_s , CONFIG_FLAG_RELEASE(WasmSignExtends), "i64.extend8_s")
-WASM_UNARY__OPCODE(I64Extend16_s, 0xc3, L_L, I64Extend16_s, CONFIG_FLAG_RELEASE(WasmSignExtends), "i64.extend16_s")
-WASM_UNARY__OPCODE(I64Extend32_s, 0xc4, L_L, I64Extend32_s, CONFIG_FLAG_RELEASE(WasmSignExtends), "i64.extend32_s")
+#define __has_signextends (Wasm::SignExtends::IsEnabled())
+WASM_UNARY__OPCODE(I32Extend8_s , 0xc0, I_I, I32Extend8_s , __has_signextends, "i32.extend8_s")
+WASM_UNARY__OPCODE(I32Extend16_s, 0xc1, I_I, I32Extend16_s, __has_signextends, "i32.extend16_s")
+WASM_UNARY__OPCODE(I64Extend8_s , 0xc2, L_L, I64Extend8_s , __has_signextends, "i64.extend8_s")
+WASM_UNARY__OPCODE(I64Extend16_s, 0xc3, L_L, I64Extend16_s, __has_signextends, "i64.extend16_s")
+WASM_UNARY__OPCODE(I64Extend32_s, 0xc4, L_L, I64Extend32_s, __has_signextends, "i64.extend32_s")
 
 #define __has_atomics (Wasm::Threads::IsEnabled())
 #define __prefix (WASM_PREFIX_THREADS << 8)

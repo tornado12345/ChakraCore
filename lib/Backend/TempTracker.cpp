@@ -79,9 +79,19 @@ TempTrackerBase::~TempTrackerBase()
 void
 TempTrackerBase::MergeData(TempTrackerBase * fromData, bool deleteData)
 {
-    nonTempSyms.Or(&fromData->nonTempSyms);
-    tempTransferredSyms.Or(&fromData->tempTransferredSyms);
-    MergeDependencies(tempTransferDependencies, fromData->tempTransferDependencies, deleteData);
+    this->nonTempSyms.Or(&fromData->nonTempSyms);
+    this->tempTransferredSyms.Or(&fromData->tempTransferredSyms);
+    this->MergeDependencies(this->tempTransferDependencies, fromData->tempTransferDependencies, deleteData);
+    if (this->tempTransferDependencies)
+    {
+        FOREACH_HASHTABLE_ENTRY(BVSparse<JitArenaAllocator> *, bucket, this->tempTransferDependencies)
+        {
+            if (bucket.element->Test(&this->nonTempSyms))
+            {
+                this->nonTempSyms.Set(bucket.value);
+            }
+        } NEXT_HASHTABLE_ENTRY;
+    }
 }
 
 void
@@ -818,7 +828,7 @@ NumberTemp::GetRepresentativePropertySymId(PropertySym * propertySym, BackwardPa
 {
     // Since we don't track alias with objects, all property accesses are all grouped together.
     // Use a single property sym id to represent a propertyId to track dependencies.
-    SymID symId = (SymID)-1;
+    SymID symId = SymID_Invalid;
     Js::PropertyId propertyId = propertySym->m_propertyId;
     if (!backwardPass->numberTempRepresentativePropertySym->TryGetValue(propertyId, &symId))
     {
@@ -1066,7 +1076,15 @@ ObjectTemp::IsTempProducing(IR::Instr * instr)
     Js::OpCode opcode = instr->m_opcode;
     if (OpCodeAttr::TempObjectProducing(opcode))
     {
-        return true;
+        if (instr->m_opcode == Js::OpCode::CallDirect)
+        {
+            IR::HelperCallOpnd* helper = instr->GetSrc1()->AsHelperCallOpnd();
+            return HelperMethodAttributes::TempObjectProducing(helper->m_fnHelper);
+        }
+        else
+        {
+            return true;
+        }
     }
 
     // TODO: Process NewScObject and CallI with isCtorCall when the ctor is fixed

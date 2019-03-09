@@ -119,11 +119,11 @@ public:
         Js::RegSlot returnValueRegSlot = Js::Constants::NoRegister, const bool isInlinedConstructor = false,
         Js::ProfileId callSiteIdInParentFunc = UINT16_MAX, bool isGetterSetter = false);
 public:
-    void * const GetCodeGenAllocators()
+    void * GetCodeGenAllocators()
     {
         return this->GetTopFunc()->m_codeGenAllocators;
     }
-    InProcCodeGenAllocators * const GetInProcCodeGenAllocators()
+    InProcCodeGenAllocators * GetInProcCodeGenAllocators()
     {
         Assert(!JITManager::GetJITManager()->IsJITServer());
         return reinterpret_cast<InProcCodeGenAllocators*>(this->GetTopFunc()->m_codeGenAllocators);
@@ -274,7 +274,7 @@ public:
         return &m_output;
     }
 
-    const JITTimeFunctionBody * const GetJITFunctionBody() const
+    const JITTimeFunctionBody * GetJITFunctionBody() const
     {
         return m_workItem->GetJITFunctionBody();
     }
@@ -364,8 +364,8 @@ static const unsigned __int64 c_debugFillPattern8 = 0xcececececececece;
     }
     void NumberInstrs();
     bool IsTopFunc() const { return this->parentFunc == nullptr; }
-    Func const * GetTopFunc() const;
-    Func * GetTopFunc();
+    Func const * GetTopFunc() const { return this->topFunc; }
+    Func * GetTopFunc() { return this->topFunc; }
 
     void SetFirstArgOffset(IR::Instr* inlineeStart);
 
@@ -449,8 +449,10 @@ static const unsigned __int64 c_debugFillPattern8 = 0xcececececececece;
     void EnsureSingleTypeGuards();
     Js::JitTypePropertyGuard* GetOrCreateSingleTypeGuard(intptr_t typeAddr);
 
-    void  EnsureEquivalentTypeGuards();
+    void EnsureEquivalentTypeGuards();
+    void InitializeEquivalentTypeGuard(Js::JitEquivalentTypeGuard * guard);
     Js::JitEquivalentTypeGuard * CreateEquivalentTypeGuard(JITTypeHolder type, uint32 objTypeSpecFldId);
+    Js::JitPolyEquivalentTypeGuard * CreatePolyEquivalentTypeGuard(uint32 objTypeSpecFldId);
 
     void ThrowIfScriptClosed();
     void EnsurePropertyGuardsByPropertyId();
@@ -513,6 +515,17 @@ static const unsigned __int64 c_debugFillPattern8 = 0xcececececececece;
     {
         Assert(m_inlineeFrameStartSym == nullptr);
         m_inlineeFrameStartSym = sym;
+    }
+
+    void SetInlineeStart(IR::Instr *inlineeStartInstr)
+    {
+        Assert(inlineeStart == nullptr);
+        inlineeStart = inlineeStartInstr;
+    }
+
+    IR::Instr* GetInlineeStart()
+    {
+        return inlineeStart;
     }
 
     IR::SymOpnd *GetInlineeArgCountSlotOpnd()
@@ -652,7 +665,6 @@ public:
     PropertyIdSet lazyBailoutProperties;
     bool anyPropertyMayBeWrittenTo;
 
-    SlotArrayCheckTable *slotArrayCheckTable;
     FrameDisplayCheckTable *frameDisplayCheckTable;
 
     IR::Instr *         m_headInstr;
@@ -712,13 +724,17 @@ public:
     StackSym *          tempSymDouble;
     StackSym *          tempSymBool;
     uint32              loopCount;
+    uint32              unoptimizableArgumentsObjReference;
+    uint32              unoptimizableArgumentsObjReferenceInInlinees;
     Js::ProfileId       callSiteIdInParentFunc;
+    InlineeFrameInfo*   cachedInlineeFrameInfo;
     bool                m_hasCalls: 1; // This is more accurate compared to m_isLeaf
     bool                m_hasInlineArgsOpt : 1;
     bool                m_doFastPaths : 1;
     bool                hasBailout: 1;
     bool                hasBailoutInEHRegion : 1;
     bool                hasStackArgs: 1;
+    bool                hasArgLenAndConstOpt : 1;
     bool                hasImplicitParamLoad : 1; // True if there is a load of CallInfo, FunctionObject
     bool                hasThrow : 1;
     bool                hasUnoptimizedArgumentsAccess : 1; // True if there are any arguments access beyond the simple case of this.apply pattern
@@ -730,6 +746,7 @@ public:
     bool                hasTempObjectProducingInstr:1; // At least one instruction which can produce temp object
     bool                isTJLoopBody : 1;
     bool                isFlowGraphValid : 1;
+    bool                legalizePostRegAlloc : 1;
 #if DBG
     bool                hasCalledSetDoFastPaths:1;
     bool                isPostLower:1;
@@ -737,6 +754,14 @@ public:
     bool                isPostPeeps:1;
     bool                isPostLayout:1;
     bool                isPostFinalLower:1;
+    struct InstrByteCodeRegisterUses
+    {
+        Js::OpCode capturingOpCode;
+        BVSparse<JitArenaAllocator>* bv;
+    };
+    typedef JsUtil::BaseDictionary<uint32, InstrByteCodeRegisterUses, JitArenaAllocator> ByteCodeRegisterUses;
+    ByteCodeRegisterUses* byteCodeRegisterUses = nullptr;
+    BVSparse<JitArenaAllocator>* GetByteCodeOffsetUses(uint offset) const;
 
     typedef JsUtil::Stack<Js::Phase> CurrentPhasesStack;
     CurrentPhasesStack  currentPhases;
@@ -830,9 +855,12 @@ public:
                         {
                             curFunc->m_canDoInlineArgsOpt = false;
                             curFunc->m_hasInlineArgsOpt = false;
+                            curFunc->frameInfo = nullptr;
                             curFunc = curFunc->GetParentFunc();
                         }
     }
+
+    bool                ShouldLegalizePostRegAlloc() const { return topFunc->legalizePostRegAlloc; }
 
     bool                GetApplyTargetInliningRemovedArgumentsAccess() const { return this->applyTargetInliningRemovedArgumentsAccess;}
     void                SetApplyTargetInliningRemovedArgumentsAccess() { this->applyTargetInliningRemovedArgumentsAccess = true;}
@@ -966,7 +994,6 @@ public:
     void MarkConstantAddressSyms(BVSparse<JitArenaAllocator> * bv);
     void DisableConstandAddressLoadHoist() { canHoistConstantAddressLoad = false; }
 
-    void AddSlotArrayCheck(IR::SymOpnd *fieldOpnd);
     void AddFrameDisplayCheck(IR::SymOpnd *fieldOpnd, uint32 slotId = (uint32)-1);
 
     void EnsureStackArgWithFormalsTracker();
@@ -1014,16 +1041,18 @@ public:
 
     StackSym * GetNativeCodeDataSym() const;
     void SetNativeCodeDataSym(StackSym * sym);
-private:
 
+private:
     Js::EntryPointInfo* m_entryPointInfo; // for in-proc JIT only
 
     JITOutput m_output;
 #ifdef PROFILE_EXEC
     Js::ScriptContextProfiler *const m_codeGenProfiler;
 #endif
+    Func * const        topFunc;
     Func * const        parentFunc;
     StackSym *          m_inlineeFrameStartSym;
+    IR::Instr *         inlineeStart;
     uint                maxInlineeArgOutSize;
     const bool          m_isBackgroundJIT;
     bool                hasInstrNumber;
@@ -1070,6 +1099,18 @@ private:
 public:
     Lowerer* m_lowerer;
 #endif
+
+    // Lazy bailout
+private:
+    bool                hasLazyBailOut : 1;
+    StackSym *          m_lazyBailOutRecordSlot;
+
+public:
+    void EnsureLazyBailOutRecordSlot();
+    StackSym *GetLazyBailOutRecordSlot() const;
+    void SetHasLazyBailOut();
+    bool HasLazyBailOut() const;
+    bool ShouldDoLazyBailOut() const;
 };
 
 class AutoCodeGenPhase
@@ -1104,6 +1145,26 @@ private:
     bool dump;
     bool isPhaseComplete;
 };
+
+class AutoRestoreLegalize
+{
+public:
+    AutoRestoreLegalize(Func * func, bool val) : 
+        m_func(func->GetTopFunc()), 
+        m_originalValue(m_func->legalizePostRegAlloc)
+    {
+        m_func->legalizePostRegAlloc = val;
+    }
+
+    ~AutoRestoreLegalize()
+    {
+        m_func->legalizePostRegAlloc = m_originalValue;
+    }
+private:
+    Func * m_func;
+    bool m_originalValue;
+};
+
 #define BEGIN_CODEGEN_PHASE(func, phase) { AutoCodeGenPhase __autoCodeGen(func, phase);
 #define END_CODEGEN_PHASE(func, phase) __autoCodeGen.EndPhase(func, phase, true, true); }
 #define END_CODEGEN_PHASE_NO_DUMP(func, phase) __autoCodeGen.EndPhase(func, phase, false, true); }

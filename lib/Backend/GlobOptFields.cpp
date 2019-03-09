@@ -117,6 +117,11 @@ GlobOpt::DoFieldPRE(Loop *loop) const
         return true;
     }
 
+    if (this->func->HasProfileInfo() && this->func->GetReadOnlyProfileInfo()->IsFieldPREDisabled())
+    {
+        return false;
+    }
+
     return DoFieldOpts(loop);
 }
 
@@ -147,7 +152,7 @@ GlobOpt::KillLiveFields(StackSym * stackSym, BVSparse<JitArenaAllocator> * bv)
 
     // If the sym has no objectSymInfo, it must not represent an object and, hence, has no type sym or
     // property syms to kill.
-    if (!stackSym->HasObjectInfo())
+    if (!stackSym->HasObjectInfo() || stackSym->IsSingleDef())
     {
         return;
     }
@@ -206,7 +211,6 @@ void
 GlobOpt::KillLiveElems(IR::IndirOpnd * indirOpnd, BVSparse<JitArenaAllocator> * bv, bool inGlobOpt, Func *func)
 {
     IR::RegOpnd *indexOpnd = indirOpnd->GetIndexOpnd();
-
     // obj.x = 10;
     // obj["x"] = ...;   // This needs to kill obj.x...  We need to kill all fields...
     //
@@ -220,17 +224,15 @@ GlobOpt::KillLiveElems(IR::IndirOpnd * indirOpnd, BVSparse<JitArenaAllocator> * 
     // - We check the type specialization status for the sym as well. For the purpose of doing kills, we can assume that
     //   if type specialization happened, that fields don't need to be killed. Note that they may be killed in the next
     //   pass based on the value.
-    if (func->GetThisOrParentInlinerHasArguments() ||
-        (
-            indexOpnd &&
-            (
-                indexOpnd->m_sym->m_isNotNumber ||
-                (inGlobOpt && !indexOpnd->GetValueType().IsNumber() && !currentBlock->globOptData.IsTypeSpecialized(indexOpnd->m_sym))
-            )
-        ))
+    if (func->GetThisOrParentInlinerHasArguments() || this->IsNonNumericRegOpnd(indexOpnd, inGlobOpt))
     {
         this->KillAllFields(bv); // This also kills all property type values, as the same bit-vector tracks those stack syms
         SetAnyPropertyMayBeWrittenTo();
+    }
+    else if (inGlobOpt && indexOpnd && !indexOpnd->GetValueType().IsInt() && !currentBlock->globOptData.IsInt32TypeSpecialized(indexOpnd->m_sym))
+    {
+        // Write/delete to a non-integer numeric index can't alias a name on the RHS of a dot, but it change object layout
+        this->KillAllObjectTypes(bv);
     }
 }
 
@@ -323,10 +325,20 @@ GlobOpt::ProcessFieldKills(IR::Instr *instr, BVSparse<JitArenaAllocator> *bv, bo
         Assert(dstOpnd != nullptr);
         KillLiveFields(this->lengthEquivBv, bv);
         KillLiveElems(dstOpnd->AsIndirOpnd(), bv, inGlobOpt, instr->m_func);
+        if (inGlobOpt)
+        {
+            KillObjectHeaderInlinedTypeSyms(this->currentBlock, false);
+        }
         break;
 
     case Js::OpCode::InitComputedProperty:
+    case Js::OpCode::InitGetElemI:
+    case Js::OpCode::InitSetElemI:
         KillLiveElems(dstOpnd->AsIndirOpnd(), bv, inGlobOpt, instr->m_func);
+        if (inGlobOpt)
+        {
+            KillObjectHeaderInlinedTypeSyms(this->currentBlock, false);
+        }
         break;
 
     case Js::OpCode::DeleteElemI_A:
@@ -389,13 +401,18 @@ GlobOpt::ProcessFieldKills(IR::Instr *instr, BVSparse<JitArenaAllocator> *bv, bo
     case Js::OpCode::InlineArrayPush:
     case Js::OpCode::InlineArrayPop:
         KillLiveFields(this->lengthEquivBv, bv);
+        if (inGlobOpt)
+        {
+            // Deleting an item, or pushing a property to a non-array, may change object layout
+            KillAllObjectTypes(bv);
+        }
         break;
 
     case Js::OpCode::InlineeStart:
     case Js::OpCode::InlineeEnd:
         Assert(!instr->UsesAllFields());
 
-        // Kill all live 'arguments' and 'caller' fields, as 'inlineeFunction.arguments' and 'inlineeFunction.caller' 
+        // Kill all live 'arguments' and 'caller' fields, as 'inlineeFunction.arguments' and 'inlineeFunction.caller'
         // cannot be copy-propped across different instances of the same inlined function.
         KillLiveFields(argumentsEquivBv, bv);
         KillLiveFields(callerEquivBv, bv);
@@ -404,19 +421,32 @@ GlobOpt::ProcessFieldKills(IR::Instr *instr, BVSparse<JitArenaAllocator> *bv, bo
     case Js::OpCode::CallDirect:
         fnHelper = instr->GetSrc1()->AsHelperCallOpnd()->m_fnHelper;
 
-        // Kill length field for built-ins that can update it.
-        if(nullptr != this->lengthEquivBv && (fnHelper == IR::JnHelperMethod::HelperArray_Shift || fnHelper == IR::JnHelperMethod::HelperArray_Splice
-            || fnHelper == IR::JnHelperMethod::HelperArray_Unshift))
+        switch (fnHelper)
         {
-            KillLiveFields(this->lengthEquivBv, bv);
-        }
+            case IR::JnHelperMethod::HelperArray_Shift:
+            case IR::JnHelperMethod::HelperArray_Splice:
+            case IR::JnHelperMethod::HelperArray_Unshift:
+                // Kill length field for built-ins that can update it.
+                if (nullptr != this->lengthEquivBv)
+                {
+                    KillLiveFields(this->lengthEquivBv, bv);
+                }
+                // fall through
 
-        if ((fnHelper == IR::JnHelperMethod::HelperRegExp_Exec)
-           || (fnHelper == IR::JnHelperMethod::HelperString_Match)
-           || (fnHelper == IR::JnHelperMethod::HelperString_Replace))
-        {
-            // Consider: We may not need to kill all fields here.
-            this->KillAllFields(bv);
+            case IR::JnHelperMethod::HelperArray_Reverse:
+                // Deleting an item may change object layout
+                if (inGlobOpt)
+                {
+                    KillAllObjectTypes(bv);
+                }
+                break;
+
+            case IR::JnHelperMethod::HelperRegExp_Exec:
+            case IR::JnHelperMethod::HelperString_Match:
+            case IR::JnHelperMethod::HelperString_Replace:
+                // Consider: We may not need to kill all fields here.
+                this->KillAllFields(bv);
+                break;
         }
         break;
 
@@ -426,6 +456,15 @@ GlobOpt::ProcessFieldKills(IR::Instr *instr, BVSparse<JitArenaAllocator> *bv, bo
     case Js::OpCode::LdLetHeapArgsCached:
         if (inGlobOpt) {
             this->KillLiveFields(this->slotSyms, bv);
+        }
+        break;
+
+    case Js::OpCode::InitClass:
+    case Js::OpCode::InitProto:
+    case Js::OpCode::NewScObjectNoCtor:
+        if (inGlobOpt)
+        {
+            KillObjectHeaderInlinedTypeSyms(this->currentBlock, false);
         }
         break;
 
@@ -488,7 +527,7 @@ GlobOpt::CreateFieldSrcValue(PropertySym * sym, PropertySym * originalSym, IR::O
     }
 
     Assert((*ppOpnd)->AsSymOpnd()->m_sym == sym || this->IsLoopPrePass());
-    
+
     // We don't use the sym store to do copy prop on hoisted fields, but create a value
     // in case it can be copy prop out of the loop.
     return this->NewGenericValue(ValueType::Uninitialized, *ppOpnd);
@@ -561,8 +600,6 @@ GlobOpt::AssertCanCopyPropOrCSEFieldLoad(IR::Instr * instr)
     // Consider: Hoisting LdRootFld may have complication with exception if the field doesn't exist.
     // We need to have another opcode for the hoisted version to avoid the exception and bailout.
 
-    // Consider: Theoretically, we can copy prop/field hoist ScopedLdFld/ScopedStFld
-    // but Instr::TransferSrcValue blocks that now, and copy prop into that instruction is not supported yet.
     Assert(instr->m_opcode == Js::OpCode::LdSlot || instr->m_opcode == Js::OpCode::LdSlotArr
         || instr->m_opcode == Js::OpCode::LdFld || instr->m_opcode == Js::OpCode::LdFldForCallApplyTarget
         || instr->m_opcode == Js::OpCode::LdLen_A
@@ -573,7 +610,9 @@ GlobOpt::AssertCanCopyPropOrCSEFieldLoad(IR::Instr * instr)
         || instr->m_opcode == Js::OpCode::LdMethodFromFlags
         || instr->m_opcode == Js::OpCode::ScopedLdMethodFld
         || instr->m_opcode == Js::OpCode::CheckFixedFld
-        || instr->m_opcode == Js::OpCode::CheckPropertyGuardAndLoadType);
+        || instr->m_opcode == Js::OpCode::CheckPropertyGuardAndLoadType
+        || instr->m_opcode == Js::OpCode::ScopedLdFld
+        || instr->m_opcode == Js::OpCode::ScopedLdFldForTypeOf);
 
     Assert(instr->m_opcode == Js::OpCode::CheckFixedFld || instr->GetDst()->GetType() == TyVar || instr->m_func->GetJITFunctionBody()->IsAsmJsMode());
     Assert(instr->GetSrc1()->GetType() == TyVar || instr->m_func->GetJITFunctionBody()->IsAsmJsMode());
@@ -782,18 +821,67 @@ GlobOpt::FinishOptPropOp(IR::Instr *instr, IR::PropertySymOpnd *opnd, BasicBlock
         if (!isObjTypeSpecialized || opnd->ChangesObjectLayout())
         {
             this->KillObjectHeaderInlinedTypeSyms(block, isObjTypeSpecialized, opndId);
+            this->KillAuxSlotPtrSyms(opnd, block, isObjTypeSpecialized);
+        }
+        else if (!isObjTypeChecked && this->HasLiveObjectHeaderInlinedTypeSym(block, true, opndId))
+        {
+            opnd->SetTypeCheckRequired(true);
         }
     }
 
     return isObjTypeSpecialized;
 }
 
+StackSym *
+GlobOpt::EnsureAuxSlotPtrSym(IR::PropertySymOpnd *opnd)
+{
+    StackSym *auxSlotPtrSym = opnd->EnsureAuxSlotPtrSym(this->func);
+    this->auxSlotPtrSyms->Set(auxSlotPtrSym->m_id);
+    return auxSlotPtrSym;
+}
+
+void
+GlobOpt::KillAuxSlotPtrSyms(IR::PropertySymOpnd *opnd, BasicBlock *block, bool isObjTypeSpecialized)
+{
+    StackSym *auxSlotPtrSym = nullptr;
+    if (isObjTypeSpecialized)
+    {
+        // Kill all aux slot syms other than this one
+        auxSlotPtrSym = opnd->GetAuxSlotPtrSym();
+        if (auxSlotPtrSym)
+        {
+            Assert(this->auxSlotPtrSyms && this->auxSlotPtrSyms->Test(auxSlotPtrSym->m_id));
+            this->auxSlotPtrSyms->Clear(auxSlotPtrSym->m_id);
+        }
+    }
+
+    block->globOptData.liveFields->Minus(this->auxSlotPtrSyms);
+
+    if (auxSlotPtrSym)
+    {
+        this->auxSlotPtrSyms->Set(auxSlotPtrSym->m_id);
+    }
+}
+
 void
 GlobOpt::KillObjectHeaderInlinedTypeSyms(BasicBlock *block, bool isObjTypeSpecialized, SymID opndId)
 {
+    this->MapObjectHeaderInlinedTypeSymsUntil(block, isObjTypeSpecialized, opndId, [&](SymID symId)->bool  { this->currentBlock->globOptData.liveFields->Clear(symId); return false; });
+}
+
+bool
+GlobOpt::HasLiveObjectHeaderInlinedTypeSym(BasicBlock *block, bool isObjTypeSpecialized, SymID opndId)
+{
+    return this->MapObjectHeaderInlinedTypeSymsUntil(block, true, opndId, [&](SymID symId)->bool { return this->currentBlock->globOptData.liveFields->Test(symId); });
+}
+
+template<class Fn>
+bool
+GlobOpt::MapObjectHeaderInlinedTypeSymsUntil(BasicBlock *block, bool isObjTypeSpecialized, SymID opndId, Fn fn)
+{
     if (this->objectTypeSyms == nullptr)
     {
-        return;
+        return false;
     }
 
     FOREACH_BITSET_IN_SPARSEBV(symId, this->objectTypeSyms)
@@ -816,7 +904,10 @@ GlobOpt::KillObjectHeaderInlinedTypeSyms(BasicBlock *block, bool isObjTypeSpecia
                 {
                     if (type->GetTypeHandler()->IsObjectHeaderInlinedTypeHandler())
                     {
-                        this->currentBlock->globOptData.liveFields->Clear(symId);
+                        if (fn(symId))
+                        {
+                            return true;
+                        }
                     }
                 }
             }
@@ -830,7 +921,10 @@ GlobOpt::KillObjectHeaderInlinedTypeSyms(BasicBlock *block, bool isObjTypeSpecia
                     {
                         if (type->GetTypeHandler()->IsObjectHeaderInlinedTypeHandler())
                         {
-                            this->currentBlock->globOptData.liveFields->Clear(symId);
+                            if (fn(symId))
+                            {
+                                return true;
+                            }
                             break;
                         }
                     }
@@ -839,6 +933,8 @@ GlobOpt::KillObjectHeaderInlinedTypeSyms(BasicBlock *block, bool isObjTypeSpecia
         }
     }
     NEXT_BITSET_IN_SPARSEBV;
+
+    return false;
 }
 
 bool
@@ -993,6 +1089,8 @@ GlobOpt::ProcessPropOpInTypeCheckSeq(IR::Instr* instr, IR::PropertySymOpnd *opnd
     bool doEquivTypeCheck = opnd->HasEquivalentTypeSet() && !opnd->NeedsMonoCheck();
     if (!doEquivTypeCheck)
     {
+        AssertOrFailFast(!opnd->NeedsDepolymorphication());
+
         // We need a monomorphic type check here (e.g., final type opt, fixed field check on non-proto property).
         JITTypeHolder opndType = opnd->GetType();
 
@@ -1114,7 +1212,74 @@ GlobOpt::ProcessPropOpInTypeCheckSeq(IR::Instr* instr, IR::PropertySymOpnd *opnd
         Js::EquivalentTypeSet * opndTypeSet = opnd->GetEquivalentTypeSet();
         uint16 checkedTypeSetIndex = (uint16)-1;
 
-        if (valueInfo == nullptr || (valueInfo->GetJsType() == nullptr && valueInfo->GetJsTypeSet() == nullptr))
+        if (opnd->NeedsDepolymorphication())
+        {
+            // The opnd's type set (opndTypeSet) is non-equivalent. Test all the types coming from the valueInfo.
+            // If all of them are contained in opndTypeSet, and all of them have the same slot index in opnd's
+            // objtypespecfldinfo, then we can use that slot index and treat the set as equivalent.
+            // (Also test whether all types do/don't use aux slots.)
+
+            uint16 slotIndex = Js::Constants::NoSlot;
+            bool auxSlot = false;
+
+            // Do this work only if there is an upstream type value. We don't attempt to do a type check based on
+            // a non-equivalent set.
+            if (valueInfo != nullptr)
+            {
+                if (valueInfo->GetJsType() != nullptr)
+                {
+                    opnd->TryDepolymorphication(valueInfo->GetJsType(), Js::Constants::NoSlot, false, &slotIndex, &auxSlot, &checkedTypeSetIndex);
+                }
+                else if (valueInfo->GetJsTypeSet() != nullptr)
+                {
+                    Js::EquivalentTypeSet *typeSet = valueInfo->GetJsTypeSet();
+                    for (uint16 i = 0; i < typeSet->GetCount(); i++)
+                    {
+                        opnd->TryDepolymorphication(typeSet->GetType(i), slotIndex, auxSlot, &slotIndex, &auxSlot);
+                        if (slotIndex == Js::Constants::NoSlot)
+                        {
+                            // Indicates failure/mismatch. We're done.
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (slotIndex == Js::Constants::NoSlot)
+            {
+                // Indicates failure/mismatch
+                isSpecialized = false;
+                if (consumeType)
+                {
+                    opnd->SetTypeMismatch(true);
+                }
+            }
+            else
+            {
+                // Indicates we can optimize, as all upstream types are equivalent here.
+
+                opnd->SetSlotIndex(slotIndex);
+                opnd->SetUsesAuxSlot(auxSlot);
+
+                opnd->GetObjTypeSpecInfo()->SetSlotIndex(slotIndex);
+                opnd->GetObjTypeSpecInfo()->SetUsesAuxSlot(auxSlot);
+
+                isSpecialized = true;
+                if (isTypeCheckedOut)
+                {
+                    *isTypeCheckedOut = true;
+                }
+                if (consumeType)
+                {
+                    opnd->SetTypeChecked(true);
+                }
+                if (checkedTypeSetIndex != (uint16)-1)
+                {
+                    opnd->SetCheckedTypeSetIndex(checkedTypeSetIndex);
+                }
+            }
+        }
+        else if (valueInfo == nullptr || (valueInfo->GetJsType() == nullptr && valueInfo->GetJsTypeSet() == nullptr))
         {
             // If we don't have a value for the type we will have to emit a type check and we produce a new type value here.
             if (produceType)
@@ -1153,8 +1318,8 @@ GlobOpt::ProcessPropOpInTypeCheckSeq(IR::Instr* instr, IR::PropertySymOpnd *opnd
             }
         }
         else if (valueInfo->GetJsTypeSet() &&
-                 (opnd->IsMono() ? 
-                      valueInfo->GetJsTypeSet()->Contains(opnd->GetFirstEquivalentType()) : 
+                 (opnd->IsMono() ?
+                      valueInfo->GetJsTypeSet()->Contains(opnd->GetFirstEquivalentType()) :
                       IsSubsetOf(opndTypeSet, valueInfo->GetJsTypeSet())
                  )
             )
@@ -1287,6 +1452,43 @@ GlobOpt::ProcessPropOpInTypeCheckSeq(IR::Instr* instr, IR::PropertySymOpnd *opnd
         *changesTypeValueOut = isSpecialized && (emitsTypeCheck || addsProperty);
     }
 
+    if (makeChanges)
+    {
+        // Track liveness of aux slot ptr syms.
+        if (!PHASE_OFF(Js::ReuseAuxSlotPtrPhase, this->func) && isSpecialized)
+        {
+            if (opnd->UsesAuxSlot() && !opnd->IsLoadedFromProto())
+            {
+                // Optimized ld/st that loads/uses an aux slot ptr.
+                // Aux slot sym is live forward.
+                StackSym *auxSlotPtrSym = this->EnsureAuxSlotPtrSym(opnd);
+                if (!this->IsLoopPrePass() && opnd->IsTypeChecked())
+                {
+                    if (block->globOptData.liveFields->TestAndSet(auxSlotPtrSym->m_id))
+                    {
+                        // Aux slot sym is available here. Tell lowerer to use it.
+                        opnd->SetAuxSlotPtrSymAvailable(true);
+                    }
+                }
+                else
+                {
+                    block->globOptData.liveFields->Set(auxSlotPtrSym->m_id);
+                }
+            }
+            else if (!opnd->IsTypeChecked())
+            {
+                // Type sym is not available here (i.e., object shape is not known) and we're not loading the aux slots.
+                // May get here with aux slot sym still in live set if type sym is not in the value table.
+                // Clear the aux slot sym out of the live set.
+                StackSym *auxSlotPtrSym = opnd->GetAuxSlotPtrSym();
+                if (auxSlotPtrSym)
+                {
+                    block->globOptData.liveFields->Clear(auxSlotPtrSym->m_id);
+                }
+            }
+        }
+    }
+
     return isSpecialized;
 }
 
@@ -1305,7 +1507,7 @@ GlobOpt::OptNewScObject(IR::Instr** instrPtr, Value* srcVal)
         instr->m_func->GetConstructorCache(static_cast<Js::ProfileId>(instr->AsProfiledInstr()->u.profileId)) : nullptr;
 
     // TODO: OOP JIT, enable assert
-    //Assert(ctorCache == nullptr || srcVal->GetValueInfo()->IsVarConstant() && Js::JavascriptFunction::Is(srcVal->GetValueInfo()->AsVarConstant()->VarValue()));
+    //Assert(ctorCache == nullptr || srcVal->GetValueInfo()->IsVarConstant() && Js::VarIs<Js::JavascriptFunction>(srcVal->GetValueInfo()->AsVarConstant()->VarValue()));
     Assert(ctorCache == nullptr || !ctorCache->IsTypeFinal() || ctorCache->CtorHasNoExplicitReturnValue());
 
     if (ctorCache != nullptr && !ctorCache->SkipNewScObject() && (isCtorInlined || ctorCache->IsTypeFinal()))
@@ -1600,6 +1802,11 @@ GlobOpt::KillObjectType(StackSym* objectSym, BVSparse<JitArenaAllocator>* liveFi
     }
 
     liveFields->Clear(objectSym->GetObjectTypeSym()->m_id);
+    StackSym *auxSlotPtrSym = objectSym->GetAuxSlotPtrSym();
+    if (auxSlotPtrSym)
+    {
+        liveFields->Clear(auxSlotPtrSym->m_id);
+    }
 }
 
 void
@@ -1608,6 +1815,7 @@ GlobOpt::KillAllObjectTypes(BVSparse<JitArenaAllocator>* liveFields)
     if (this->objectTypeSyms && liveFields)
     {
         liveFields->Minus(this->objectTypeSyms);
+        liveFields->Minus(this->auxSlotPtrSyms);
     }
 }
 
@@ -1636,8 +1844,7 @@ GlobOpt::CopyPropPropertySymObj(IR::SymOpnd *symOpnd, IR::Instr *instr)
             PropertySym *newProp = PropertySym::FindOrCreate(
                 copySym->m_id, propertySym->m_propertyId, propertySym->GetPropertyIdIndex(), propertySym->GetInlineCacheIndex(), propertySym->m_fieldKind, this->func);
 
-            if (!this->IsLoopPrePass() || 
-                 (IsSafeToTransferInPrepass(objSym, val->GetValueInfo()) && IsSafeToTransferInPrepass(copySym, val->GetValueInfo())))
+            if (!this->IsLoopPrePass() || SafeToCopyPropInPrepass(objSym, copySym, val))
             {
 #if DBG_DUMP
                 if (Js::Configuration::Global.flags.Trace.IsEnabled(Js::GlobOptPhase, this->func->GetSourceContextId(), this->func->GetLocalFunctionId()))
@@ -1678,6 +1885,8 @@ GlobOpt::CopyPropPropertySymObj(IR::SymOpnd *symOpnd, IR::Instr *instr)
                         bool shouldOptimize = CompareCurrentTypesWithExpectedTypes(newValueInfo, propertySymOpnd);
                         if (!shouldOptimize)
                         {
+                            // We would like just to force a new type check here and keep optimizing, but downstream
+                            // objtypespecfldinfo may have slot indices based on the old type.
                             propertySymOpnd->SetTypeCheckSeqCandidate(false);
                         }
                     }
@@ -1794,6 +2003,12 @@ GlobOpt::UpdateObjPtrValueType(IR::Opnd * opnd, IR::Instr * instr)
     AnalysisAssert(type != nullptr);
     Js::TypeId typeId = type->GetTypeId();
 
+    if (Js::TypedArrayBase::Is(typeId))
+    {
+        // Type ID does not allow us to distinguish between virtual and non-virtual typed array.
+        return;
+    }
+
     // Passing false for useVirtual as we would never have a virtual typed array hitting this code path
     ValueType newValueType = ValueType::FromTypeId(typeId, false);
 
@@ -1802,20 +2017,12 @@ GlobOpt::UpdateObjPtrValueType(IR::Opnd * opnd, IR::Instr * instr)
         switch (typeId)
         {
         default:
-            if (typeId > Js::TypeIds_LastStaticType)
-            {
-                Assert(typeId != Js::TypeIds_Proxy);
-                if (objValueType.IsLikelyArrayOrObjectWithArray())
-                {
-                    // If we have likely object with array before, we can't make it definite object with array
-                    // since we have only proved that it is an object.
-                    // Keep the likely array or object with array.
-                }
-                else
-                {
-                    newValueType = ValueType::GetObject(ObjectType::Object);
-                }
-            }
+            // Can't mark as definite object because it may actually be object-with-array.
+            // Consider: a value type that subsumes object, array, and object-with-array.
+            break;
+        case Js::TypeIds_NativeIntArray:
+        case Js::TypeIds_NativeFloatArray:
+            // Do not mark these values as definite to protect against array conversion
             break;
         case Js::TypeIds_Array:
             // Because array can change type id, we can only make it definite if we are doing array check hoist

@@ -19,8 +19,8 @@ extern "C" PVOID __guard_check_icall_fptr;
 extern "C" void __cdecl _alloca_probe_16();
 #endif
 
-namespace Js
-{
+using namespace Js;
+
     // The VS2013 linker treats this as a redefinition of an already
     // defined constant and complains. So skip the declaration if we're compiling
     // with VS2013 or below.
@@ -96,27 +96,9 @@ namespace Js
         return functionInfo->HasBody();
     }
 
-    bool JavascriptFunction::Is(Var aValue)
+    template <> bool Js::VarIsImpl<JavascriptFunction>(RecyclableObject* obj)
     {
-        if (JavascriptOperators::GetTypeId(aValue) == TypeIds_Function)
-        {
-            return true;
-        }
-        return false;
-    }
-
-    JavascriptFunction* JavascriptFunction::FromVar(Var aValue)
-    {
-        AssertOrFailFastMsg(Is(aValue), "Ensure var is actually a 'JavascriptFunction'");
-
-        return static_cast<JavascriptFunction *>(aValue);
-    }
-
-    JavascriptFunction* JavascriptFunction::UnsafeFromVar(Var aValue)
-    {
-        AssertMsg(Is(aValue), "Ensure var is actually a 'JavascriptFunction'");
-
-        return static_cast<JavascriptFunction *>(aValue);
+        return JavascriptOperators::GetTypeId(obj) == TypeIds_Function;
     }
 
     BOOL JavascriptFunction::IsStrictMode() const
@@ -139,10 +121,18 @@ namespace Js
     /* static */
     bool JavascriptFunction::IsBuiltinProperty(Var objectWithProperty, PropertyIds propertyId)
     {
-        return ScriptFunctionBase::Is(objectWithProperty)
-            && (propertyId == PropertyIds::length || (JavascriptFunction::FromVar(objectWithProperty)->HasRestrictedProperties() && (propertyId == PropertyIds::arguments || propertyId == PropertyIds::caller)));
+        return VarIs<ScriptFunctionBase>(objectWithProperty)
+            && (propertyId == PropertyIds::length || (VarTo<JavascriptFunction>(objectWithProperty)->HasRestrictedProperties() && (propertyId == PropertyIds::arguments || propertyId == PropertyIds::caller)));
     }
 #endif
+
+    static char16 const funcName[] = _u("function anonymous");
+    static char16 const genFuncName[] = _u("function* anonymous");
+    static char16 const asyncFuncName[] = _u("async function anonymous");
+    static char16 const openFormals[] = _u("(");
+    static char16 const closeFormals[] = _u("\n)");
+    static char16 const openFuncBody[] = _u(" {");
+    static char16 const closeFuncBody[] = _u("\n}");
 
     Var JavascriptFunction::NewInstanceHelper(ScriptContext *scriptContext, RecyclableObject* function, CallInfo callInfo, Js::ArgumentReader& args, FunctionKind functionKind /* = FunctionKind::Normal */)
     {
@@ -224,7 +214,7 @@ namespace Js
                     &Parser::ValidateSourceElementList);
             }
 
-            pfuncScript = scriptContext->GetGlobalObject()->EvalHelper(scriptContext, sourceString, sourceLen, moduleID, fscrNil, Constants::FunctionCode, TRUE, TRUE, strictMode);
+            pfuncScript = scriptContext->GetGlobalObject()->EvalHelper(scriptContext, sourceString, sourceLen, moduleID, fscrCanDeferFncParse, Constants::FunctionCode, TRUE, TRUE, strictMode);
 
             // Indicate that this is a top-level function. We don't pass the fscrGlobalCode flag to the eval helper,
             // or it will return the global function that wraps the declared function body, as though it were an eval.
@@ -312,7 +302,7 @@ namespace Js
         }
 
         return isCtorSuperCall ?
-            JavascriptOperators::OrdinaryCreateFromConstructor(RecyclableObject::FromVar(newTarget), pfuncScript, nullptr, scriptContext) :
+            JavascriptOperators::OrdinaryCreateFromConstructor(VarTo<RecyclableObject>(newTarget), pfuncScript, nullptr, scriptContext) :
             pfuncScript;
     }
 
@@ -429,7 +419,7 @@ namespace Js
 
         Var thisVar = NULL;
         Var argArray = NULL;
-        RecyclableObject* pFunc = RecyclableObject::FromVar(args[0]);
+        RecyclableObject* pFunc = VarTo<RecyclableObject>(args[0]);
 
         if (args.Info.Count == 1)
         {
@@ -445,7 +435,11 @@ namespace Js
             argArray = args.Values[2];
         }
 
-        return CalloutHelper<false>(pFunc, thisVar, /* overridingNewTarget = */nullptr, argArray, scriptContext);
+        BEGIN_SAFE_REENTRANT_CALL(scriptContext->GetThreadContext())
+        {
+            return CalloutHelper<false>(pFunc, thisVar, /* overridingNewTarget = */nullptr, argArray, scriptContext);
+        }
+        END_SAFE_REENTRANT_CALL
     }
 
     template <bool isConstruct>
@@ -471,7 +465,7 @@ namespace Js
         }
         else
         {
-            bool isArray = JavascriptArray::Is(argArray);
+            bool isArray = JavascriptArray::IsNonES5Array(argArray);
             TypeId typeId = JavascriptOperators::GetTypeId(argArray);
             bool isNullOrUndefined = typeId <= TypeIds_UndefinedOrNull;
 
@@ -482,7 +476,7 @@ namespace Js
 
             int64 len;
             JavascriptArray* arr = NULL;
-            RecyclableObject* dynamicObject = RecyclableObject::FromVar(argArray);
+            RecyclableObject* dynamicObject = VarTo<RecyclableObject>(argArray);
 
             if (isNullOrUndefined)
             {
@@ -493,7 +487,7 @@ namespace Js
 #if ENABLE_COPYONACCESS_ARRAY
                 JavascriptLibrary::CheckAndConvertCopyOnAccessNativeIntArray<Var>(argArray);
 #endif
-                arr = JavascriptArray::FromVar(argArray);
+                arr = VarTo<JavascriptArray>(argArray);
                 len = arr->GetLength();
             }
             else
@@ -563,12 +557,20 @@ namespace Js
 
     Var JavascriptFunction::ApplyHelper(RecyclableObject* function, Var thisArg, Var argArray, ScriptContext* scriptContext)
     {
-        return CalloutHelper<false>(function, thisArg, /* overridingNewTarget = */nullptr, argArray, scriptContext);
+        BEGIN_SAFE_REENTRANT_CALL(scriptContext->GetThreadContext())
+        {
+            return CalloutHelper<false>(function, thisArg, /* overridingNewTarget = */nullptr, argArray, scriptContext);
+        }
+        END_SAFE_REENTRANT_CALL
     }
 
     Var JavascriptFunction::ConstructHelper(RecyclableObject* function, Var thisArg, Var overridingNewTarget, Var argArray, ScriptContext* scriptContext)
     {
-        return CalloutHelper<true>(function, thisArg, overridingNewTarget, argArray, scriptContext);
+        BEGIN_SAFE_REENTRANT_CALL(scriptContext->GetThreadContext())
+        {
+            return CalloutHelper<true>(function, thisArg, overridingNewTarget, argArray, scriptContext);
+        }
+        END_SAFE_REENTRANT_CALL
     }
 
     Var JavascriptFunction::EntryBind(RecyclableObject* function, CallInfo callInfo, ...)
@@ -624,7 +626,7 @@ namespace Js
             JavascriptError::ThrowTypeError(scriptContext, JSERR_This_NeedFunction, _u("Function.prototype.call"));
         }
 
-        RecyclableObject *pFunc = RecyclableObject::FromVar(args[0]);
+        RecyclableObject *pFunc = VarTo<RecyclableObject>(args[0]);
         if (argCount == 1)
         {
             args.Values[0] = scriptContext->GetLibrary()->GetUndefined();
@@ -644,7 +646,11 @@ namespace Js
         ///
         /// Call the [[Call]] method on the function object
         ///
-        return JavascriptFunction::CallFunction<true>(pFunc, pFunc->GetEntryPoint(), args);
+        BEGIN_SAFE_REENTRANT_CALL(scriptContext->GetThreadContext())
+        {
+            return JavascriptFunction::CallFunction<true>(pFunc, pFunc->GetEntryPoint(), args, true /*useLargeArgCount*/);
+        }
+        END_SAFE_REENTRANT_CALL
     }
 
     Var JavascriptFunction::CallRootFunctionInScript(JavascriptFunction* func, Arguments args)
@@ -654,7 +660,7 @@ namespace Js
         {
             ScriptContext* requestContext = scriptContext->GetThreadContext()->
               GetPreviousHostScriptContext()->GetScriptContext();
-            func = JavascriptFunction::FromVar(CrossSite::MarshalVar(requestContext,
+            func = VarTo<JavascriptFunction>(CrossSite::MarshalVar(requestContext,
               func, scriptContext));
         }
         return func->CallRootFunction(args, scriptContext, true);
@@ -739,7 +745,11 @@ namespace Js
         if (inScript)
         {
             Assert(!(args.Info.Flags & CallFlags_New));
-            return JavascriptFunction::CallFunction<true>(obj, obj->GetEntryPoint(), args);
+            BEGIN_SAFE_REENTRANT_CALL(scriptContext->GetThreadContext())
+            {
+                return JavascriptFunction::CallFunction<true>(obj, obj->GetEntryPoint(), args);
+            }
+            END_SAFE_REENTRANT_CALL
         }
 
 #ifdef ENABLE_DEBUG_CONFIG_OPTIONS
@@ -765,10 +775,13 @@ namespace Js
             scriptContext->VerifyAlive(true);
             try
             {
-                varResult =
-                    args.Info.Flags & CallFlags_New ?
-                    CallAsConstructor(obj, /* overridingNewTarget = */nullptr, args, scriptContext) :
-                    CallFunction<true>(obj, obj->GetEntryPoint(), args);
+                BEGIN_SAFE_REENTRANT_CALL(scriptContext->GetThreadContext())
+                {
+                    varResult = args.Info.Flags & CallFlags_New ?
+                            JavascriptFunction::CallAsConstructor(obj, /* overridingNewTarget = */nullptr, args, scriptContext) :
+                            JavascriptFunction::CallFunction<true>(obj, obj->GetEntryPoint(), args);
+                }
+                END_SAFE_REENTRANT_CALL
 
                 // A recent compiler bug 150148 can incorrectly eliminate catch block, temporary workaround
                 if (threadContext == NULL)
@@ -808,10 +821,10 @@ namespace Js
             && !scriptContext->IsInterpreted() && !CONFIG_FLAG(ForceDiagnosticsMode)    // Does not work nicely if we change the default settings.
             && function->GetEntryPoint() != scriptContext->CurrentThunk
             && !CrossSite::IsThunk(function->GetEntryPoint())
-            && JavascriptFunction::Is(function))
+            && VarIs<JavascriptFunction>(function))
         {
 
-            JavascriptFunction *jsFunction = JavascriptFunction::FromVar(function);
+            JavascriptFunction *jsFunction = VarTo<JavascriptFunction>(function);
             if (!jsFunction->IsBoundFunction()
                 && !jsFunction->GetFunctionInfo()->IsDeferred()
                 && (jsFunction->GetFunctionInfo()->GetAttributes() & FunctionInfo::DoNotProfile) != FunctionInfo::DoNotProfile
@@ -853,11 +866,15 @@ namespace Js
         }
         else
         {
-            resultObject = JavascriptOperators::NewScObjectNoCtor(v, scriptContext);
+            BEGIN_SAFE_REENTRANT_CALL(scriptContext->GetThreadContext())
+            {
+                resultObject = JavascriptOperators::NewScObjectNoCtor(v, scriptContext);
+            }
+            END_SAFE_REENTRANT_CALL
         }
 
         // JavascriptOperators::NewScObjectNoCtor should have thrown if 'v' is not a constructor
-        RecyclableObject* functionObj = RecyclableObject::UnsafeFromVar(v);
+        RecyclableObject* functionObj = UnsafeVarTo<RecyclableObject>(v);
 
         const unsigned STACK_ARGS_ALLOCA_THRESHOLD = 8; // Number of stack args we allow before using _alloca
         Var stackArgs[STACK_ARGS_ALLOCA_THRESHOLD];
@@ -910,9 +927,9 @@ namespace Js
         CallInfo newCallInfo(newFlags, args.Info.Count);
         Arguments newArgs(newCallInfo, newValues);
 
-        if (JavascriptProxy::Is(v))
+        if (VarIs<JavascriptProxy>(v))
         {
-            JavascriptProxy* proxy = JavascriptProxy::FromVar(v);
+            JavascriptProxy* proxy = VarTo<JavascriptProxy>(v);
             return proxy->ConstructorTrap(newArgs, scriptContext, spreadIndices);
         }
 
@@ -930,15 +947,15 @@ namespace Js
         }
         else
         {
-            functionResult = CallFunction<true>(functionObj, functionObj->GetEntryPoint(), newArgs);
+            functionResult = CallFunction<true>(functionObj, functionObj->GetEntryPoint(), newArgs, true /*useLargeArgCount*/);
         }
 
         return
             FinishConstructor(
                 functionResult,
                 resultObject,
-                JavascriptFunction::Is(functionObj) && functionObj->GetScriptContext() == scriptContext ?
-                JavascriptFunction::FromVar(functionObj) :
+                VarIs<JavascriptFunction>(functionObj) && functionObj->GetScriptContext() == scriptContext ?
+                VarTo<JavascriptFunction>(functionObj) :
                 nullptr,
                 overridingNewTarget != nullptr);
     }
@@ -973,7 +990,11 @@ namespace Js
 
         RUNTIME_ARGUMENTS(args, spreadIndices, function, callInfo);
 
-        return JavascriptFunction::CallSpreadFunction(function, args, spreadIndices);
+        BEGIN_SAFE_REENTRANT_CALL(function->GetScriptContext()->GetThreadContext())
+        {
+            return JavascriptFunction::CallSpreadFunction(function, args, spreadIndices);
+        }
+        END_SAFE_REENTRANT_CALL
     }
 
     uint JavascriptFunction::GetSpreadSize(const Arguments args, const Js::AuxArray<uint32> *spreadIndices, ScriptContext *scriptContext)
@@ -1045,9 +1066,9 @@ namespace Js
                 // Expand the spread element.
                 Var instance = args[spreadIndex];
 
-                if (SpreadArgument::Is(instance))
+                if (VarIs<SpreadArgument>(instance))
                 {
-                    SpreadArgument* spreadedArgs = SpreadArgument::FromVar(instance);
+                    SpreadArgument* spreadedArgs = VarTo<SpreadArgument>(instance);
                     uint size = spreadedArgs->GetArgumentSpreadCount();
                     if (size > 0)
                     {
@@ -1120,6 +1141,18 @@ namespace Js
     template Var JavascriptFunction::CallFunction<false>(RecyclableObject* function, JavascriptMethod entryPoint, Arguments args, bool useLargeArgCount);
 
 #if _M_IX86
+    extern "C" Var BreakSpeculation(Var passthrough)
+    {
+        Var result = nullptr;
+        __asm
+        {
+            mov ecx, passthrough;
+            cmp ecx, ecx;
+            cmove eax, ecx;
+            mov result, eax;
+        }
+        return result;
+    }
 #ifdef ASMJS_PLAT
     template <> int JavascriptFunction::CallAsmJsFunction<int>(RecyclableObject * function, JavascriptMethod entryPoint, Var * argv, uint argsSize, byte* reg)
     {
@@ -1169,14 +1202,13 @@ namespace Js
             mov ecx, argsSize;
             rep movs byte ptr[edi], byte ptr[esi];
 
+            mov  ecx, entryPoint
 #ifdef _CONTROL_FLOW_GUARD
             // verify that the call target is valid
-            mov  ecx, entryPoint
             call[__guard_check_icall_fptr]
-            ; no need to restore ecx('call entryPoint' is a __cdecl call)
 #endif
             push function;
-            call entryPoint;
+            call ecx;
             mov retVals.low, eax;
             mov retVals.high, edx;
             movaps retVals.xmm, xmm0;
@@ -1262,16 +1294,15 @@ dbl_align:
         // call variable argument function provided in entryPoint
         __asm
         {
+            mov  ecx, entryPoint
 #ifdef _CONTROL_FLOW_GUARD
             // verify that the call target is valid
-            mov  ecx, entryPoint
             call [__guard_check_icall_fptr]
-            ; no need to restore ecx ('call entryPoint' is a __cdecl call)
 #endif
 
             push callInfo
             push function
-            call entryPoint
+            call ecx
 
             // Restore ESP
             mov esp, savedEsp
@@ -1317,6 +1348,11 @@ dbl_align:
         extern Var arm_CallFunction(JavascriptFunction* function, CallInfo info, uint argCount, Var* values, JavascriptMethod entryPoint);
     }
 
+    extern "C" Var BreakSpeculation(Var passthrough)
+    {
+        return passthrough;
+    }
+
     template <bool doStackProbe>
     Var JavascriptFunction::CallFunction(RecyclableObject* function, JavascriptMethod entryPoint, Arguments args, bool useLargeArgCount)
     {
@@ -1337,13 +1373,11 @@ dbl_align:
         //(so that the asm code can assume 0 or more values will go on the stack: putting -1 values on the stack is unhealthy).
         if (argCount == 0)
         {
-            varResult = CALL_ENTRYPOINT(function->GetScriptContext()->GetThreadContext(),
-                entryPoint, (JavascriptFunction*)function, args.Info);
+            varResult = CALL_ENTRYPOINT(function->GetScriptContext()->GetThreadContext(), entryPoint, (JavascriptFunction*)function, args.Info);
         }
         else if (argCount == 1)
         {
-            varResult = CALL_ENTRYPOINT(function->GetScriptContext()->GetThreadContext(),
-                entryPoint, (JavascriptFunction*)function, args.Info, args.Values[0]);
+            varResult = CALL_ENTRYPOINT(function->GetScriptContext()->GetThreadContext(), entryPoint, (JavascriptFunction*)function, args.Info, args.Values[0]);
         }
         else
         {
@@ -1518,12 +1552,22 @@ dbl_align:
 
         Assert(!(callInfo.Flags & CallFlags_New));
 
+        Var arg0 = args[0];
+
+        // callable proxy is considered as having [[Call]] internal method
+        // and should behave here like a function.
+        // we will defer to the underlying target.
+        while (VarIs<JavascriptProxy>(arg0) && JavascriptConversion::IsCallable(arg0))
+        {
+            arg0 = VarTo<JavascriptProxy>(arg0)->GetTarget();
+        }
+
         AssertMsg(args.Info.Count > 0, "Should always have implicit 'this'");
-        if (args.Info.Count == 0 || !JavascriptFunction::Is(args[0]))
+        if (args.Info.Count == 0 || !VarIs<JavascriptFunction>(arg0))
         {
             JavascriptError::ThrowTypeError(scriptContext, JSERR_This_NeedFunction, _u("Function.prototype.toString"));
         }
-        JavascriptFunction *pFunc = JavascriptFunction::FromVar(args[0]);
+        JavascriptFunction *pFunc = VarTo<JavascriptFunction>(arg0);
 
         // pFunc can be from a different script context if Function.prototype.toString is invoked via .call/.apply.
         // Marshal the resulting string to the current script context (that of the toString)
@@ -1552,6 +1596,7 @@ dbl_align:
     __declspec (naked)
     void JavascriptFunction::CheckAlignment()
     {
+        JIT_HELPER_NOT_REENTRANT_NOLOCK_HEADER(ScrFunc_CheckAlignment);
         _asm
         {
             test esp, 0x4
@@ -1560,11 +1605,14 @@ dbl_align:
 LABEL1:
             call Throw::InternalError
         }
+        JIT_HELPER_END(ScrFunc_CheckAlignment);
     }
 #else
     void JavascriptFunction::CheckAlignment()
     {
+        JIT_HELPER_NOT_REENTRANT_NOLOCK_HEADER(ScrFunc_CheckAlignment);
         // Note: in order to enable this on ARM, uncomment/fix code in LowerMD.cpp (LowerEntryInstr).
+        JIT_HELPER_END(ScrFunc_CheckAlignment);
     }
 #endif
 
@@ -1592,16 +1640,8 @@ LABEL1:
 
         Assert(functionInfo);
 
-        ScriptFunctionWithInlineCache * funcObjectWithInlineCache = ScriptFunctionWithInlineCache::Is(*functionRef) ? ScriptFunctionWithInlineCache::FromVar(*functionRef) : nullptr;
         if (functionInfo->IsDeferredParseFunction())
         {
-            if (funcObjectWithInlineCache)
-            {
-                // If inline caches were populated from a function body that has been redeferred, the caches have been cleaned up,
-                // so clear the pointers. REVIEW: Is this a perf loss in some cases?
-                funcObjectWithInlineCache->ClearBorrowedInlineCacheOnFunctionObject();
-            }
-
             funcBody = functionInfo->Parse(functionRef);
             fParsed = funcBody->IsFunctionParsed() ? TRUE : FALSE;
 
@@ -1627,18 +1667,6 @@ LABEL1:
 
         JavascriptMethod thunkEntryPoint = (*functionRef)->UpdateUndeferredBody(funcBody);
 
-        if (funcObjectWithInlineCache && !funcObjectWithInlineCache->GetHasOwnInlineCaches())
-        {
-            // If the function object needs to use the inline caches from the function body, point them to the
-            // function body's caches. This is required in two redeferral cases:
-            //
-            // 1. We might have cleared the caches on the function object (ClearBorrowedInlineCacheOnFunctionObject)
-            //    above if the function body was redeferred.
-            // 2. Another function object could have been called before and undeferred the function body, thereby creating
-            //    new inline caches. This function object would still be pointing to the old ones and needs updating.
-            funcObjectWithInlineCache->SetInlineCachesFromFunctionBody();
-        }
-
         return thunkEntryPoint;
     }
 
@@ -1648,19 +1676,19 @@ LABEL1:
         Assert(functionInfo);
         try
         {
-        functionInfo->GetFunctionBody()->AddDeferParseAttribute();
-        functionInfo->GetFunctionBody()->ResetEntryPoint();
-        functionInfo->GetFunctionBody()->ResetInParams();
+            functionInfo->GetFunctionBody()->AddDeferParseAttribute();
+            functionInfo->GetFunctionBody()->ResetEntryPoint();
+            functionInfo->GetFunctionBody()->ResetInParams();
 
-        FunctionBody * funcBody = functionInfo->Parse(functionRef);
+            FunctionBody * funcBody = functionInfo->Parse(functionRef);
 
-#if ENABLE_PROFILE_INFO
-        // This is the first call to the function, ensure dynamic profile info
-        funcBody->EnsureDynamicProfileInfo();
-#endif
+    #if ENABLE_PROFILE_INFO
+            // This is the first call to the function, ensure dynamic profile info
+            funcBody->EnsureDynamicProfileInfo();
+    #endif
 
-        (*functionRef)->UpdateUndeferredBody(funcBody);
-    }
+            (*functionRef)->UpdateUndeferredBody(funcBody);
+        }
         catch (JavascriptException&)
         {
             Js::Throw::FatalInternalError();
@@ -1878,7 +1906,7 @@ LABEL1:
             }
 
             Var* addressOfFuncObj = GetAddressOfFuncObj();
-            if (!addressOfFuncObj || *addressOfFuncObj == nullptr || !ScriptFunction::Is(*addressOfFuncObj))
+            if (!addressOfFuncObj || *addressOfFuncObj == nullptr || !VarIs<ScriptFunction>(*addressOfFuncObj))
             {
                 return nullptr;
             }
@@ -1888,12 +1916,11 @@ LABEL1:
             RecyclerHeapObjectInfo heapObject;
             Recycler* recycler = threadContext->GetRecycler();
 
-            bool isFuncObjHeapAllocated = recycler->FindHeapObject(func, FindHeapObjectFlags_NoFlags, heapObject); // recheck if this needs to be removed
             bool isEntryPointHeapAllocated = recycler->FindHeapObject(func->GetEntryPointInfo(), FindHeapObjectFlags_NoFlags, heapObject);
             bool isFunctionBodyHeapAllocated = recycler->FindHeapObject(func->GetFunctionBody(), FindHeapObjectFlags_NoFlags, heapObject);
 
             // ensure that all our objects are heap allocated
-            if (!(isFuncObjHeapAllocated && isEntryPointHeapAllocated && isFunctionBodyHeapAllocated))
+            if (!(isEntryPointHeapAllocated && isFunctionBodyHeapAllocated))
             {
                 return nullptr;
             }
@@ -2266,12 +2293,12 @@ LABEL1:
             return false;
         }
 
-        bool isAsmJs = AsmJsScriptFunction::Is(func);
-        bool isWasmOnly = WasmScriptFunction::Is(func);
+        bool isAsmJs = VarIs<AsmJsScriptFunction>(func);
+        bool isWasmOnly = VarIs<WasmScriptFunction>(func);
         uintptr_t faultingAddr = helper.GetFaultingAddress();
         if (isAsmJs)
         {
-            AsmJsScriptFunction* asmFunc = AsmJsScriptFunction::FromVar(func);
+            AsmJsScriptFunction* asmFunc = VarTo<AsmJsScriptFunction>(func);
             // some extra checks for asm.js because we have slightly more information that we can validate
             if (!asmFunc->GetModuleEnvironment())
             {
@@ -2283,7 +2310,7 @@ LABEL1:
 #ifdef ENABLE_WASM
             if (isWasmOnly)
             {
-                WebAssemblyMemory* mem = WasmScriptFunction::FromVar(func)->GetWebAssemblyMemory();
+                WebAssemblyMemory* mem = VarTo<WasmScriptFunction>(func)->GetWebAssemblyMemory();
                 arrayBuffer = mem->GetBuffer();
                 reservationSize = MAX_WASM__ARRAYBUFFER_LENGTH;
             }
@@ -2432,7 +2459,7 @@ LABEL1:
         {
             Assert(CrossSite::IsThunk(callEntryPoint));
         }
-        else if (ScriptFunction::Is(this))
+        else if (VarIs<ScriptFunction>(this))
         {
         }
         else
@@ -2480,17 +2507,11 @@ LABEL1:
                 return PropertyQueryFlags::Property_Found;
             }
             break;
-        case PropertyIds::length:
-            if (this->IsScriptFunction())
-            {
-                return PropertyQueryFlags::Property_Found;
-            }
-            break;
         }
         return DynamicObject::HasPropertyQuery(propertyId, info);
     }
 
-    BOOL JavascriptFunction::GetAccessors(PropertyId propertyId, Var *getter, Var *setter, ScriptContext * requestContext)
+    _Check_return_ _Success_(return) BOOL JavascriptFunction::GetAccessors(PropertyId propertyId, _Outptr_result_maybenull_ Var* getter, _Outptr_result_maybenull_ Var* setter, ScriptContext* requestContext)
     {
         Assert(!this->IsBoundFunction());
         Assert(propertyId != Constants::NoProperty);
@@ -2583,12 +2604,6 @@ LABEL1:
                     return false;
                 }
                 break;
-            case PropertyIds::length:
-                if (this->IsScriptFunction() || this->IsBoundFunction())
-                {
-                    return true;
-                }
-                break;
             }
         }
         return DynamicObject::IsConfigurable(propertyId);
@@ -2603,12 +2618,6 @@ LABEL1:
             case PropertyIds::caller:
             case PropertyIds::arguments:
                 if (this->HasRestrictedProperties())
-                {
-                    return false;
-                }
-                break;
-            case PropertyIds::length:
-                if (this->IsScriptFunction())
                 {
                     return false;
                 }
@@ -2631,12 +2640,6 @@ LABEL1:
                     return false;
                 }
                 break;
-            case PropertyIds::length:
-                if (this->IsScriptFunction())
-                {
-                    return false;
-                }
-                break;
             }
         }
         return DynamicObject::IsWritable(propertyId);
@@ -2652,18 +2655,6 @@ LABEL1:
             return true;
         }
 
-        if (index == length)
-        {
-            if (this->IsScriptFunction() || this->IsBoundFunction())
-            {
-                if (DynamicObject::GetPropertyIndex(PropertyIds::length) == Constants::NoSlot)
-                {
-                    //Only for user defined functions length is a special property.
-                    *propertyName = requestContext->GetPropertyString(PropertyIds::length);
-                    return true;
-                }
-            }
-        }
         return false;
     }
 
@@ -2717,22 +2708,22 @@ LABEL1:
                 funcCaller = nullValue;
             }
 
-            if (ScriptFunction::Is(funcCaller))
+            if (VarIs<ScriptFunction>(funcCaller))
             {
                 // If this is the internal function of a generator function then return the original generator function
-                funcCaller = ScriptFunction::FromVar(funcCaller)->GetRealFunctionObject();
+                funcCaller = VarTo<ScriptFunction>(funcCaller)->GetRealFunctionObject();
 
                 // This function is escaping, so make sure there isn't some nested parent that has a cached scope.
-                if (ScriptFunction::Is(funcCaller))
+                if (VarIs<ScriptFunction>(funcCaller))
                 {
-                    FrameDisplay * pFrameDisplay = Js::ScriptFunction::FromVar(funcCaller)->GetEnvironment();
+                    FrameDisplay * pFrameDisplay = Js::VarTo<Js::ScriptFunction>(funcCaller)->GetEnvironment();
                     uint length = (uint)pFrameDisplay->GetLength();
                     for (uint i = 0; i < length; i++)
                     {
                         Var scope = pFrameDisplay->GetItem(i);
-                        if (scope && !Js::ScopeSlots::Is(scope) && Js::ActivationObjectEx::Is(scope))
+                        if (scope && !Js::ScopeSlots::Is(scope) && Js::VarIs<Js::ActivationObjectEx>(scope))
                         {
-                            Js::ActivationObjectEx::FromVar(scope)->InvalidateCachedScope();
+                            Js::VarTo<Js::ActivationObjectEx>(scope)->InvalidateCachedScope();
                         }
                     }
                 }
@@ -2757,7 +2748,11 @@ LABEL1:
             if (scriptContext->GetThreadContext()->RecordImplicitException())
             {
                 JavascriptFunction* accessor = requestContext->GetLibrary()->GetThrowTypeErrorRestrictedPropertyAccessorFunction();
-                *value = CALL_FUNCTION(scriptContext->GetThreadContext(), accessor, CallInfo(1), originalInstance);
+                BEGIN_SAFE_REENTRANT_CALL(scriptContext->GetThreadContext())
+                {
+                    *value = CALL_FUNCTION(scriptContext->GetThreadContext(), accessor, CallInfo(1), originalInstance);
+                }
+                END_SAFE_REENTRANT_CALL
             }
             return true;
         }
@@ -2810,7 +2805,7 @@ LABEL1:
             }
         }
 
-        if (Js::JavascriptFunction::Is(*value) && Js::JavascriptFunction::FromVar(*value)->IsStrictMode())
+        if (Js::VarIs<Js::JavascriptFunction>(*value) && Js::VarTo<Js::JavascriptFunction>(*value)->IsStrictMode())
         {
             if (scriptContext->GetThreadContext()->RecordImplicitException())
             {
@@ -2839,7 +2834,11 @@ LABEL1:
             if (scriptContext->GetThreadContext()->RecordImplicitException())
             {
                 JavascriptFunction* accessor = requestContext->GetLibrary()->GetThrowTypeErrorRestrictedPropertyAccessorFunction();
-                *value = CALL_FUNCTION(scriptContext->GetThreadContext(), accessor, CallInfo(1), originalInstance);
+                BEGIN_SAFE_REENTRANT_CALL(scriptContext->GetThreadContext())
+                {
+                    *value = CALL_FUNCTION(scriptContext->GetThreadContext(), accessor, CallInfo(1), originalInstance);
+                }
+                END_SAFE_REENTRANT_CALL
             }
             return true;
         }
@@ -2910,7 +2909,7 @@ LABEL1:
     PropertyQueryFlags JavascriptFunction::GetPropertyQuery(Var originalInstance, JavascriptString* propertyNameString, Var* value, PropertyValueInfo* info, ScriptContext* requestContext)
     {
         BOOL result;
-        PropertyRecord const* propertyRecord;
+        PropertyRecord const* propertyRecord = nullptr;
         this->GetScriptContext()->FindPropertyRecord(propertyNameString, &propertyRecord);
 
         result = JavascriptConversion::PropertyQueryFlagsToBoolean(DynamicObject::GetPropertyQuery(originalInstance, propertyNameString, value, info, requestContext)) ? TRUE : FALSE;
@@ -2946,17 +2945,7 @@ LABEL1:
             return true;
         }
 
-        if (propertyId == PropertyIds::length)
-        {
-            FunctionProxy *proxy = this->GetFunctionProxy();
-            if (proxy)
-            {
-                *value = TaggedInt::ToVarUnchecked(proxy->EnsureDeserialized()->GetReportedInParamsCount() - 1);
-                *result = true;
-                return true;
-            }
-        }
-
+        *result = false;
         return false;
     }
 
@@ -2978,14 +2967,6 @@ LABEL1:
                 isReadOnly = true;
             }
             break;
-
-        case PropertyIds::length:
-            if (this->IsScriptFunction())
-            {
-                isReadOnly = true;
-            }
-            break;
-
         }
 
         if (isReadOnly)
@@ -3047,13 +3028,6 @@ LABEL1:
                 return false;
             }
             break;
-        case PropertyIds::length:
-            if (this->IsScriptFunction())
-            {
-                JavascriptError::ThrowCantDeleteIfStrictMode(flags, this->GetScriptContext(), this->GetScriptContext()->GetPropertyName(propertyId)->GetBuffer());
-                return false;
-            }
-            break;
         }
 
         BOOL result = DynamicObject::DeleteProperty(propertyId, flags);
@@ -3076,14 +3050,6 @@ LABEL1:
         if (BuiltInPropertyRecords::caller.Equals(propertyNameString) || BuiltInPropertyRecords::arguments.Equals(propertyNameString))
         {
             if (this->HasRestrictedProperties())
-            {
-                JavascriptError::ThrowCantDeleteIfStrictMode(flags, this->GetScriptContext(), propertyNameString->GetString());
-                return false;
-            }
-        }
-        else if (BuiltInPropertyRecords::length.Equals(propertyNameString))
-        {
-            if (this->IsScriptFunction())
             {
                 JavascriptError::ThrowCantDeleteIfStrictMode(flags, this->GetScriptContext(), propertyNameString->GetString());
                 return false;
@@ -3189,8 +3155,8 @@ LABEL1:
             }
             else
             {
-                Assert(JavascriptString::Is(sourceString));
-                pString = JavascriptString::FromVar(sourceString);
+                Assert(VarIs<JavascriptString>(sourceString));
+                pString = VarTo<JavascriptString>(sourceString);
             }
         }
 
@@ -3223,19 +3189,20 @@ LABEL1:
         ParseableFunctionInfo * func = this->GetFunctionProxy()->EnsureDeserialized();
         if (func->GetDisplayName() == Js::Constants::FunctionCode)
         {
-            return LiteralString::NewCopyBuffer(Js::Constants::Anonymous, Js::Constants::AnonymousLength, scriptContext);
+            // TODO(jahorto): multiple places use pointer equality on the Constants:: string buffers. Consider moving these to StringCacheList.h and use backing buffer pointer equality if need be.
+            return JavascriptString::NewWithBuffer(Constants::Anonymous, Constants::AnonymousLength, scriptContext);
         }
         else if (func->GetIsAccessor())
         {
             const char16* accessorName = func->GetDisplayName();
             if (accessorName[0] == _u('g'))
             {
-                return LiteralString::Concat(LiteralString::NewCopySz(_u("get "), scriptContext), LiteralString::NewCopyBuffer(name, length, scriptContext));
+                return JavascriptString::Concat(scriptContext->GetLibrary()->GetGetterFunctionPrefixString(), JavascriptString::NewCopyBuffer(name, length, scriptContext));
             }
             AssertMsg(accessorName[0] == _u('s'), "should be a set");
-            return LiteralString::Concat(LiteralString::NewCopySz(_u("set "), scriptContext), LiteralString::NewCopyBuffer(name, length, scriptContext));
+            return JavascriptString::Concat(scriptContext->GetLibrary()->GetSetterFunctionPrefixString(), JavascriptString::NewCopyBuffer(name, length, scriptContext));
         }
-        return LiteralString::NewCopyBuffer(name, length, scriptContext);
+        return JavascriptString::NewCopyBuffer(name, length, scriptContext);
     }
 
     bool JavascriptFunction::GetFunctionName(JavascriptString** name) const
@@ -3250,7 +3217,7 @@ LABEL1:
             return true;
         }
 
-        Assert(!ScriptFunction::Is(thisFunction));
+        Assert(!VarIs<ScriptFunction>(thisFunction));
         return GetSourceStringName(name);
     }
 
@@ -3268,8 +3235,8 @@ LABEL1:
                 *name = scriptContext->GetPropertyString(propertyIdOfSourceString);
                 return true;
             }
-            Assert(JavascriptString::Is(sourceString));
-            *name = JavascriptString::FromVar(sourceString);
+            Assert(VarIs<JavascriptString>(sourceString));
+            *name = VarTo<JavascriptString>(sourceString);
             return true;
         }
         return false;
@@ -3284,7 +3251,14 @@ LABEL1:
         if (proxy)
         {
             ParseableFunctionInfo * func = proxy->EnsureDeserialized();
-            return LiteralString::NewCopySz(func->GetDisplayName(), scriptContext);
+            if (func->GetDisplayNameIsRecyclerAllocated())
+            {
+                return JavascriptString::NewWithSz(func->GetDisplayName(), scriptContext);
+            }
+            else
+            {
+                return JavascriptString::NewCopySz(func->GetDisplayName(), scriptContext);
+            }
         }
         JavascriptString* sourceStringName = nullptr;
         if (GetSourceStringName(&sourceStringName))
@@ -3321,10 +3295,10 @@ LABEL1:
             return JavascriptBoolean::ToVar(FALSE, scriptContext);
         }
 
-        RecyclableObject * constructor = RecyclableObject::FromVar(args[0]);
+        RecyclableObject * constructor = VarTo<RecyclableObject>(args[0]);
         Var instance = args[1];
 
-        Assert(JavascriptProxy::Is(constructor) || JavascriptFunction::Is(constructor));
+        Assert(VarIs<JavascriptProxy>(constructor) || VarIs<JavascriptFunction>(constructor));
         return JavascriptBoolean::ToVar(constructor->HasInstance(instance, scriptContext, NULL), scriptContext);
     }
 
@@ -3359,8 +3333,8 @@ LABEL1:
             if (inlineCache && inlineCache->function == nullptr
                 && scriptContext == function->GetScriptContext())// only register when function has same scriptContext
             {
-                inlineCache->Cache(RecyclableObject::Is(instance) ?
-                    RecyclableObject::UnsafeFromVar(instance)->GetType() : nullptr,
+                inlineCache->Cache(VarIs<RecyclableObject>(instance) ?
+                    UnsafeVarTo<RecyclableObject>(instance)->GetType() : nullptr,
                     function, scriptContext->GetLibrary()->GetFalse(), scriptContext);
             }
             return result;
@@ -3407,7 +3381,7 @@ LABEL1:
         // However, object o's type (even if it is of the same "shape" as before, and even if o is the very same object) will be different,
         // because the object types are permanently bound and unique to the script context from which they were created.
 
-        RecyclableObject* instanceObject = RecyclableObject::FromVar(instance);
+        RecyclableObject* instanceObject = VarTo<RecyclableObject>(instance);
         Var prototype = JavascriptOperators::GetPrototype(instanceObject);
 
         if (!JavascriptOperators::IsObject(funcPrototype))
@@ -3425,7 +3399,7 @@ LABEL1:
                 break;
             }
 
-            prototype = JavascriptOperators::GetPrototype(RecyclableObject::FromVar(prototype));
+            prototype = JavascriptOperators::GetPrototype(VarTo<RecyclableObject>(prototype));
         }
 
         // Now that we know the answer, let's cache it for next time if we have a cache.
@@ -3434,7 +3408,7 @@ LABEL1:
             Assert(function != NULL);
             JavascriptBoolean * boolResult = result ? scriptContext->GetLibrary()->GetTrue() :
                 scriptContext->GetLibrary()->GetFalse();
-            Type * instanceType = RecyclableObject::FromVar(instance)->GetType();
+            Type * instanceType = VarTo<RecyclableObject>(instance)->GetType();
 
             if (!instanceType->HasSpecialPrototype()
                 && scriptContext == function->GetScriptContext()) // only register when function has same scriptContext, otherwise when scriptContext close
@@ -3464,12 +3438,12 @@ LABEL1:
             Js::Throw::FatalInternalError();
         }
 
-        if (args.Info.Count < 2 || !ArrayBufferBase::Is(args[1]))
+        if (args.Info.Count < 2 || !VarIs<ArrayBufferBase>(args[1]))
         {
             JavascriptError::ThrowTypeError(scriptContext, JSERR_NeedArrayBufferObject);
         }
 
-        ArrayBufferBase* arrayBuffer = ArrayBufferBase::FromVar(args[1]);
+        ArrayBufferBase* arrayBuffer = VarTo<ArrayBufferBase>(args[1]);
         const byte* buffer = arrayBuffer->GetBuffer();
         uint32 size = arrayBuffer->GetByteLength();
         HRESULT hr = JitFromEncodedWorkItem(scriptContext->GetNativeCodeGenerator(), buffer, size);
@@ -3493,10 +3467,10 @@ LABEL1:
                 JavascriptExceptionOperators::OP_Throw(string, scriptContext);
             }
 #endif
-            JavascriptExceptionOperators::OP_Throw(JavascriptNumber::New(hr, scriptContext), scriptContext);
+            return JavascriptNumber::New(hr, scriptContext);
         }
         return scriptContext->GetLibrary()->GetUndefined();
     }
 #endif
 
-}
+

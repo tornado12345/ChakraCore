@@ -43,17 +43,18 @@ namespace Js
 
         HRESULT ResolveExternalModuleDependencies();
         void EnsureChildModuleSet(ScriptContext *scriptContext);
+        bool ConfirmChildrenParsed();
 
         void* GetHostDefined() const { return hostDefined; }
         void SetHostDefined(void* hostObj) { hostDefined = hostObj; }
 
         void SetSpecifier(Var specifier) { this->normalizedSpecifier = specifier; }
         Var GetSpecifier() const { return normalizedSpecifier; }
-        const char16 *GetSpecifierSz() const { return JavascriptString::FromVar(this->normalizedSpecifier)->GetSz(); }
+        const char16 *GetSpecifierSz() const { return VarTo<JavascriptString>(this->normalizedSpecifier)->GetSz(); }
 
         void SetModuleUrl(Var moduleUrl) { this->moduleUrl = moduleUrl; }
         Var GetModuleUrl() const { return moduleUrl;}
-        const char16 *GetModuleUrlSz() const { return JavascriptString::FromVar(this->moduleUrl)->GetSz(); }
+        const char16 *GetModuleUrlSz() const { return VarTo<JavascriptString>(this->moduleUrl)->GetSz(); }
 
         Var GetErrorObject() const { return errorObject; }
 
@@ -107,7 +108,7 @@ namespace Js
 
         void SetParent(SourceTextModuleRecord* parentRecord, LPCOLESTR moduleName);
         Utf8SourceInfo* GetSourceInfo() { return this->pSourceInfo; }
-        static Var ResolveOrRejectDynamicImportPromise(bool isResolve, Var value, ScriptContext *scriptContext, SourceTextModuleRecord *mr = nullptr);
+        static Var ResolveOrRejectDynamicImportPromise(bool isResolve, Var value, ScriptContext *scriptContext, SourceTextModuleRecord *mr = nullptr, bool useReturn = true);
         Var PostProcessDynamicModuleImport();
 
     private:
@@ -116,6 +117,8 @@ namespace Js
         const static uint InvalidSlotIndex = 0xffffffff;
         // TODO: move non-GC fields out to avoid false reference?
         // This is the parsed tree resulted from compilation.
+        Field(bool) confirmedReady = false;
+        Field(bool) notifying = false;
         Field(bool) wasParsed;
         Field(bool) wasDeclarationInitialized;
         Field(bool) parentsNotified;
@@ -136,7 +139,6 @@ namespace Js
         Field(LocalExportMap*) localExportMapByExportName;  // from propertyId to index map: for bytecode gen.
         Field(LocalExportMap*) localExportMapByLocalName;  // from propertyId to index map: for bytecode gen.
         Field(LocalExportIndexList*) localExportIndexList; // from index to propertyId: for typehandler.
-        Field(uint) numPendingChildrenModule;
         Field(ExportedNames*) exportedNames;
         Field(ResolvedExportMap*) resolvedExportMap;
 
@@ -157,6 +159,7 @@ namespace Js
 
         HRESULT PostParseProcess();
         HRESULT PrepareForModuleDeclarationInitialization();
+        void ReleaseParserResources();
         void ImportModuleListsFromParser();
         HRESULT OnChildModuleReady(SourceTextModuleRecord* childModule, Var errorObj);
         void NotifyParentsAsNeeded();

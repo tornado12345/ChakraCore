@@ -10,9 +10,21 @@
 namespace Js
 {
     template<size_t size>
-    SimpleTypeHandler<size>::SimpleTypeHandler(SimpleTypeHandler<size> * typeHandler)
+    SimpleTypeHandler<size>::SimpleTypeHandler(SimpleTypeHandler<size> * typeHandler, bool unused)
         : DynamicTypeHandler(sizeof(descriptors) / sizeof(SimplePropertyDescriptor),
             typeHandler->GetInlineSlotCapacity(), typeHandler->GetOffsetOfInlineSlots()), propertyCount(typeHandler->propertyCount)
+    {
+        Assert(typeHandler->GetIsInlineSlotCapacityLocked());
+        SetIsInlineSlotCapacityLocked();
+        for (int i = 0; i < propertyCount; i++)
+        {
+            descriptors[i] = typeHandler->descriptors[i];
+        }
+    }
+
+    template<size_t size>
+    SimpleTypeHandler<size>::SimpleTypeHandler(SimpleTypeHandler<size> * typeHandler) :
+        DynamicTypeHandler(typeHandler)
     {
         Assert(typeHandler->GetIsInlineSlotCapacityLocked());
         SetIsInlineSlotCapacityLocked();
@@ -62,9 +74,15 @@ namespace Js
     }
 
     template<size_t size>
+    DynamicTypeHandler * SimpleTypeHandler<size>::Clone(Recycler * recycler)
+    {
+        return RecyclerNew(recycler, SimpleTypeHandler<size>, this);
+    }
+
+    template<size_t size>
     bool SimpleTypeHandler<size>::DoConvertToPathType(DynamicType* type)
     {
-        if (CrossSite::IsThunk(type->GetEntryPoint()) || type->GetTypeHandler()->GetIsPrototype())
+        if ((PHASE_ON1(ShareCrossSiteFuncTypesPhase) && CrossSite::IsThunk(type->GetEntryPoint())) || type->GetTypeHandler()->GetIsPrototype())
         {
             return false;
         }
@@ -89,7 +107,7 @@ namespace Js
 
         CompileAssert(_countof(descriptors) == size);
 
-        SimpleTypeHandler * newTypeHandler = RecyclerNew(recycler, SimpleTypeHandler, this);
+        SimpleTypeHandler * newTypeHandler = RecyclerNew(recycler, SimpleTypeHandler, this, true /*unused*/);
 
         // Consider: Add support for fixed fields to SimpleTypeHandler when
         // non-shared.  Here we could set the instance as the singleton instance on the newly
@@ -131,7 +149,7 @@ namespace Js
             Assert(value != nullptr || IsInternalPropertyId(descriptors[i].Id->GetPropertyId()));
 #if ENABLE_FIXED_FIELDS
             bool markAsFixed = allowFixedFields && !IsInternalPropertyId(descriptors[i].Id->GetPropertyId()) &&
-                (JavascriptFunction::Is(value) ? ShouldFixMethodProperties() : false);
+                (VarIs<JavascriptFunction>(value) ? ShouldFixMethodProperties() : false);
 #else
             bool markAsFixed = false;
 #endif
@@ -157,18 +175,16 @@ namespace Js
     template<size_t size>
     PathTypeHandlerBase* SimpleTypeHandler<size>::ConvertToPathType(DynamicObject* instance)
     {
-        Assert(!CrossSite::IsThunk(instance->GetType()->GetEntryPoint()));
-
         ScriptContext *scriptContext = instance->GetScriptContext();
-        PathTypeHandlerBase* newTypeHandler = 
+        PathTypeHandlerBase* newTypeHandler =
             PathTypeHandlerNoAttr::New(
-                scriptContext, 
-                scriptContext->GetLibrary()->GetRootPath(), 
-                0, 
-                static_cast<PropertyIndex>(this->GetSlotCapacity()), 
-                this->GetInlineSlotCapacity(), 
-                this->GetOffsetOfInlineSlots(), 
-                true, 
+                scriptContext,
+                scriptContext->GetLibrary()->GetRootPath(),
+                0,
+                static_cast<PropertyIndex>(this->GetSlotCapacity()),
+                this->GetInlineSlotCapacity(),
+                this->GetOffsetOfInlineSlots(),
+                true,
                 false);
         newTypeHandler->SetMayBecomeShared();
 
@@ -188,7 +204,7 @@ namespace Js
 #if ENABLE_FIXED_FIELDS
 #ifdef SUPPORT_FIXED_FIELDS_ON_PATH_TYPES
             bool markAsFixed = !IsInternalPropertyId(propertyId) &&
-                (JavascriptFunction::Is(value) ? ShouldFixMethodProperties() : false);
+                (VarIs<JavascriptFunction>(value) ? ShouldFixMethodProperties() : false);
             newTypeHandler->InitializePath(instance, i, newTypeHandler->GetPathLength(), scriptContext, [=]() { return markAsFixed; });
 #endif
 #endif
@@ -661,7 +677,15 @@ namespace Js
             CompileAssert(_countof(descriptors) == size);
             if (size > 1)
             {
-                SetAttribute(instance, index, PropertyDeleted);
+                if (GetIsLocked())
+                {
+                    // Prevent conversion to path type and then dictionary. Remove this when path types support deleted properties.
+                    this->ConvertToNonSharedSimpleType(instance)->SetAttribute(instance, index, PropertyDeleted);
+                }
+                else
+                {
+                    SetAttribute(instance, index, PropertyDeleted);
+                }
             }
             else
             {
@@ -984,6 +1008,10 @@ namespace Js
                     }
                     Assert(!oldType->GetIsLocked() || instance->GetDynamicType() != oldType);
                 }
+                if (descriptors[index].Attributes & PropertyDeleted)
+                {
+                    instance->GetScriptContext()->InvalidateProtoCaches(propertyId);
+                }
                 typeHandler->descriptors[index].Attributes = attributes;
                 if (attributes & PropertyEnumerable)
                 {
@@ -1139,7 +1167,7 @@ namespace Js
     template<size_t size>
     DynamicTypeHandler* SimpleTypeHandler<size>::ConvertToTypeWithItemAttributes(DynamicObject* instance)
     {
-        return JavascriptArray::Is(instance) ?
+        return JavascriptArray::IsNonES5Array(instance) ?
             ConvertToES5ArrayType(instance) : ConvertToDictionaryType(instance);
     }
 
@@ -1239,6 +1267,7 @@ namespace Js
 
     template class SimpleTypeHandler<1>;
     template class SimpleTypeHandler<2>;
+    template class SimpleTypeHandler<3>;
     template class SimpleTypeHandler<6>;
 
 }

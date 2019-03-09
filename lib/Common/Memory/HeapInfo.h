@@ -2,6 +2,9 @@
 // Copyright (C) Microsoft. All rights reserved.
 // Licensed under the MIT license. See LICENSE.txt file in the project root for full license information.
 //-------------------------------------------------------------------------------------------------------
+
+#pragma once
+
 namespace Memory
 {
 #if ENABLE_MEM_STATS
@@ -70,7 +73,7 @@ public:
     template <typename TBlockAttributes>
     bool IsPageHeapEnabledForBlock(const size_t objectSize);
 #else
-    const bool IsPageHeapEnabled() const{ return false; }
+    bool IsPageHeapEnabled() const{ return false; }
 #endif
 
 #if ENABLE_MEM_STATS

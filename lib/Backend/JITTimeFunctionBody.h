@@ -100,6 +100,8 @@ public:
     bool NeedScopeObjectForArguments(bool hasNonSimpleParams) const;
     bool GetDoScopeObjectCreation() const;
     void EnsureConsistentConstCount() const;
+    bool HasComputedName() const;
+    bool HasHomeObj() const;
 
     const byte * GetByteCodeBuffer() const;
     StatementMapIDL * GetFullStatementMap() const;
@@ -175,6 +177,7 @@ public:
     bool HasProfileInfo() const;
     bool IsRegSlotFormal(Js::RegSlot reg) const;
     bool HasPropIdToFormalsMap() const;
+    Js::ProfileId GetCallApplyCallSiteIdForCallSiteId(Js::ProfileId callSiteId) const;
 
     static bool LoopContains(const JITLoopHeaderIDL * loop1, const JITLoopHeaderIDL * loop2);
 

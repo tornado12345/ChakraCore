@@ -33,11 +33,15 @@ ThreadContext * ThreadBoundThreadContextManager::EnsureContextForCurrentThread()
     // Just reinitialize the thread context.
     if (threadContext == nullptr)
     {
-        threadContext = HeapNew(ThreadContext);
+        bool requireConcurrencySupport = true;
+        AllocationPolicyManager * policyManager = HeapNew(AllocationPolicyManager, requireConcurrencySupport);
+        threadContext = HeapNew(ThreadContext, policyManager);
+
         threadContext->SetIsThreadBound();
         if (!ThreadContextTLSEntry::TrySetThreadContext(threadContext))
         {
             HeapDelete(threadContext);
+            HeapDelete(policyManager);
             return NULL;
         }
     }
@@ -74,6 +78,9 @@ void ThreadBoundThreadContextManager::DestroyAllContexts()
 #if ENABLE_BACKGROUND_JOB_PROCESSOR
     JsUtil::BackgroundJobProcessor * jobProcessor = NULL;
 #endif
+    
+    // Since BGParseManager has a dependency on threadcontexts, make sure it shuts down first
+    BGParseManager::DeleteBGParseManager();
 
     {
         AutoCriticalSection lock(ThreadContext::GetCriticalSection());
@@ -139,8 +146,6 @@ void ThreadBoundThreadContextManager::DestroyAllContexts()
         entries.Remove(currentEntry);
         ThreadContextTLSEntry::CleanupThread();
 
-        BGParseManager::DeleteBGParseManager();
-
 #if ENABLE_BACKGROUND_JOB_PROCESSOR
         if (s_sharedJobProcessor != NULL)
         {
@@ -162,6 +167,9 @@ void ThreadBoundThreadContextManager::DestroyAllContexts()
 
 void ThreadBoundThreadContextManager::DestroyAllContextsAndEntries(bool shouldDeleteCurrentTlsEntry)
 {
+    // Since BGParseManager has a dependency on threadcontexts, make sure it shuts down first
+    BGParseManager::DeleteBGParseManager();
+
     AutoCriticalSection lock(ThreadContext::GetCriticalSection());
 
     // When shouldDeleteCurrentTlsEntry is true, the comparison in the while loop will always be true, so
@@ -177,17 +185,7 @@ void ThreadBoundThreadContextManager::DestroyAllContextsAndEntries(bool shouldDe
 
         if (threadContext != nullptr)
         {
-#if DBG
-            PageAllocator* pageAllocator = threadContext->GetPageAllocator();
-            if (pageAllocator)
-            {
-                pageAllocator->SetConcurrentThreadId(::GetCurrentThreadId());
-            }
-#endif
-
-            threadContext->ShutdownThreads();
-
-            HeapDelete(threadContext);
+            ShutdownThreadContext(threadContext);
         }
 
         if (currentThreadEntry != entry)
@@ -197,8 +195,6 @@ void ThreadBoundThreadContextManager::DestroyAllContextsAndEntries(bool shouldDe
             ThreadContextTLSEntry::Delete(entry);
         }
     }
-
-    BGParseManager::DeleteBGParseManager();
 
 #if ENABLE_BACKGROUND_JOB_PROCESSOR
     if (s_sharedJobProcessor != NULL)
@@ -262,6 +258,19 @@ void ThreadContextManagerBase::ShutdownThreadContext(
 
     if (deleteThreadContext)
     {
+        AllocationPolicyManager * policyManager = threadContext->IsThreadBound() ? threadContext->GetAllocationPolicyManager() : nullptr;
+#if DBG
+        // An assert can fire in the Recycler dtor if this ThreadContext is destroyed while
+        // the process is detaching (i.e., all of the other threads have terminated). In this
+        // case, don't run that assert because all of the other threads were torn down early
+        // because of WFMO
+        threadContext->GetRecycler()->SetDisableConcurrentThreadExitedCheck();
+#endif
         HeapDelete(threadContext);
+
+        if (policyManager)
+        {
+            HeapDelete(policyManager);
+        }
     }
 }

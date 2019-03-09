@@ -23,12 +23,14 @@ SmallNormalHeapBucketBase<TBlockType>::AggregateBucketStats()
 {
     __super::AggregateBucketStats();
 
+#if ENABLE_PARTIAL_GC
     HeapBlockList::ForEach(partialHeapBlockList, [this](TBlockType* heapBlock) {
         heapBlock->AggregateBlockStats(this->memStats);
     });
     HeapBlockList::ForEach(partialSweptHeapBlockList, [this](TBlockType* heapBlock) {
         heapBlock->AggregateBlockStats(this->memStats);
     });
+#endif
 }
 #endif
 
@@ -314,7 +316,7 @@ template <SweepMode mode>
 TBlockType *
 SmallNormalHeapBucketBase<TBlockType>::SweepPendingObjects(Recycler * recycler, TBlockType * list)
 {
-    TBlockType * tail;
+    TBlockType * tail = nullptr;
     HeapBlockList::ForEachEditing(list, [this, recycler, &tail](TBlockType * heapBlock)
     {
         // Note, page heap blocks are never swept concurrently

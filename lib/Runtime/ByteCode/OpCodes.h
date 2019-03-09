@@ -71,10 +71,10 @@
     MACRO_WMS_WITH_DBG_ATTR(opcode, layout, attr, OpDbgAttr_LoadRoot)
 
 #define MACRO_EXTENDED_ROOT(opcode, layout, attr) \
-    MACRO_EXTENDED_WITH_DBG_ATTR(opcode, layout, attr, OpDbgAttr_LoadRoot)
+    MACRO_EXTEND_WITH_DBG_ATTR(opcode, layout, attr, OpDbgAttr_LoadRoot)
 
 #define MACRO_EXTEND_WMS_ROOT(opcode, layout, attr) \
-    MACRO_EXTENDED_WMS_WITH_DBG_ATTR(opcode, layout, attr, OpDbgAttr_LoadRoot)
+    MACRO_EXTEND_WMS_WITH_DBG_ATTR(opcode, layout, attr, OpDbgAttr_LoadRoot)
 
 #define MACRO_WMS_PROFILED( opcode, layout, attr) \
     MACRO_WMS(opcode, layout, OpHasProfiled|attr) \
@@ -325,7 +325,7 @@ MACRO_EXTEND_WMS(       Conv_Str,           Reg2,           OpOpndHasImplicitCal
 //      OpSideEffect - May throw exception on null/undefined.
 //      Do not call valueOf/toString no implicit call
 MACRO_WMS(              Conv_Obj,           Reg2,           OpSideEffect|OpPostOpDbgBailOut|OpTempObjectTransfer)   // Convert to Object
-MACRO_EXTEND_WMS(       NewWithObject,      Reg2,           OpSideEffect | OpPostOpDbgBailOut)  // Wrap in a with Object
+MACRO_EXTEND_WMS(       NewUnscopablesWrapperObject,      Reg2,           OpSideEffect | OpPostOpDbgBailOut)  // Wrap in a with Object
 MACRO_BACKEND_ONLY(     ToVar,              Reg2,           OpTempNumberProducing|OpTempNumberSources|OpCanCSE)     // Load from int32/float64 to Var(reg)
 // Load from Var(reg) to int32/float64, NOTE: always bail if it is not primitive. so no implicit call, but still mark with CallsValueOf so it won't get automatically dead stored
 // TODO: Consider changing the code so we don't have mark this as CallsValueOf
@@ -354,6 +354,7 @@ MACRO_WMS(              ChkUndecl,                  Reg1,           OpSideEffect
 
 MACRO_WMS_ROOT(         EnsureNoRootFld,            ElementRootU,   OpSideEffect)
 MACRO_WMS_ROOT(         EnsureNoRootRedeclFld,      ElementRootU,   OpSideEffect)
+MACRO_EXTEND_WMS_ROOT(  EnsureCanDeclGloFunc,       ElementRootU,   OpSideEffect)
 MACRO_WMS(              ScopedEnsureNoRedeclFld,    ElementScopedC, OpSideEffect)
 
 MACRO_WMS(              InitUndecl,                 Reg1,           OpCanCSE)
@@ -361,7 +362,7 @@ MACRO_WMS(              InitUndecl,                 Reg1,           OpCanCSE)
 MACRO_WMS(              InitUndeclLetFld,           ElementPIndexed,OpByteCodeOnly|OpSideEffect)
 MACRO_EXTEND_WMS(       InitUndeclLocalLetFld,      ElementP,       OpByteCodeOnly|OpSideEffect)
 MACRO_WMS_ROOT(         InitUndeclRootLetFld,       ElementRootU,   OpSideEffect)
-MACRO_WMS(              InitUndeclConstFld,         ElementPIndexed,OpByteCodeOnly|OpSideEffect)
+MACRO_EXTEND_WMS(       InitUndeclConstFld,         ElementPIndexed,OpByteCodeOnly|OpSideEffect)
 MACRO_EXTEND_WMS(       InitUndeclLocalConstFld,    ElementP,       OpByteCodeOnly|OpSideEffect)
 MACRO_WMS_ROOT(         InitUndeclRootConstFld,     ElementRootU,   OpSideEffect)
 MACRO_EXTEND_WMS(       InitUndeclConsoleLetFld,    ElementScopedU, OpSideEffect)
@@ -549,6 +550,8 @@ MACRO_BACKEND_ONLY(     LdHandlerScope,     Reg1,           OpHasImplicitCall)  
 MACRO_BACKEND_ONLY(     LdFrameDisplay,     Reg3,           None)           // Set up a frame display for this function and its parent frames
 #if DBG
 MACRO_BACKEND_ONLY(     LdFrameDisplayNoParent,Reg1,        None)           // Set up a frame display for this function and its parent frames
+MACRO_BACKEND_ONLY(     CheckLowerIntBound, Reg2,           None)           // Check if the value of the operand is greater than or equal to the lower bound determined by the globopt for it
+MACRO_BACKEND_ONLY(     CheckUpperIntBound, Reg2,           None)           // Check if the value of the operand is lesser than or equal to the upper bound determined by the globopt for it
 #endif
 MACRO_WMS(              LdInnerFrameDisplay,Reg3,           None)        // Set up a frame display for this function and its parent frames -- this is for an inner scope, not the function-level scope
 MACRO_WMS(              LdInnerFrameDisplayNoParent,Reg2,   None)        // Set up a frame display for this function and its parent frames -- this is for an inner scope, not the function-level scope
@@ -556,7 +559,7 @@ MACRO_WMS(              LdIndexedFrameDisplay,Reg2Int1,         None)        // 
 MACRO_WMS(              LdIndexedFrameDisplayNoParent,Reg1Unsigned1, None)        // Set up a frame display for this function and its parent frames -- this is for an inner scope, not the function-level scope
 MACRO_WMS(              LdFuncExprFrameDisplay,Reg2,        None)
 MACRO_BACKEND_ONLY(     NewStackFrameDisplay,Reg3,          None)           // Set up a frame display allocated on the stack
-MACRO_WMS(              IsIn,               Reg3,           OpSideEffect|OpOpndHasImplicitCall|OpPostOpDbgBailOut)        // "x in y"  (NOTE: calls valueOf for the index
+MACRO_WMS_PROFILED(     IsIn,               Reg3,           OpSideEffect|OpOpndHasImplicitCall|OpPostOpDbgBailOut)        // "x in y"  (NOTE: calls valueOf for the index
 MACRO_WMS(              LdArgumentsFromFrame,Reg1,          None)           // Load the argument object from frame
 MACRO_WMS(              LdElemUndef,        ElementU,       OpSideEffect)   // Load 'undefined' to instance.property if not already present
 MACRO_EXTEND_WMS(       LdLocalElemUndef,   ElementRootU,   OpSideEffect)   // Load 'undefined' to instance.property if not already present
@@ -594,6 +597,10 @@ MACRO_WMS(              NewStackScFunc,     ElementSlotI1,  OpSideEffect|OpByteC
 MACRO_EXTEND_WMS(       NewInnerScFunc,     ElementSlot,    OpSideEffect)   // Create new ScriptFunction instance
 MACRO_EXTEND_WMS(       NewInnerScGenFunc,  ElementSlot,    OpSideEffect)   // Create new JavascriptGeneratorFunction instance
 MACRO_EXTEND_WMS(       NewInnerStackScFunc,ElementSlot,    OpSideEffect|OpByteCodeOnly)  // Create new ScriptFunction instance
+MACRO_EXTEND_WMS(       NewScFuncHomeObj,   ElementSlot,    OpSideEffect)   // Create new ScriptFunction instance that has home object
+MACRO_EXTEND_WMS(       NewScGenFuncHomeObj,       ElementSlot,      OpSideEffect)   // Create new JavascriptGeneratorFunction instance that has home object
+MACRO_EXTEND_WMS(       NewInnerScFuncHomeObj,     ElementSlotI3,    OpSideEffect)   // Create new ScriptFunction instance that has home object
+MACRO_EXTEND_WMS(       NewInnerScGenFuncHomeObj,  ElementSlotI3,    OpSideEffect)   // Create new JavascriptGeneratorFunction instance that has home object
 MACRO_BACKEND_ONLY(     NewScopeObject,     Reg1,           None)                       // Create new NewScopeObject
 MACRO_BACKEND_ONLY(     InitCachedScope,    Reg2Aux,        None)                   // Retrieve cached scope; create if not cached
 MACRO_BACKEND_ONLY(     InitLetCachedScope, Reg2Aux,        OpSideEffect)                   // Retrieve cached scope; create if not cached (formals are let-like instead of var-like)
@@ -759,13 +766,17 @@ MACRO_BACKEND_ONLY(     InlineArrayPop,      Empty,          OpSideEffect|OpInli
 MACRO_BACKEND_ONLY(     InlineArrayPush,     Empty,          OpSideEffect|OpInlinableBuiltIn|OpHasImplicitCall)
 MACRO_BACKEND_ONLY(     InlineFunctionApply, Empty,          OpSideEffect|OpInlinableBuiltIn)
 MACRO_BACKEND_ONLY(     InlineFunctionCall,  Empty,          OpSideEffect|OpInlinableBuiltIn)
+MACRO_BACKEND_ONLY(     InlineCallInstanceFunction,  Empty,  OpSideEffect|OpInlinableBuiltIn)
 MACRO_BACKEND_ONLY(     InlineRegExpExec,    Empty,          OpSideEffect|OpInlinableBuiltIn)
 
 MACRO_BACKEND_ONLY(     CallIFixed,          Empty,          OpSideEffect|OpUseAllFields|OpCallInstr|OpInlineCallInstr)
 MACRO_BACKEND_ONLY(     CheckFixedFld,       Empty,          OpFastFldInstr|OpTempObjectSources|OpCanCSE)
+MACRO_BACKEND_ONLY(     CheckIsFuncObj,      Empty,          OpCanCSE | OpBailOutRec)
+MACRO_BACKEND_ONLY(     CheckFuncInfo,       Empty,          OpCanCSE | OpBailOutRec)
 MACRO_BACKEND_ONLY(     CheckPropertyGuardAndLoadType,  Empty,          OpFastFldInstr|OpTempObjectSources|OpDoNotTransfer)
 MACRO_BACKEND_ONLY(     CheckObjType,        Empty,          OpFastFldInstr|OpTempObjectSources|OpCanCSE)
 MACRO_BACKEND_ONLY(     AdjustObjType,       Empty,          OpSideEffect)
+MACRO_BACKEND_ONLY(     AdjustObjTypeReloadAuxSlotPtr,       Empty,          OpSideEffect)
 
                                                                                                             // Edge inline built-ins
 #ifdef ENABLE_DOM_FAST_PATH
@@ -793,11 +804,12 @@ MACRO_BACKEND_ONLY(     LdSpreadIndices,    Empty,          None)
 
 MACRO_EXTEND_WMS(       ClearAttributes,    ElementU,       None)
 
+MACRO_BACKEND_ONLY(     SpeculatedLoadFence,Reg1,           None)
+
 MACRO_EXTEND_WMS(       LdHomeObj,          Reg1,           OpSideEffect)
 MACRO_EXTEND_WMS(       LdFuncObj,          Reg1,           OpSideEffect)
 MACRO_EXTEND_WMS(       LdHomeObjProto,     Reg2,           OpSideEffect)
 MACRO_EXTEND_WMS(       LdFuncObjProto,     Reg2,           OpSideEffect)
-MACRO_EXTEND_WMS(       SetHomeObj,         Reg2,           OpSideEffect)
 
 MACRO_EXTEND_WMS(       ImportCall,         Reg2,           OpSideEffect|OpHasImplicitCall)
 
@@ -819,6 +831,17 @@ MACRO_BACKEND_ONLY(     ThrowRuntimeError,  Empty,          OpSideEffect)
 MACRO_BACKEND_ONLY(     TrapIfMinIntOverNegOne, Reg3,       OpSideEffect)
 MACRO_BACKEND_ONLY(     TrapIfZero,         Reg3,           OpSideEffect)
 MACRO_BACKEND_ONLY(     TrapIfUnalignedAccess, Reg3,        OpSideEffect)
+
+MACRO_EXTEND_WMS(       SpreadObjectLiteral,Reg2,           OpSideEffect|OpHasImplicitCall)
+MACRO_EXTEND_WMS(       StPropIdArrFromVar, ElementSlot,    OpSideEffect|OpHasImplicitCall)
+MACRO_EXTEND_WMS(       Restify,            Reg4,           OpSideEffect|OpHasImplicitCall)
+MACRO_EXTEND_WMS(       NewPropIdArrForCompProps, Reg1Unsigned1, OpSideEffect)
+
+MACRO_BACKEND_ONLY(BigIntLiteral, Empty, None) // Load BigInt literal
+MACRO_EXTEND_WMS(Conv_Numeric, Reg2, OpSideEffect | OpTempNumberProducing | OpTempNumberTransfer | OpTempObjectSources | OpOpndHasImplicitCall | OpProducesNumber) // Convert to Numeric. [[ToNumeric()]]
+MACRO_EXTEND_WMS(Incr_Num_A, Reg2, OpTempNumberProducing | OpOpndHasImplicitCall | OpDoNotTransfer | OpTempNumberSources | OpTempObjectSources | OpCanCSE | OpPostOpDbgBailOut | OpProducesNumber)     // Increment Numeric
+MACRO_EXTEND_WMS(Decr_Num_A, Reg2, OpTempNumberProducing | OpOpndHasImplicitCall | OpDoNotTransfer | OpTempNumberSources | OpTempObjectSources | OpCanCSE | OpPostOpDbgBailOut | OpProducesNumber)     // Increment Numeric
+MACRO_BACKEND_ONLY(LazyBailOutThunkLabel, Empty, None)
 
 // All SIMD ops are backend only for non-asmjs.
 #define MACRO_SIMD(opcode, asmjsLayout, opCodeAttrAsmJs, OpCodeAttr, ...) MACRO_BACKEND_ONLY(opcode, Empty, OpCodeAttr)

@@ -216,11 +216,8 @@ namespace Js
             AllocateLoopHeaders();
         }
 
-
-
         m_functionWrite->MarkScript(finalByteCodeBlock, finalAuxiliaryBlock, finalAuxiliaryContextBlock,
             m_byteCodeCount, m_byteCodeInLoopCount, m_byteCodeWithoutLDACount);
-
 
 #if ENABLE_PROFILE_INFO
         m_functionWrite->LoadDynamicProfileInfo();
@@ -457,6 +454,11 @@ namespace Js
             isProfiled = true;
             OpCodeUtil::ConvertNonCallOpToProfiled(op);
         }
+        else if (op == Js::OpCode::IsIn && this->m_functionWrite->AllocProfiledLdElemId(&profileId))
+        {
+            isProfiled = true;
+            OpCodeUtil::ConvertNonCallOpToProfiled(op);
+        }
 
         MULTISIZE_LAYOUT_WRITE(Reg3, op, R0, R1, R2);
         if (isProfiled)
@@ -664,12 +666,10 @@ namespace Js
         if (emitProfiledArgout
             && DoDynamicProfileOpcode(InlinePhase)
             && arg > 0 && arg < Js::Constants::MaximumArgumentCountForConstantArgumentInlining
-            && (reg > FunctionBody::FirstRegSlot && reg < m_functionWrite->GetConstantCount())
+            && reg > FunctionBody::FirstRegSlot
             && callSiteId != Js::Constants::NoProfileId
-            && !m_isInDebugMode // We don't inline in debug mode, so no need to emit ProfiledArgOut_A
             )
         {
-            Assert((reg > FunctionBody::FirstRegSlot && reg < m_functionWrite->GetConstantCount()));
             MULTISIZE_LAYOUT_WRITE(Arg, Js::OpCode::ProfiledArgOut_A, arg, reg);
             m_byteCodeData.Encode(&callSiteId, sizeof(Js::ProfileId));
         }
@@ -1301,7 +1301,7 @@ namespace Js
         return false;
     }
 
-    void ByteCodeWriter::Element(OpCode op, RegSlot Value, RegSlot Instance, RegSlot Element, bool instanceAtReturnRegOK)
+    void ByteCodeWriter::Element(OpCode op, RegSlot Value, RegSlot Instance, RegSlot Element, bool instanceAtReturnRegOK, bool forceStrictMode)
     {
         CheckOpen();
         CheckOp(op, OpLayoutType::ElementI);
@@ -1311,7 +1311,7 @@ namespace Js
         Instance = ConsumeReg(Instance);
         Element = ConsumeReg(Element);
 
-        if (this->m_functionWrite->GetIsStrictMode())
+        if (this->m_functionWrite->GetIsStrictMode() || forceStrictMode)
         {
             if (op == OpCode::DeleteElemI_A)
             {
@@ -1401,7 +1401,7 @@ StoreCommon:
         return false;
     }
 
-    void ByteCodeWriter::ScopedProperty(OpCode op, RegSlot value, PropertyIdIndexType propertyIdIndex)
+    void ByteCodeWriter::ScopedProperty(OpCode op, RegSlot value, PropertyIdIndexType propertyIdIndex, bool forceStrictMode)
     {
         CheckOpen();
         CheckOp(op, OpLayoutType::ElementScopedC);
@@ -1424,7 +1424,7 @@ StoreCommon:
         }
 #endif
 
-        if (this->m_functionWrite->GetIsStrictMode())
+        if (this->m_functionWrite->GetIsStrictMode() || forceStrictMode)
         {
             if (op == OpCode::ScopedDeleteFld)
             {
@@ -1448,7 +1448,7 @@ StoreCommon:
         return false;
     }
 
-    void ByteCodeWriter::Property(OpCode op, RegSlot value, RegSlot instance, PropertyIdIndexType propertyIdIndex)
+    void ByteCodeWriter::Property(OpCode op, RegSlot value, RegSlot instance, PropertyIdIndexType propertyIdIndex, bool forceStrictMode)
     {
         CheckOpen();
         CheckOp(op, OpLayoutType::ElementC);
@@ -1477,7 +1477,7 @@ StoreCommon:
         }
 #endif
 
-        if (this->m_functionWrite->GetIsStrictMode())
+        if (this->m_functionWrite->GetIsStrictMode() || forceStrictMode)
         {
             if (op == OpCode::DeleteFld)
             {
@@ -1525,6 +1525,7 @@ StoreCommon:
 #endif
         case OpCode::StObjSlot:
         case OpCode::StObjSlotChkUndecl:
+        case OpCode::StPropIdArrFromVar:
             break;
 
         default:
@@ -1734,6 +1735,21 @@ StoreCommon:
         {
             m_byteCodeData.Encode(&profileId, sizeof(Js::ProfileId));
         }
+    }
+
+    template <typename SizePolicy>
+    bool ByteCodeWriter::TryWriteElementSlotI3(OpCode op, RegSlot value, RegSlot instance, uint32 slotId, RegSlot homeObj)
+    {
+        OpLayoutT_ElementSlotI3<SizePolicy> layout;
+        if (SizePolicy::Assign(layout.Value, value)
+            && SizePolicy::Assign(layout.Instance, instance)
+            && SizePolicy::Assign(layout.SlotIndex, slotId)
+            && SizePolicy::Assign(layout.HomeObj, homeObj))
+        {
+            m_byteCodeData.EncodeT<SizePolicy::LayoutEnum>(op, &layout, sizeof(layout), this);
+            return true;
+        }
+        return false;
     }
 
     template <typename SizePolicy>
@@ -2217,33 +2233,72 @@ StoreCommon:
         MULTISIZE_LAYOUT_WRITE(Class, Js::OpCode::InitClass, constructor, extends);
     }
 
-    void ByteCodeWriter::NewFunction(RegSlot destinationRegister, uint index, bool isGenerator)
+    void ByteCodeWriter::NewFunction(RegSlot destinationRegister, uint index, bool isGenerator, RegSlot homeObjLocation)
     {
         CheckOpen();
 
+        bool hasHomeObj = homeObjLocation != Js::Constants::NoRegister;
         destinationRegister = ConsumeReg(destinationRegister);
-        OpCode opcode = isGenerator ?
-            OpCode::NewScGenFunc :
-            this->m_functionWrite->DoStackNestedFunc() ?
-                OpCode::NewStackScFunc : OpCode::NewScFunc;
+        OpCode opcode = OpCode::NewScFunc;
+        if (isGenerator)
+        {
+            opcode = hasHomeObj ? OpCode::NewScGenFuncHomeObj : OpCode::NewScGenFunc;
+        }
+        else if (this->m_functionWrite->DoStackNestedFunc())
+        {
+            Assert(!hasHomeObj);
+            opcode = OpCode::NewStackScFunc;
+        }
+        else if (hasHomeObj)
+        {
+            opcode = OpCode::NewScFuncHomeObj;
+        }
         Assert(OpCodeAttr::HasMultiSizeLayout(opcode));
 
-        MULTISIZE_LAYOUT_WRITE(ElementSlotI1, opcode, destinationRegister, index);
+        if (hasHomeObj)
+        {
+            homeObjLocation = ConsumeReg(homeObjLocation);
+            MULTISIZE_LAYOUT_WRITE(ElementSlot, opcode, destinationRegister, homeObjLocation, index);
+        }
+        else
+        {
+            MULTISIZE_LAYOUT_WRITE(ElementSlotI1, opcode, destinationRegister, index);
+        }
     }
 
-    void ByteCodeWriter::NewInnerFunction(RegSlot destinationRegister, uint index, RegSlot environmentRegister, bool isGenerator)
+    void ByteCodeWriter::NewInnerFunction(RegSlot destinationRegister, uint index, RegSlot environmentRegister, bool isGenerator, RegSlot homeObjLocation)
     {
         CheckOpen();
+
+        bool hasHomeObj = homeObjLocation != Js::Constants::NoRegister;
 
         destinationRegister = ConsumeReg(destinationRegister);
         environmentRegister = ConsumeReg(environmentRegister);
-        OpCode opcode = isGenerator ?
-                OpCode::NewInnerScGenFunc :
-                this->m_functionWrite->DoStackNestedFunc() ?
-                    OpCode::NewInnerStackScFunc : OpCode::NewInnerScFunc;
+        OpCode opcode = OpCode::NewInnerScFunc;
+        if (isGenerator)
+        {
+            opcode = hasHomeObj ? OpCode::NewInnerScGenFuncHomeObj : OpCode::NewInnerScGenFunc;
+        }
+        else if (this->m_functionWrite->DoStackNestedFunc())
+        {
+            Assert(!hasHomeObj);
+            opcode = OpCode::NewInnerStackScFunc;
+        }
+        else if (hasHomeObj)
+        {
+            opcode = OpCode::NewInnerScFuncHomeObj;
+        }
         Assert(OpCodeAttr::HasMultiSizeLayout(opcode));
 
-        MULTISIZE_LAYOUT_WRITE(ElementSlot, opcode, destinationRegister, environmentRegister, index);
+        if (hasHomeObj)
+        {
+            homeObjLocation = ConsumeReg(homeObjLocation);
+            MULTISIZE_LAYOUT_WRITE(ElementSlotI3, opcode, destinationRegister, environmentRegister, index, homeObjLocation);
+        }
+        else
+        {
+            MULTISIZE_LAYOUT_WRITE(ElementSlot, opcode, destinationRegister, environmentRegister, index);
+        }
     }
 
     template <typename SizePolicy>

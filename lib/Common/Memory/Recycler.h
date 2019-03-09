@@ -5,6 +5,10 @@
 #pragma once
 
 #include "CollectionState.h"
+#include "RecyclerTelemetryInfo.h"
+#include "RecyclerWaitReason.h"
+#include "Common/ObservableValue.h"
+#include "CollectionFlags.h"
 
 namespace Js
 {
@@ -27,48 +31,10 @@ class JavascriptThreadService;
 struct RecyclerMemoryData;
 #endif
 
+class ThreadContext;
+
 namespace Memory
 {
-// NOTE: There is perf lab test infrastructure that takes a dependency on the events in this enumeration. Any modifications may cause
-// errors in ETL analysis or report incorrect numbers. Please verify that the GC events are analyzed correctly with your changes.
-    enum ETWEventGCActivationKind : unsigned
-    {
-        ETWEvent_GarbageCollect                         = 0,      // force in-thread GC
-        ETWEvent_ThreadCollect                          = 1,      // thread GC with wait
-        ETWEvent_ConcurrentCollect                      = 2,
-        ETWEvent_PartialCollect                         = 3,
-
-        ETWEvent_ConcurrentMark                         = 11,
-        ETWEvent_ConcurrentRescan                       = 12,
-        ETWEvent_ConcurrentSweep                        = 13,
-        ETWEvent_ConcurrentTransferSwept                = 14,
-        ETWEvent_ConcurrentFinishMark                   = 15,
-        ETWEvent_ConcurrentSweep_TwoPassSweepPreCheck   = 16,     // Check whether we should do a 2-pass concurrent sweep.
-
-        // The following events are only relevant to the 2-pass concurrent sweep and should not be seen otherwise.
-        ETWEvent_ConcurrentSweep_Pass1                  = 17,     // Concurrent sweep Pass1 of the blocks not getting allocated from during concurrent sweep.
-        ETWEvent_ConcurrentSweep_FinishSweepPrep        = 18,     // Stop allocations and remove all blocks from SLIST so we can finish Pass1 of the remaining blocks.
-        ETWEvent_ConcurrentSweep_FinishPass1            = 19,     // Concurrent sweep Pass1 of the blocks that were set aside for allocations during concurrent sweep.
-        ETWEvent_ConcurrentSweep_Pass2                  = 20,     // Concurrent sweep Pass1 of the blocks not getting allocated from during concurrent sweep.
-        ETWEvent_ConcurrentSweep_FinishTwoPassSweep     = 21,     // Drain the SLIST at the end of the 2-pass concurrent sweep and begin normal allocations.
-    };
-
-#define IS_UNKNOWN_GC_TRIGGER(v)    (v == ETWEvent_GC_Trigger_Unknown)
-
-    enum ETWEventGCActivationTrigger : unsigned
-    {
-        ETWEvent_GC_Trigger_Unknown                                    = 0,
-        ETWEvent_GC_Trigger_IdleCollect                                = 1,
-        ETWEvent_GC_Trigger_Partial_GC_AllocSize_Heuristic             = 2,
-        ETWEvent_GC_Trigger_TimeAndAllocSize_Heuristic                 = 3,
-        ETWEvent_GC_Trigger_TimeAndAllocSizeIfScriptActive_Heuristic   = 4,
-        ETWEvent_GC_Trigger_TimeAndAllocSizeIfInScript_Heuristic       = 5,
-        ETWEvent_GC_Trigger_NoHeuristic                                = 6,
-        ETWEvent_GC_Trigger_Status_Completed                           = 7,
-        ETWEvent_GC_Trigger_Status_StartedConcurrent                   = 8,
-        ETWEvent_GC_Trigger_Status_Failed                              = 9,
-        ETWEvent_GC_Trigger_Status_FailedTimeout                       = 10
-    };
 
 template <typename T> class RecyclerRootPtr;
 
@@ -155,6 +121,48 @@ template<ObjectInfoBits infoBits>
 struct InfoBitsWrapper{};
 
 
+#if ENABLE_WEAK_REFERENCE_REGIONS
+template<typename T>
+static constexpr bool is_pointer = false;
+template<typename K>
+static constexpr bool is_pointer<K*> = true;
+
+template<typename T>
+class RecyclerWeakReferenceRegionItem {
+    static_assert(is_pointer<T>, "Weak references must be to pointer types");
+    friend class Recycler;
+public:
+    RecyclerWeakReferenceRegionItem() : ptr(T()), heapBlock(nullptr) {};
+    operator T() const { return ptr; };
+    T operator=(T newPtr) {
+        Assert(ptr == nullptr); // For safety with concurrent marking, only allow setting the pointer to non-null from null
+        heapBlock = nullptr;
+        return ptr = newPtr;
+    };
+
+    void Clear() { heapBlock = nullptr; ptr = nullptr; };
+private:
+    RecyclerWeakReferenceRegionItem(RecyclerWeakReferenceRegionItem<T>&) = delete;
+
+    FieldNoBarrier(T) ptr;
+    FieldNoBarrier(HeapBlock*) heapBlock; // Note: the low bit of the heapBlock is used for background marking
+};
+
+class RecyclerWeakReferenceRegion {
+    friend class Recycler;
+public:
+    RecyclerWeakReferenceRegionItem<void*>* GetPtr() const { return ptr; }
+    size_t GetCount() const { return count; }
+    HeapBlock* GetHeapBlock() const { return arrayHeapBlock; }
+private:
+    FieldNoBarrier(RecyclerWeakReferenceRegionItem<void*>*) ptr;
+    FieldNoBarrier(size_t) count;
+    FieldNoBarrier(HeapBlock*) arrayHeapBlock;
+};
+
+#endif
+
+
 // Allocation macro
 
 #define RecyclerNew(recycler,T,...) AllocatorNewBase(Recycler, recycler, AllocInlined, T, __VA_ARGS__)
@@ -169,6 +177,7 @@ struct InfoBitsWrapper{};
 #define RecyclerNewFinalized(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocFinalizedInlined, T, __VA_ARGS__)))
 #define RecyclerNewFinalizedPlus(recycler, size, T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewPlusBase(Recycler, recycler, AllocFinalized, size, T, __VA_ARGS__)))
 #define RecyclerNewTracked(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocTrackedInlined, T, __VA_ARGS__)))
+#define RecyclerNewTrackedPlus(recycler, size, T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewPlusBase(Recycler, recycler, AllocTracked, size, T, __VA_ARGS__)))
 #define RecyclerNewEnumClass(recycler, enumClass, T, ...) new (TRACK_ALLOC_INFO(static_cast<Recycler *>(recycler), T, Recycler, 0, (size_t)-1), InfoBitsWrapper<enumClass>()) T(__VA_ARGS__)
 #define RecyclerNewWithInfoBits(recycler, infoBits, T, ...) new (TRACK_ALLOC_INFO(static_cast<Recycler *>(recycler), T, Recycler, 0, (size_t)-1), InfoBitsWrapper<infoBits>()) T(__VA_ARGS__)
 #define RecyclerNewFinalizedClientTracked(recycler,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewBase(Recycler, recycler, AllocFinalizedClientTrackedInlined, T, __VA_ARGS__)))
@@ -224,10 +233,11 @@ struct InfoBitsWrapper{};
 #define RecyclerNewTrackedLeafPlusZ(recycler,size,T,...) static_cast<T *>(static_cast<FinalizableObject *>(AllocatorNewPlusBase(Recycler, recycler, AllocZeroTrackedLeafInlined, size, T, __VA_ARGS__)))
 
 #ifdef RECYCLER_VISITED_HOST
-#define RecyclerAllocVisitedHostTracedAndFinalizedZero(recycler,size) recycler->AllocVisitedHost<RecyclerVisitedHostTracedFinalizableBits>(size)
-#define RecyclerAllocVisitedHostFinalizedZero(recycler,size) recycler->AllocVisitedHost<RecyclerVisitedHostFinalizableBits>(size)
-#define RecyclerAllocVisitedHostTracedZero(recycler,size) recycler->AllocVisitedHost<RecyclerVisitedHostTracedBits>(size)
-#define RecyclerAllocLeafZero(recycler,size) recycler->AllocVisitedHost<LeafBit>(size)
+// We need to track these allocations. The RecyclerVisitedHost* object allocation APIs don't provide us with the type of the objects being allocated. Use the DummyVTableObject type used elsewhere to track the allocations.
+#define RecyclerAllocVisitedHostTracedAndFinalized(recycler,size) (TRACK_ALLOC_INFO(recycler, DummyVTableObject, Recycler, size, (size_t)-1))->AllocVisitedHost<RecyclerVisitedHostTracedFinalizableBits>(size)
+#define RecyclerAllocVisitedHostFinalized(recycler,size) (TRACK_ALLOC_INFO(recycler, DummyVTableObject, Recycler, size, (size_t)-1))->AllocVisitedHost<RecyclerVisitedHostFinalizableBits>(size)
+#define RecyclerAllocVisitedHostTraced(recycler,size) (TRACK_ALLOC_INFO(recycler, DummyVTableObject, Recycler, size, (size_t)-1))->AllocVisitedHost<RecyclerVisitedHostTracedBits>(size)
+#define RecyclerAllocLeaf(recycler,size) (TRACK_ALLOC_INFO(recycler, DummyVTableObject, Recycler, size, (size_t)-1))->AllocVisitedHost<LeafBit>(size)
 #endif
 
 #ifdef TRACE_OBJECT_LIFETIME
@@ -295,85 +305,9 @@ struct InfoBitsWrapper{};
 
 typedef void (__cdecl* ExternalRootMarker)(void *);
 
-enum CollectionFlags
-{
-    CollectHeuristic_AllocSize          = 0x00000001,
-    CollectHeuristic_Time               = 0x00000002,
-    CollectHeuristic_TimeIfScriptActive = 0x00000004,
-    CollectHeuristic_TimeIfInScript     = 0x00000008,
-    CollectHeuristic_Never              = 0x00000080,
-    CollectHeuristic_Mask               = 0x000000FF,
-
-    CollectOverride_FinishConcurrent    = 0x00001000,
-    CollectOverride_ExhaustiveCandidate = 0x00002000,
-    CollectOverride_ForceInThread       = 0x00004000,
-    CollectOverride_AllowDispose        = 0x00008000,
-    CollectOverride_AllowReentrant      = 0x00010000,
-    CollectOverride_ForceFinish         = 0x00020000,
-    CollectOverride_Explicit            = 0x00040000,
-    CollectOverride_DisableIdleFinish   = 0x00080000,
-    CollectOverride_BackgroundFinishMark= 0x00100000,
-    CollectOverride_FinishConcurrentTimeout = 0x00200000,
-    CollectOverride_NoExhaustiveCollect = 0x00400000,
-    CollectOverride_SkipStack           = 0x01000000,
-    CollectOverride_CheckScriptContextClose = 0x02000000,
-    CollectMode_Partial                 = 0x08000000,
-    CollectMode_Concurrent              = 0x10000000,
-    CollectMode_Exhaustive              = 0x20000000,
-    CollectMode_DecommitNow             = 0x40000000,
-    CollectMode_CacheCleanup            = 0x80000000,
-
-    CollectNowForceInThread         = CollectOverride_ForceInThread,
-    CollectNowForceInThreadExternal = CollectOverride_ForceInThread | CollectOverride_AllowDispose,
-    CollectNowForceInThreadExternalNoStack = CollectOverride_ForceInThread | CollectOverride_AllowDispose | CollectOverride_SkipStack,
-    CollectNowDefault               = CollectOverride_FinishConcurrent,
-    CollectNowDefaultLSCleanup      = CollectOverride_FinishConcurrent | CollectOverride_AllowDispose,
-    CollectNowDecommitNowExplicit   = CollectNowDefault | CollectMode_DecommitNow | CollectMode_CacheCleanup | CollectOverride_Explicit | CollectOverride_AllowDispose,
-    CollectNowConcurrent            = CollectOverride_FinishConcurrent | CollectMode_Concurrent,
-    CollectNowExhaustive            = CollectOverride_FinishConcurrent | CollectMode_Exhaustive | CollectOverride_AllowDispose,
-    CollectNowPartial               = CollectOverride_FinishConcurrent | CollectMode_Partial,
-    CollectNowConcurrentPartial     = CollectMode_Concurrent | CollectNowPartial,
-
-    CollectOnAllocation             = CollectHeuristic_AllocSize | CollectHeuristic_Time | CollectMode_Concurrent | CollectMode_Partial | CollectOverride_FinishConcurrent | CollectOverride_AllowReentrant | CollectOverride_FinishConcurrentTimeout,
-    CollectOnTypedArrayAllocation   = CollectHeuristic_AllocSize | CollectHeuristic_Time | CollectMode_Concurrent | CollectMode_Partial | CollectOverride_FinishConcurrent | CollectOverride_AllowReentrant | CollectOverride_FinishConcurrentTimeout | CollectOverride_AllowDispose,
-    CollectOnScriptIdle             = CollectOverride_CheckScriptContextClose | CollectOverride_FinishConcurrent | CollectMode_Concurrent | CollectMode_CacheCleanup | CollectOverride_SkipStack,
-    CollectOnScriptExit             = CollectOverride_CheckScriptContextClose | CollectHeuristic_AllocSize | CollectOverride_FinishConcurrent | CollectMode_Concurrent | CollectMode_CacheCleanup,
-    CollectExhaustiveCandidate      = CollectHeuristic_Never | CollectOverride_ExhaustiveCandidate,
-    CollectOnScriptCloseNonPrimary  = CollectNowConcurrent | CollectOverride_ExhaustiveCandidate | CollectOverride_AllowDispose,
-    CollectOnRecoverFromOutOfMemory = CollectOverride_ForceInThread | CollectMode_DecommitNow,
-    CollectOnSuspendCleanup         = CollectNowConcurrent | CollectMode_Exhaustive | CollectMode_DecommitNow | CollectOverride_DisableIdleFinish,
-
-    FinishConcurrentOnIdle          = CollectMode_Concurrent | CollectOverride_DisableIdleFinish,
-    FinishConcurrentOnIdleAtRoot    = CollectMode_Concurrent | CollectOverride_DisableIdleFinish | CollectOverride_SkipStack,
-    FinishConcurrentDefault         = CollectMode_Concurrent | CollectOverride_DisableIdleFinish | CollectOverride_BackgroundFinishMark,
-    FinishConcurrentOnExitScript    = FinishConcurrentDefault,
-    FinishConcurrentOnEnterScript   = FinishConcurrentDefault,
-    FinishConcurrentOnAllocation    = FinishConcurrentDefault,
-    FinishDispose                   = CollectOverride_AllowDispose,
-    FinishDisposeTimed              = CollectOverride_AllowDispose | CollectHeuristic_TimeIfScriptActive,
-    ForceFinishCollection           = CollectOverride_ForceFinish | CollectOverride_ForceInThread,
-
-#ifdef RECYCLER_STRESS
-    CollectStress                   = CollectNowForceInThread,
-#if ENABLE_PARTIAL_GC
-    CollectPartialStress            = CollectMode_Partial,
-#endif
-#if ENABLE_CONCURRENT_GC
-    CollectBackgroundStress         = CollectNowDefault,
-    CollectConcurrentStress         = CollectNowConcurrent,
-#if ENABLE_PARTIAL_GC
-    CollectConcurrentPartialStress  = CollectConcurrentStress | CollectPartialStress,
-#endif
-#endif
-#endif
-
-#if defined(CHECK_MEMORY_LEAK) || defined(LEAK_REPORT)
-    CollectNowFinalGC                   = CollectNowExhaustive | CollectOverride_ForceInThread | CollectOverride_SkipStack | CollectOverride_Explicit | CollectOverride_AllowDispose,
-#endif
-#ifdef ENABLE_DEBUG_CONFIG_OPTIONS
-    CollectNowExhaustiveSkipStack   = CollectNowExhaustive | CollectOverride_SkipStack, // Used by test
-#endif
-};
+typedef void (*DOMWrapperTracingCallback)(_In_opt_ void *data);
+typedef bool (*DOMWrapperTracingDoneCallback)(_In_opt_ void *data);
+typedef void (*DOMWrapperTracingEnterFinalPauseCallback)(_In_opt_ void *data);
 
 class RecyclerCollectionWrapper
 {
@@ -395,6 +329,7 @@ public:
     virtual BOOL ExecuteRecyclerCollectionFunction(Recycler * recycler, CollectionFunction function, CollectionFlags flags) = 0;
     virtual uint GetRandomNumber() = 0;
     virtual bool DoSpecialMarkOnScanStack() = 0;
+    virtual void OnScanStackCallback(void ** stackTop, size_t byteCount, void ** registers, size_t registersByteCount) = 0;
     virtual void PostSweepRedeferralCallBack() = 0;
 
 #ifdef FAULT_INJECTION
@@ -409,6 +344,9 @@ public:
 #if DBG || defined(PROFILE_EXEC)
     virtual bool AsyncHostOperationStart(void *) = 0;
     virtual void AsyncHostOperationEnd(bool wasInAsync, void *) = 0;
+#endif
+#if DBG
+    virtual void CheckJsReentrancyOnDispose() = 0;
 #endif
 
     BOOL GetIsScriptContextCloseGCPending()
@@ -426,8 +364,58 @@ public:
         _isScriptContextCloseGCPending = TRUE;
     }
 
+    void SetDOMWrapperTracingCallback(DOMWrapperTracingCallback callback)
+    {
+        wrapperTracingCallback = callback;
+    }
+
+    void SetWrapperTracingCallbackState(void * state)
+    {
+        wrapperTracingCallbackState = state;
+    }
+
+    void SetDOMWrapperTracingEnterFinalPauseCallback(DOMWrapperTracingEnterFinalPauseCallback callback)
+    {
+        wrapperTracingEnterFinalPauseCallback = callback;
+    }
+
+    void SetDOMWrapperTracingDoneCallback(DOMWrapperTracingDoneCallback callback)
+    {
+        wrapperTracingDoneCallback = callback;
+    }
+
+    void EndMarkDomWrapperTracingCallback()
+    {
+        if (this->wrapperTracingCallback)
+        {
+            this->wrapperTracingCallback(this->wrapperTracingCallbackState);
+        }
+    }
+
+    bool EndMarkDomWrapperTracingDoneCallback()
+    {
+        if (this->wrapperTracingDoneCallback)
+        {
+            return this->wrapperTracingDoneCallback(this->wrapperTracingCallbackState);
+        }
+
+        return true;
+    }
+
+    void EndMarkDomWrapperTracingEnterFinalPauseCallback()
+    {
+        if (this->wrapperTracingEnterFinalPauseCallback)
+        {
+            this->wrapperTracingEnterFinalPauseCallback(this->wrapperTracingCallbackState);
+        }
+    }
+
 protected:
     BOOL _isScriptContextCloseGCPending;
+    void * wrapperTracingCallbackState;
+    DOMWrapperTracingCallback wrapperTracingCallback;
+    DOMWrapperTracingDoneCallback wrapperTracingDoneCallback;
+    DOMWrapperTracingEnterFinalPauseCallback wrapperTracingEnterFinalPauseCallback;
 };
 
 class DefaultRecyclerCollectionWrapper : public RecyclerCollectionWrapper
@@ -445,6 +433,7 @@ public:
     virtual BOOL ExecuteRecyclerCollectionFunction(Recycler * recycler, CollectionFunction function, CollectionFlags flags) override;
     virtual uint GetRandomNumber() override { return 0; }
     virtual bool DoSpecialMarkOnScanStack() override { return false; }
+    virtual void OnScanStackCallback(void ** stackTop, size_t byteCount, void ** registers, size_t registersByteCount) override {};
     virtual void PostSweepRedeferralCallBack() override {}
 #ifdef FAULT_INJECTION
     virtual void DisposeScriptContextByFaultInjectionCallBack() override {};
@@ -459,6 +448,9 @@ public:
 #if DBG || defined(PROFILE_EXEC)
     virtual bool AsyncHostOperationStart(void *) override { return false; };
     virtual void AsyncHostOperationEnd(bool wasInAsync, void *) override {};
+#endif
+#if DBG
+    virtual void CheckJsReentrancyOnDispose() override {}
 #endif
     static DefaultRecyclerCollectionWrapper Instance;
 
@@ -601,6 +593,8 @@ struct CollectionParam
 #if ENABLE_CONCURRENT_GC
 class RecyclerParallelThread
 {
+    friend class ThreadContext;
+
 public:
     typedef void (Recycler::* WorkFunc)();
 
@@ -670,6 +664,10 @@ class Recycler
 #ifdef ENABLE_DEBUG_CONFIG_OPTIONS
     friend class AutoProtectPages;
 #endif
+#ifdef ENABLE_BASIC_TELEMETRY
+    friend class RecyclerTelemetryInfo;
+#endif
+
 
     template <typename T> friend class RecyclerWeakReference;
     template <typename T> friend class WeakReferenceHashTable;
@@ -739,12 +737,12 @@ private:
             _recycler(recycler),
             _exitState(exitState)
         {
-            _recycler->collectionState = entryState;
+            _recycler->SetCollectionState(entryState);
         }
 
         ~AutoSwitchCollectionStates()
         {
-            _recycler->collectionState = _exitState;
+            _recycler->SetCollectionState(_exitState);
         }
 
     private:
@@ -753,12 +751,50 @@ private:
     };
 
 #if defined(ENABLE_JS_ETW)
-    uint collectionStartReason;
+    ETWEventGCActivationTrigger collectionStartReason;
     CollectionFlags collectionStartFlags;
-    uint collectionFinishReason;
+    ETWEventGCActivationTrigger collectionFinishReason;
 #endif
 
-    CollectionState collectionState;
+    class CollectionStateChangedObserver : public ObservableValueObserver<CollectionState>
+    {
+    private:
+        Recycler* recycler;
+    public:
+        CollectionStateChangedObserver(Recycler* recycler)
+        {
+            this->recycler = recycler;
+        }
+
+        virtual void ValueChanged(const CollectionState& newVal, const CollectionState& oldVal)
+        {
+#ifdef ENABLE_BASIC_TELEMETRY
+            if (oldVal == CollectionState::CollectionStateNotCollecting && 
+                newVal != CollectionState::CollectionStateNotCollecting && 
+                newVal != CollectionState::Collection_PreCollection && 
+                newVal != CollectionState::CollectionStateExit)
+            {
+                this->recycler->GetRecyclerTelemetryInfo().StartPass(newVal);
+            }
+            else if (oldVal != CollectionState::CollectionStateNotCollecting && 
+                oldVal != CollectionState::Collection_PreCollection && 
+                oldVal != CollectionState::CollectionStateExit &&
+                newVal == CollectionState::CollectionStateNotCollecting)
+            {
+                this->recycler->GetRecyclerTelemetryInfo().EndPass(oldVal);
+            }
+#endif
+        }
+    };
+
+    CollectionStateChangedObserver collectionStateChangedObserver;
+    ObservableValue<CollectionState> collectionState;
+
+    inline void SetCollectionState(CollectionState newState)
+    {
+        this->collectionState = newState;
+    }
+
     JsUtil::ThreadService *threadService;
 #if ENABLE_ALLOCATIONS_DURING_CONCURRENT_SWEEP
     bool allowAllocationsDuringConcurrentSweepForCollection;
@@ -799,6 +835,9 @@ private:
 
     WeakReferenceHashTable<PrimePolicy> weakReferenceMap;
     uint weakReferenceCleanupId;
+#if ENABLE_WEAK_REFERENCE_REGIONS
+    SList<RecyclerWeakReferenceRegion, HeapAllocator> weakReferenceRegionList;
+#endif
 
     void * transientPinnedObject;
 #if defined(CHECK_MEMORY_LEAK) || defined(LEAK_REPORT)
@@ -827,7 +866,7 @@ private:
     inline bool ShouldCapturePageHeapAllocStack() const { return capturePageHeapAllocStack; }
     void VerifyPageHeapFillAfterAlloc(char* memBlock, size_t size, ObjectInfoBits attributes);
 #else
-    inline const bool IsPageHeapEnabled() const { return false; }
+    inline bool IsPageHeapEnabled() const { return false; }
     inline bool ShouldCapturePageHeapAllocStack() const { return false; }
 #endif
 
@@ -930,7 +969,9 @@ private:
     bool allowDispose;
     bool inDisposeWrapper;
     bool needOOMRescan;
+    bool needExternalWrapperTracing;
     bool hasDisposableObject;
+    bool hasNativeGCHost;
     DWORD tickCountNextDispose;
     bool inExhaustiveCollection;
     bool hasExhaustiveCandidate;
@@ -1083,6 +1124,11 @@ private:
         return this->autoHeap.GetDefaultHeap();
     }
 
+    HeapInfo * GetHeapInfo()
+    {
+        return this->autoHeap.GetDefaultHeap();
+    }
+
 #ifdef PROFILE_MEM
     RecyclerMemoryData * memoryData;
 #endif
@@ -1099,6 +1145,22 @@ private:
     RecyclerWatsonTelemetryBlock localTelemetryBlock;
     RecyclerWatsonTelemetryBlock * telemetryBlock;
 #endif
+
+#ifdef ENABLE_BASIC_TELEMETRY
+private:
+    RecyclerTelemetryInfo telemetryStats;
+    GUID recyclerID;
+public:
+    GUID& GetRecyclerID() { return this->recyclerID; }
+#endif
+  
+
+public:
+    bool GetIsInScript() { return this->isInScript; }
+    bool GetIsScriptActive() { return this->isScriptActive; }
+
+private:
+
 #ifdef RECYCLER_STATS
     RecyclerCollectionStats collectionStats;
     void PrintHeapBlockStats(char16 const * name, HeapBlock::HeapBlockType type);
@@ -1127,7 +1189,8 @@ public:
 #endif
 public:
 
-    Recycler(AllocationPolicyManager * policyManager, IdleDecommitPageAllocator * pageAllocator, void(*outOfMemoryFunc)(), Js::ConfigFlagsTable& flags);
+    Recycler(AllocationPolicyManager * policyManager, IdleDecommitPageAllocator * pageAllocator, void(*outOfMemoryFunc)(), Js::ConfigFlagsTable& flags, RecyclerTelemetryHostInterface* hostInterface);
+
     ~Recycler();
 
     void Initialize(const bool forceInThread, JsUtil::ThreadService *threadService, const bool deferThreadStartup = false
@@ -1147,6 +1210,8 @@ public:
 #ifdef NTBUILD
     void SetTelemetryBlock(RecyclerWatsonTelemetryBlock * telemetryBlock) { this->telemetryBlock = telemetryBlock; }
 #endif
+    
+    uint GetPinnedObjectCount() const { return this->pinnedObjectMap.Count(); }
 
     void Prime();
     void* GetOwnerContext() { return (void*) this->collectionWrapper; }
@@ -1167,6 +1232,10 @@ public:
     void SetIsThreadBound();
     void SetIsScriptActive(bool isScriptActive);
     void SetIsInScript(bool isInScript);
+    bool HasNativeGCHost() const;
+    void SetHasNativeGCHost();
+    void SetNeedExternalWrapperTracing();
+    void ClearNeedExternalWrapperTracing();
     bool ShouldIdleCollectOnExit();
     void ScheduleNextCollection();
 
@@ -1197,6 +1266,7 @@ public:
 #endif
 
     // FindRoots
+    void TryExternalMarkNonInterior(void * candidate);
     void TryMarkNonInterior(void* candidate, void* parentReference = nullptr);
     void TryMarkInterior(void *candidate, void* parentReference = nullptr);
 
@@ -1342,11 +1412,16 @@ public:
     template <ObjectInfoBits infoBits>
     char * AllocVisitedHost(DECLSPEC_GUARD_OVERFLOW size_t size)
     {
-        return AllocZeroWithAttributes<infoBits, /* nothrow = */ true>(size);
+        return AllocWithAttributes<infoBits, /* nothrow = */ true>(size);
     }
 
     template<typename T>
     RecyclerWeakReference<T>* CreateWeakReferenceHandle(T* pStrongReference);
+#if ENABLE_WEAK_REFERENCE_REGIONS
+    template<typename T>
+    RecyclerWeakReferenceRegionItem<T>* CreateWeakReferenceRegion(size_t count);
+#endif
+
     uint GetWeakReferenceCleanupId() const { return weakReferenceCleanupId; }
 
     template<typename T>
@@ -1585,6 +1660,7 @@ private:
     void DoParallelMark();
     void DoBackgroundParallelMark();
 #endif
+    void FinishWrapperObjectTracing();
 
     size_t RootMark(CollectionState markState);
 
@@ -1737,11 +1813,15 @@ private:
 
     template <CollectionFlags flags>
     BOOL TryFinishConcurrentCollect();
-    BOOL WaitForConcurrentThread(DWORD waitTime);
+
+    BOOL WaitForConcurrentThread(DWORD waitTime, RecyclerWaitReason caller = RecyclerWaitReason::Other);
+    void FlushBackgroundPages();
+
     BOOL FinishConcurrentCollect(CollectionFlags flags);
     void FinishTransferSwept(CollectionFlags flags);
     BOOL FinishConcurrentCollectWrapped(CollectionFlags flags);
     void BackgroundMark();
+    void BackgroundMarkWeakRefs();
     void BackgroundResetMarks();
     void PrepareBackgroundFindRoots();
     void RevertPrepareBackgroundFindRoots();
@@ -1795,6 +1875,7 @@ private:
     friend class HeapInfo;
     friend class HeapInfoManager;
     friend class LargeHeapBucket;
+    friend class ThreadContext;
 
     template <typename TBlockType>
     friend class HeapBucketT;
@@ -1832,6 +1913,10 @@ private:
     // in projection ExternalMark allowing allocating VarToDispEx. This is the common flag
     // while we have debug only flag for each of the two scenarios.
     bool isCollectionDisabled;
+
+#ifdef ENABLE_BASIC_TELEMETRY
+    RecyclerTelemetryInfo& GetRecyclerTelemetryInfo() { return this->telemetryStats; }
+#endif
 
 #ifdef TRACK_ALLOC
 public:
@@ -2016,22 +2101,25 @@ public:
         ObjectBeforeCollectCallbackWrapper callbackWrapper,
         void* threadContext);
     void ClearObjectBeforeCollectCallbacks();
+    void SetDOMWrapperTracingCallback(void * state, DOMWrapperTracingCallback tracingCallback, DOMWrapperTracingDoneCallback tracingDoneCallback, DOMWrapperTracingEnterFinalPauseCallback enterFinalPauseCallback);
+    void ClearDOMWrapperTracingCallback();
     bool IsInObjectBeforeCollectCallback() const { return objectBeforeCollectCallbackState != ObjectBeforeCollectCallback_None; }
 private:
     struct ObjectBeforeCollectCallbackData
     {
+        void* object;
         ObjectBeforeCollectCallback callback;
         void* callbackState;
         void* threadContext;
         ObjectBeforeCollectCallbackWrapper callbackWrapper;
 
         ObjectBeforeCollectCallbackData() {}
-        ObjectBeforeCollectCallbackData(ObjectBeforeCollectCallbackWrapper callbackWrapper, ObjectBeforeCollectCallback callback, void* callbackState, void* threadContext) :
-            callbackWrapper(callbackWrapper), callback(callback), callbackState(callbackState), threadContext(threadContext) {}
+        ObjectBeforeCollectCallbackData(void* object, ObjectBeforeCollectCallbackWrapper callbackWrapper, ObjectBeforeCollectCallback callback, void* callbackState, void* threadContext) :
+            object(object), callbackWrapper(callbackWrapper), callback(callback), callbackState(callbackState), threadContext(threadContext) {}
     };
-    typedef JsUtil::BaseDictionary<void*, ObjectBeforeCollectCallbackData, HeapAllocator,
-        PrimeSizePolicy, RecyclerPointerComparer, JsUtil::SimpleDictionaryEntry, JsUtil::NoResizeLock> ObjectBeforeCollectCallbackMap;
-    ObjectBeforeCollectCallbackMap* objectBeforeCollectCallbackMap;
+    typedef SList<ObjectBeforeCollectCallbackData> ObjectBeforeCollectCallbackList;
+    ObjectBeforeCollectCallbackList* objectBeforeCollectCallbackList;
+    ArenaAllocator objectBeforeCollectCallbackArena;
 
     enum ObjectBeforeCollectCallbackState
     {
@@ -2648,7 +2736,6 @@ bool Recycler::DoExternalAllocation(size_t size, ExternalAllocFunc externalAlloc
     AutoExternalAllocation externalAllocation(this, size);
     if (externalAllocFunc())
     {
-        this->AddExternalMemoryUsage(size);
         externalAllocation.allocationSucceeded = true;
         return true;
     }

@@ -63,7 +63,7 @@ public:
     static void             ChangeToSub(IR::Instr *const instr, const bool needFlags);
     static void             ChangeToShift(IR::Instr *const instr, const bool needFlags);
     static void             ChangeToIMul(IR::Instr *const instr, const bool hasOverflowCheck = false);
-    static const uint16     GetFormalParamOffset();
+    static uint16           GetFormalParamOffset();
     static const Js::OpCode MDUncondBranchOpcode;
     static const Js::OpCode MDMultiBranchOpcode;
     static const Js::OpCode MDExtend32Opcode;
@@ -80,6 +80,8 @@ public:
     static const Js::OpCode MDCallOpcode;
     static const Js::OpCode MDImulOpcode;
     static const Js::OpCode MDLea;
+    static const Js::OpCode MDSpecBlockNEOpcode;
+    static const Js::OpCode MDSpecBlockFNEOpcode;
 
     UINT FloatPrefThreshold;
 
@@ -141,7 +143,7 @@ public:
 #if FLOATVAR
             IR::RegOpnd*    CheckFloatAndUntag(IR::RegOpnd * opndSrc, IR::Instr * insertInstr, IR::LabelInstr* labelHelper);
 #endif
-            bool            GenerateFastCmSrEqConst(IR::Instr *instr);
+            bool            GenerateFastCmSrXxConst(IR::Instr *instr);
             bool            GenerateFastCmXxTaggedInt(IR::Instr *instr, bool isInHelper = false);
             void            GenerateFastCmXxI4(IR::Instr *instr);
             void            GenerateFastCmXxR8(IR::Instr *instr);
@@ -169,6 +171,7 @@ public:
             void            GenerateCheckForArgumentsLength(IR::Instr* ldElem, IR::LabelInstr* labelCreateHeapArgs, IR::Opnd* actualParamOpnd, IR::Opnd* valueOpnd, Js::OpCode);
             IR::RegOpnd *   LoadNonnegativeIndex(IR::RegOpnd *indexOpnd, const bool skipNegativeCheck, IR::LabelInstr *const notTaggedIntLabel, IR::LabelInstr *const negativeLabel, IR::Instr *const insertBeforeInstr);
             IR::RegOpnd *   GenerateUntagVar(IR::RegOpnd * opnd, IR::LabelInstr * labelFail, IR::Instr * insertBeforeInstr, bool generateTagCheck = true);
+            bool            GenerateFastLdMethodFromFlags(IR::Instr * instrLdFld);
             IR::Instr *     GenerateFastScopedLdFld(IR::Instr * instrLdFld);
             IR::Instr *     GenerateFastScopedStFld(IR::Instr * instrStFld);
             void            GenerateFastAbs(IR::Opnd *dst, IR::Opnd *src, IR::Instr *callInstr, IR::Instr *insertInstr, IR::LabelInstr *labelHelper, IR::LabelInstr *doneLabel);
@@ -182,14 +185,10 @@ public:
             IR::RegOpnd*    MaterializeConstFromBits(int intConst, IRType type, IR::Instr* instr);
             IR::Opnd*       Subtract2To31(IR::Opnd* src1, IR::Opnd* intMinFP, IRType type, IR::Instr* instr);
             bool            TryGenerateFastMulAdd(IR::Instr * instrAdd, IR::Instr ** pInstrPrev);
-            BVSparse<JitArenaAllocator>* GatherFltTmps();
             void            GenerateFastInlineBuiltInCall(IR::Instr* instr, IR::JnHelperMethod helperMethod);
             void            HelperCallForAsmMathBuiltin(IR::Instr* instr, IR::JnHelperMethod helperMethodFloat, IR::JnHelperMethod helperMethodDouble);
             void            GenerateFastInlineBuiltInMathAbs(IR::Instr* instr);
             void            GenerateFastInlineBuiltInMathPow(IR::Instr* instr);
-            IR::Instr *     CheckIsOpndNegZero(IR::Opnd* opnd, IR::Instr* instr, IR::LabelInstr* isNeg0Label);
-            IR::Instr *     CloneSlowPath(IR::Instr * instrEndFloatRange, IR::Instr * instrInsert);
-            bool            IsCloneDone(IR::Instr * instr, BVSparse<JitArenaAllocator> *bvTmps);
             IR::Instr *     EnsureAdjacentArgs(IR::Instr * instrArg);
             void            SaveDoubleToVar(IR::RegOpnd * dstOpnd, IR::RegOpnd *opndFloat, IR::Instr *instrOrig, IR::Instr *instrInsert, bool isHelper = false);
 #if !FLOATVAR
@@ -225,6 +224,7 @@ public:
             void            EmitLoadFloatFromNumber(IR::Opnd *dst, IR::Opnd *src, IR::Instr *insertInstr);
             void            EmitLoadFloat(IR::Opnd *dst, IR::Opnd *src, IR::Instr *insertInstr, IR::Instr * instrBailOut = nullptr, IR::LabelInstr * labelBailOut = nullptr);
             static void     EmitNon32BitOvfCheck(IR::Instr *instr, IR::Instr *insertInstr, IR::LabelInstr* bailOutLabel);
+            IR::BranchInstr* InsertMissingItemCompareBranch(IR::Opnd* compareSrc, IR::Opnd* missingItemOpnd, Js::OpCode opcode, IR::LabelInstr* target, IR::Instr* insertBeforeInstr);
 
             static void     LowerInt4NegWithBailOut(IR::Instr *const instr, const IR::BailOutKind bailOutKind, IR::LabelInstr *const bailOutLabel, IR::LabelInstr *const skipBailOutLabel);
             static void     LowerInt4AddWithBailOut(IR::Instr *const instr, const IR::BailOutKind bailOutKind, IR::LabelInstr *const bailOutLabel, IR::LabelInstr *const skipBailOutLabel);
@@ -249,7 +249,7 @@ public:
             void            GenerateIsJsObjectTest(IR::RegOpnd* instanceReg, IR::Instr* insertInstr, IR::LabelInstr* labelHelper);
             void            LowerTypeof(IR::Instr * typeOfInstr);
 
-     static void            InsertObjectPoison(IR::Opnd* poisonedOpnd, IR::BranchInstr* branchInstr, IR::Instr* insertInstr);
+     static void            InsertObjectPoison(IR::Opnd* poisonedOpnd, IR::BranchInstr* branchInstr, IR::Instr* insertInstr, bool isForStore);
 public:
             //
             // These methods are simply forwarded to lowererMDArch

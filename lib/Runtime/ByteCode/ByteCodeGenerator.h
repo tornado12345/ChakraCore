@@ -33,6 +33,7 @@ private:
     uint dynamicScopeCount;
     uint loopDepth;
     uint16 m_callSiteId;
+    uint16 m_callApplyCallSiteCount;
     bool isBinding;
     bool trackEnvDepth;
     bool funcEscapes;
@@ -64,6 +65,13 @@ public:
     static const unsigned int DefaultArraySize = 0;  // This __must__ be '0' so that "(new Array()).length == 0"
     static const unsigned int MinArgumentsForCallOptimization = 16;
     bool forceNoNative;
+
+    // A flag that when set will force bytecode opcodes to be emitted in strict mode when avaliable.
+    // This flag is set outside of emit calls under the condition that the bytecode being emitted
+    // corresponds to computed property names within classes. This fixes a bug where computed property
+    // names would not enforce strict mode when inside a class even though the spec requires that
+    // all code within a class must be strict.
+    bool forceStrictModeForClassComputedPropertyName = false;
 
     ByteCodeGenerator(Js::ScriptContext* scriptContext, Js::ScopeInfo* parentScopeInfo);
 
@@ -144,6 +152,18 @@ public:
     }
     Js::ProfileId GetCurrentCallSiteId() { return m_callSiteId; }
 
+    Js::ProfileId GetNextCallApplyCallSiteId(Js::OpCode op)
+    {
+        if (m_writer.ShouldIncrementCallSiteId(op))
+        {
+            if (m_callApplyCallSiteCount != Js::Constants::NoProfileId)
+            {
+                return m_callApplyCallSiteCount++;
+            }
+        }
+        return m_callApplyCallSiteCount;
+    }
+
     Js::RegSlot NextVarRegister();
     Js::RegSlot NextConstRegister();
     FuncInfo *TopFuncInfo() const;
@@ -176,6 +196,7 @@ public:
     Js::RegSlot EnregisterConstant(unsigned int constant);
     Js::RegSlot EnregisterStringConstant(IdentPtr pid);
     Js::RegSlot EnregisterDoubleConstant(double d);
+    Js::RegSlot EnregisterBigIntConstant(ParseNodePtr pid);
     Js::RegSlot EnregisterStringTemplateCallsiteConstant(ParseNode* pnode);
 
     static Js::JavascriptArray* BuildArrayFromStringList(ParseNode* stringNodeList, uint arrayLength, Js::ScriptContext* scriptContext);
@@ -206,6 +227,7 @@ public:
 
     void RecordAllIntConstants(FuncInfo * funcInfo);
     void RecordAllStrConstants(FuncInfo * funcInfo);
+    void RecordAllBigIntConstants(FuncInfo * funcInfo);
     void RecordAllStringTemplateCallsiteConstants(FuncInfo* funcInfo);
 
     // For now, this just assigns field ids for the current script.
@@ -214,6 +236,9 @@ public:
     void AssignPropertyIds(Js::ParseableFunctionInfo* functionInfo);
     void MapCacheIdsToPropertyIds(FuncInfo *funcInfo);
     void MapReferencedPropertyIds(FuncInfo *funcInfo);
+#if ENABLE_NATIVE_CODEGEN
+    void MapCallSiteToCallApplyCallSiteMap(FuncInfo * funcInfo);
+#endif
     FuncInfo *StartBindFunction(const char16 *name, uint nameLength, uint shortNameOffset, bool* pfuncExprWithName, ParseNodeFnc *pnodeFnc, Js::ParseableFunctionInfo * reuseNestedFunc);
     void EndBindFunction(bool funcExprWithName);
     void StartBindCatch(ParseNode *pnode);
@@ -273,7 +298,6 @@ public:
     void LoadSuperConstructorObject(FuncInfo *funcInfo);
     void EmitSuperCall(FuncInfo* funcInfo, ParseNodeSuperCall * pnodeSuperCall, BOOL fReturnValue);
     void EmitClassConstructorEndCode(FuncInfo *funcInfo);
-    void EmitBaseClassConstructorThisObject(FuncInfo *funcInfo);
 
     // TODO: home the 'this' argument
     void EmitLoadFormalIntoRegister(ParseNode *pnodeFormal, Js::RegSlot pos, FuncInfo *funcInfo);
@@ -326,7 +350,7 @@ public:
             isStrictMode ? (isRoot ? Js::OpCode::StRootFldStrict : Js::OpCode::StFldStrict) :
             isRoot ? Js::OpCode::StRootFld : Js::OpCode::StFld;
     }
-    static Js::OpCode GetStFldOpCode(FuncInfo* funcInfo, bool isRoot, bool isLetDecl, bool isConstDecl, bool isClassMemberInit);
+    static Js::OpCode GetStFldOpCode(FuncInfo* funcInfo, bool isRoot, bool isLetDecl, bool isConstDecl, bool isClassMemberInit, bool forceStrictModeForClassComputedPropertyName = false);
     static Js::OpCode GetScopedStFldOpCode(bool isStrictMode, bool isConsoleScope = false)
     {
         return isStrictMode ? 

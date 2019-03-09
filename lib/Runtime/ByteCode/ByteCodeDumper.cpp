@@ -181,7 +181,7 @@ namespace Js
                     break;
                 case Js::TypeIds_Boolean:
                     Output::Print(_u("%-10s"), OpCodeUtil::GetOpCodeName(
-                        JavascriptBoolean::FromVar(varConst)->GetValue() ? OpCode::LdTrue : OpCode::LdFalse));
+                        VarTo<JavascriptBoolean>(varConst)->GetValue() ? OpCode::LdTrue : OpCode::LdFalse));
                     break;
                 case Js::TypeIds_Number:
 #if ENABLE_NATIVE_CODEGEN
@@ -191,13 +191,20 @@ namespace Js
 #endif
                     Output::Print(_u("%G"), JavascriptNumber::GetValue(varConst));
                     break;
+                case Js::TypeIds_BigInt:
+#if ENABLE_NATIVE_CODEGEN
+                    Output::Print(_u("%-10s"), OpCodeUtil::GetOpCodeName(OpCode::BigIntLiteral));
+#else
+                    Output::Print(_u("%-10s"), OpCodeUtil::GetOpCodeName(OpCode::Ld_A));
+#endif
+                    break;
                 case Js::TypeIds_String:
 #if ENABLE_NATIVE_CODEGEN
                     Output::Print(_u("%-10s"), OpCodeUtil::GetOpCodeName(OpCode::LdStr));
 #else
                     Output::Print(_u("%-10s"), OpCodeUtil::GetOpCodeName(OpCode::Ld_A));
 #endif
-                    Output::Print(_u(" (\"%s\")%s"), JavascriptString::FromVar(varConst)->GetSz(), Js::PropertyString::Is(varConst) ? _u(" [prop]") : _u(""));
+                    Output::Print(_u(" (\"%s\")%s"), VarTo<JavascriptString>(varConst)->GetSz(), Js::VarIs<Js::PropertyString>(varConst) ? _u(" [prop]") : _u(""));
                     break;
                 case Js::TypeIds_GlobalObject:
 #if ENABLE_NATIVE_CODEGEN
@@ -630,6 +637,11 @@ namespace Js
                 Output::Print(_u(" root.%s"), pPropertyName->GetBuffer());
                 break;
             }
+            case OpCode::EnsureCanDeclGloFunc:
+            {
+                Output::Print(_u(" root.%s"), pPropertyName->GetBuffer());
+                break;
+            }
             case OpCode::LdLocalElemUndef:
             {
                 Output::Print(_u(" %s = undefined"), pPropertyName->GetBuffer());
@@ -804,6 +816,11 @@ namespace Js
                 DumpU4(data->C1);
                 break;
             }
+            case OpCode::NewPropIdArrForCompProps:
+            {
+                Output::Print(_u(" R%u = [%u] "), data->R0, data->C1);
+                break;
+            }
             default:
                 DumpReg(data->R0);
                 Output::Print(_u("="));
@@ -826,12 +843,21 @@ namespace Js
                         pfuncActual->EnsureDeserialized()->GetDisplayName());
                 break;
             }
+            case OpCode::NewScFuncHomeObj:
+            case OpCode::NewScGenFuncHomeObj:
+            {
+                FunctionProxy* pfuncActual = dumpFunction->GetNestedFunctionProxy((uint)data->SlotIndex);
+                Output::Print(_u(" R%d = hmo:R%d, %s()"), data->Value, data->Instance,
+                    pfuncActual->EnsureDeserialized()->GetDisplayName());
+                break;
+            }
 #if ENABLE_NATIVE_CODEGEN
             case OpCode::StSlot:
             case OpCode::StSlotChkUndecl:
 #endif
             case OpCode::StObjSlot:
             case OpCode::StObjSlotChkUndecl:
+            case OpCode::StPropIdArrFromVar:
                 Output::Print(_u(" R%d[%d] = R%d "),data->Instance,data->SlotIndex,data->Value);
                 break;
             case OpCode::LdSlot:
@@ -869,7 +895,7 @@ namespace Js
             case OpCode::LdEnvObj:
             case OpCode::LdLocalObjSlot:
             case OpCode::LdParamObjSlot:
-                Output::Print(_u(" R%d = [%d] "),data->Value, data->SlotIndex);
+                Output::Print(_u(" R%d = [%d] "), data->Value, data->SlotIndex);
                 break;
             case OpCode::NewScFunc:
             case OpCode::NewStackScFunc:
@@ -918,6 +944,28 @@ namespace Js
             }
         }
     }
+
+    template <class T>
+    void ByteCodeDumper::DumpElementSlotI3(OpCode op, const unaligned T * data, Js::FunctionBody * dumpFunction, ByteCodeReader& reader)
+    {
+        switch (op)
+        {
+        case OpCode::NewInnerScFuncHomeObj:
+        case OpCode::NewInnerScGenFuncHomeObj:
+        {
+            FunctionProxy* pfuncActual = dumpFunction->GetNestedFunctionProxy((uint)data->SlotIndex);
+            Output::Print(_u(" R%d = env:R%d hmo: R%d, %s()"), data->Value, data->Instance, data->HomeObj,
+                pfuncActual->EnsureDeserialized()->GetDisplayName());
+            break;
+        }
+        default:
+        {
+            AssertMsg(false, "Unknown OpCode for OpLayoutElementSlotI3");
+            break;
+        }
+        }
+    }
+
 
     template <class T>
     void ByteCodeDumper::DumpElementP(OpCode op, const unaligned T * data, Js::FunctionBody * dumpFunction, ByteCodeReader& reader)
