@@ -184,6 +184,7 @@ public:
     virtual HRESULT FetchImportedModule(Js::ModuleRecordBase* referencingModule, LPCOLESTR specifier, Js::ModuleRecordBase** dependentModuleRecord) = 0;
     virtual HRESULT FetchImportedModuleFromScript(DWORD_PTR dwReferencingSourceContext, LPCOLESTR specifier, Js::ModuleRecordBase** dependentModuleRecord) = 0;
     virtual HRESULT NotifyHostAboutModuleReady(Js::ModuleRecordBase* referencingModule, Js::Var exceptionVar) = 0;
+    virtual HRESULT InitializeImportMeta(Js::ModuleRecordBase* referencingModule, Js::Var importMetaObject) = 0;
 
     virtual HRESULT ThrowIfFailed(HRESULT hr) = 0;
 
@@ -961,7 +962,7 @@ private:
         void EnsureSourceContextInfoMap();
         void EnsureDynamicSourceContextInfoMap();
 
-        void AddToEvalMapHelper(FastEvalMapString const& key, BOOL isIndirect, ScriptFunction *pFuncScript);
+        void AddToEvalMapHelper(FastEvalMapString & key, BOOL isIndirect, ScriptFunction *pFuncScript);
 
         uint moduleSrcInfoCount;
 #ifdef RUNTIME_DATA_COLLECTION
@@ -1105,12 +1106,14 @@ private:
         ScriptConfiguration const * GetConfig(void) const { return &config; }
         CharClassifier const * GetCharClassifier(void) const;
 
+        static bool ExceedsStackNestedFuncCount(uint count);
+
         ThreadContext * GetThreadContext() const { return threadContext; }
 
         static const int MaxEvalSourceSize = 400;
 
         bool IsInEvalMap(FastEvalMapString const& key, BOOL isIndirect, ScriptFunction **ppFuncScript);
-        void AddToEvalMap(FastEvalMapString const& key, BOOL isIndirect, ScriptFunction *pFuncScript);
+        void AddToEvalMap(FastEvalMapString & key, BOOL isIndirect, ScriptFunction *pFuncScript);
 
         template <typename TCacheType>
         void CleanDynamicFunctionCache(TCacheType* cacheType);
@@ -1464,6 +1467,7 @@ private:
         uint SaveSourceNoCopy(Utf8SourceInfo* sourceInfo, int cchLength, bool isCesu8);
 
         Utf8SourceInfo* GetSource(uint sourceIndex);
+        void RemoveSource(uint sourceIndex);
 
         uint SourceCount() const { return (uint)sourceList->Count(); }
         void CleanSourceList() { CleanSourceListInternal(false); }
@@ -1844,6 +1848,8 @@ private:
         virtual intptr_t GetLibraryAddr() const override;
         virtual intptr_t GetGlobalObjectAddr() const override;
         virtual intptr_t GetGlobalObjectThisAddr() const override;
+        virtual intptr_t GetObjectPrototypeAddr() const;
+        virtual intptr_t GetFunctionPrototypeAddr() const;
         virtual intptr_t GetNumberAllocatorAddr() const override;
         virtual intptr_t GetRecyclerAddr() const override;
         virtual bool GetRecyclerAllowNativeCodeBumpAllocation() const override;

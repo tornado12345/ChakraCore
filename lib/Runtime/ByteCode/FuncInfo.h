@@ -177,6 +177,7 @@ public:
     Symbol *argumentsSymbol;
     Symbol *thisSymbol;
     Symbol *newTargetSymbol;
+    Symbol* importMetaSymbol;
     Symbol *superSymbol;
     Symbol *superConstructorSymbol;
     JsUtil::List<Js::RegSlot, ArenaAllocator> nonUserNonTempRegistersToInitialize;
@@ -325,6 +326,17 @@ public:
         return newTargetSymbol;
     }
 
+    void SetImportMetaSymbol(Symbol* sym)
+    {
+        Assert(importMetaSymbol == nullptr || importMetaSymbol == sym);
+        importMetaSymbol = sym;
+    }
+
+    Symbol* GetImportMetaSymbol() const
+    {
+        return importMetaSymbol;
+    }
+
     void SetSuperSymbol(Symbol *sym)
     {
         Assert(superSymbol == nullptr || superSymbol == sym);
@@ -471,6 +483,7 @@ public:
     BOOL IsClassConstructor() const;
     BOOL IsBaseClassConstructor() const;
     BOOL IsDerivedClassConstructor() const;
+    bool IsAsyncGenerator() const;
 
     void RemoveTargetStmt(ParseNodeStmt* pnodeStmt) {
         targetStatements.Remove(pnodeStmt);

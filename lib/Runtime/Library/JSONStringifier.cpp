@@ -221,22 +221,31 @@ _Ret_notnull_ Var
 JSONStringifier::ReadValue(_In_ JavascriptString* key, _In_opt_ const PropertyRecord* propertyRecord, _In_ RecyclableObject* holder)
 {
     Var value = nullptr;
-    PropertyString* propertyString = JavascriptOperators::TryFromVar<PropertyString>(key);
     PropertyValueInfo info;
-    if (propertyString != nullptr)
-    {
-        PropertyValueInfo::SetCacheInfo(&info, propertyString, propertyString->GetLdElemInlineCache(), false);
-        if (propertyString->TryGetPropertyFromCache<false /* ownPropertyOnly */, false /* OutputExistence */>(holder, holder, &value, this->scriptContext, &info))
-        {
-            return value;
-        }
-    }
 
     if (propertyRecord == nullptr)
     {
         key->GetPropertyRecord(&propertyRecord);
     }
-    JavascriptOperators::GetProperty(holder, propertyRecord->GetPropertyId(), &value, this->scriptContext, &info);
+
+    if (propertyRecord->IsNumeric())
+    {
+        JavascriptOperators::GetItem(holder, propertyRecord->GetNumericValue(), &value, this->scriptContext);
+    }
+    else
+    {
+        PropertyString* propertyString = JavascriptOperators::TryFromVar<PropertyString>(key);
+        if (propertyString != nullptr)
+        {
+            PropertyValueInfo::SetCacheInfo(&info, propertyString, propertyString->GetLdElemInlineCache(), false);
+            if (propertyString->TryGetPropertyFromCache<false /* ownPropertyOnly */, false /* OutputExistence */>(holder, holder, &value, this->scriptContext, &info))
+            {
+                return value;
+            }
+        }
+        JavascriptOperators::GetProperty(holder, propertyRecord->GetPropertyId(), &value, this->scriptContext, &info);
+    }
+
     return value;
 }
 
@@ -680,6 +689,25 @@ JSONStringifier::CalculateStringElementLength(_In_ JavascriptString* str)
         if (currentCharacter < _countof(LazyJSONString::escapeMapCount))
         {
             escapedStrLength += LazyJSONString::escapeMapCount[currentCharacter];
+        }
+        else if (utf8::IsLowSurrogateChar(currentCharacter))
+        {
+            // Lone trailing-surrogate code units should be escaped.
+            // They will always need 5 extra characters for the escape sequence, ie: \udbff
+            escapedStrLength += 5;
+        }
+        else if (utf8::IsHighSurrogateChar(currentCharacter))
+        {
+            if (index + 1 < bufferStart + strLength && utf8::IsLowSurrogateChar(*(index + 1)))
+            {
+                // Regular surrogate pairs are handled normally - skip the trailing-surrogate code unit.
+                index++;
+            }
+            else
+            {
+                // High-surrogate code unit not followed by a trailing-surrogate code unit should be escaped.
+                escapedStrLength += 5;
+            }
         }
     }
     if (escapedStrLength > UINT32_MAX)

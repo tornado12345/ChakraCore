@@ -803,7 +803,7 @@ void GlobOpt::TrackIntSpecializedAddSubConstant(
 
                 // Ensure that the sym is live in the landing pad, and that its value has not changed in an unknown way yet
                 Value *const landingPadValue = currentBlock->loop->landingPad->globOptData.FindValue(sym);
-                if(!landingPadValue || srcValueNumber != landingPadValue->GetValueNumber())
+                if(!landingPadValue || srcValueNumber != landingPadValue->GetValueNumber() || currentBlock->loop->symsDefInLoop->Test(sym->m_id))
                 {
                     updateInductionVariableValueNumber = false;
                     break;
@@ -1278,13 +1278,20 @@ GlobOpt::InvalidateInductionVariables(IR::Instr * instr)
     }
 
     // If this is an induction variable, then treat it the way the prepass would have if it had seen
-    // the assignment and the resulting change to the value number, and mark it as indeterminate.
+    // the assignment and the resulting change to the value number, and mark induction variables
+    // for the loop as indeterminate.
+    // We need to invalidate all induction variables for the loop, because we might have used the
+    // invalidated induction variable to calculate the loopCount, and this now invalid loopCount
+    // also impacts bound checks for secondary induction variables
     for (Loop * loop = this->currentBlock->loop; loop; loop = loop->parent)
     {
-        InductionVariable *iv = nullptr;
-        if (loop->inductionVariables && loop->inductionVariables->TryGetReference(dstSym->m_id, &iv))
+        if (loop->inductionVariables && loop->inductionVariables->ContainsKey(dstSym->m_id))
         {
-            iv->SetChangeIsIndeterminate();
+            for (auto it = loop->inductionVariables->GetIterator(); it.IsValid(); it.MoveNext())
+            {
+                InductionVariable& inductionVariable = it.CurrentValueReference();
+                inductionVariable.SetChangeIsIndeterminate();
+            }
         }
     }
 }
@@ -2985,7 +2992,11 @@ void GlobOpt::DetermineArrayBoundCheckHoistability(
     {
         // The loop count is constant, fold (indexOffset + loopCountMinusOne * maxMagnitudeChange)
         TRACE_PHASE_VERBOSE(Js::Phase::BoundCheckHoistPhase, 3, _u("Loop count is constant, folding\n"));
-        if(Int32Math::Mul(loopCount->LoopCountMinusOneConstantValue(), maxMagnitudeChange, &offset) ||
+
+        int loopCountMinusOnePlusOne = 0;
+
+        if (Int32Math::Add(loopCount->LoopCountMinusOneConstantValue(), 1, &loopCountMinusOnePlusOne) ||
+            Int32Math::Mul(loopCountMinusOnePlusOne, maxMagnitudeChange, &offset) ||
             Int32Math::Add(offset, indexOffset, &offset))
         {
             TRACE_PHASE_VERBOSE(Js::Phase::BoundCheckHoistPhase, 4, _u("Folding failed\n"));

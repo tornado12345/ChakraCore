@@ -125,7 +125,7 @@ namespace Js
         // CommonNativeInterfaces is used as a prototype for the other native interface objects
         // to share the common APIs without requiring everyone to access EngineInterfaceObject.Common.
         this->commonNativeInterfaces = DynamicObject::New(recycler,
-            DynamicType::New(scriptContext, TypeIds_Object, library->GetObjectPrototype(), nullptr,
+            DynamicType::New(scriptContext, TypeIds_Object, library->GetNull(), nullptr,
             DeferredTypeHandler<InitializeCommonNativeInterfaces>::GetDefaultInstance()));
         library->AddMember(this, Js::PropertyIds::Common, this->commonNativeInterfaces);
 
@@ -445,7 +445,8 @@ namespace Js
             return scriptContext->GetLibrary()->GetUndefined();
         }
 
-        RecyclableObject *func = VarTo<RecyclableObject>(args.Values[1]);
+        // TODO: This is marked volatile due to MSVC codegen bug in x86_test_pogo builds. Remove when the bug is fixed
+        RecyclableObject *volatile func = VarTo<RecyclableObject>(args.Values[1]);
 
         AssertOrFailFastMsg(func != scriptContext->GetLibrary()->GetUndefined(), "Trying to callInstanceFunction(undefined, ...)");
 

@@ -101,6 +101,7 @@ FuncInfo::FuncInfo(
     newTargetSymbol(nullptr),
     superSymbol(nullptr),
     superConstructorSymbol(nullptr),
+    importMetaSymbol(nullptr),
     nonUserNonTempRegistersToInitialize(alloc)
 {
     if (bodyScope != nullptr)
@@ -169,6 +170,11 @@ BOOL FuncInfo::IsBaseClassConstructor() const
 BOOL FuncInfo::IsDerivedClassConstructor() const
 {
     return root->IsDerivedClassConstructor();
+}
+
+bool FuncInfo::IsAsyncGenerator() const
+{
+    return (root->IsAsync() && root->IsGenerator());
 }
 
 Scope *
@@ -343,16 +349,19 @@ void FuncInfo::ReleaseReference(ParseNode *pnode)
             }
         }
         // Now release the call target.
-        switch (pnode->AsParseNodeCall()->pnodeTarget->nop)
+        if (!pnode->AsParseNodeCall()->isSuperCall)
         {
-        case knopDot:
-        case knopIndex:
-            this->ReleaseReference(pnode->AsParseNodeCall()->pnodeTarget);
-            this->ReleaseLoc(pnode->AsParseNodeCall()->pnodeTarget);
+            switch (pnode->AsParseNodeCall()->pnodeTarget->nop)
+            {
+            case knopDot:
+            case knopIndex:
+                this->ReleaseReference(pnode->AsParseNodeCall()->pnodeTarget);
+                this->ReleaseLoc(pnode->AsParseNodeCall()->pnodeTarget);
+                break;
+            default:
+                this->ReleaseLoad(pnode->AsParseNodeCall()->pnodeTarget);
             break;
-        default:
-            this->ReleaseLoad(pnode->AsParseNodeCall()->pnodeTarget);
-            break;
+            }
         }
         break;
     default:

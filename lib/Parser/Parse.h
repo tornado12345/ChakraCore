@@ -328,6 +328,16 @@ private:
     bool CheckStrictModeStrPid(IdentPtr pid);
     bool CheckAsmjsModeStrPid(IdentPtr pid);
 
+    bool CheckContextualKeyword(IdentPtr keywordPid)
+    {
+        if (m_token.tk == tkID && !GetScanner()->LastIdentifierHasEscape())
+        {
+            IdentPtr pid = m_token.GetIdentifier(GetHashTbl());
+            return pid == keywordPid;
+        }
+        return false;
+    }
+
     bool IsCurBlockInLoop() const;
 
     void InitPids();
@@ -474,6 +484,7 @@ private:
         IdentPtr set;
         IdentPtr get;
         IdentPtr let;
+        IdentPtr await;
         IdentPtr constructor;
         IdentPtr prototype;
         IdentPtr __proto__;
@@ -481,12 +492,14 @@ private:
         IdentPtr target;
         IdentPtr from;
         IdentPtr as;
+        IdentPtr meta;
         IdentPtr _default;
         IdentPtr _star; // Special '*' identifier for modules
         IdentPtr _this; // Special 'this' identifier
         IdentPtr _newTarget; // Special new.target identifier
         IdentPtr _super; // Special super identifier
         IdentPtr _superConstructor; // Special super constructor identifier
+        IdentPtr _importMeta; // Special import.meta identifier
     };
 
     WellKnownPropertyPids wellKnownPropertyPids;
@@ -540,8 +553,6 @@ private:
         if (buildAST)
         {
             pnode->grfnop = 0;
-            pnode->pnodeOuter = (NULL == m_pstmtCur) ? NULL : m_pstmtCur->pnodeStmt;
-
             pStmt->pnodeStmt = pnode;
         }
         else
@@ -962,7 +973,7 @@ private:
         charcount_t ichMin,
         _Out_opt_ BOOL* pfCanAssign = nullptr);
 
-    bool IsImportOrExportStatementValidHere();
+    void CheckIfImportOrExportStatementValidHere();
     bool IsTopLevelModuleFunc();
 
     template<bool buildAST> ParseNodePtr ParseImport();
@@ -1068,6 +1079,7 @@ public:
     IdentPtr GetArgumentsPid() const { return wellKnownPropertyPids.arguments; }
     IdentPtr GetEvalPid() const { return wellKnownPropertyPids.eval; }
     IdentPtr GetTargetPid() const { return wellKnownPropertyPids.target; }
+    IdentPtr GetMetaPid() const { return wellKnownPropertyPids.meta; }
     BackgroundParseItem *GetCurrBackgroundParseItem() const { return currBackgroundParseItem; }
     void SetCurrBackgroundParseItem(BackgroundParseItem *item) { currBackgroundParseItem = item; }
 

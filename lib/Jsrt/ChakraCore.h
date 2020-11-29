@@ -111,7 +111,11 @@ typedef enum JsModuleHostInfoKind
     /// <summary>
     ///     URL for use in error stack traces and debugging.
     /// </summary>
-    JsModuleHostInfo_Url = 0x6
+    JsModuleHostInfo_Url = 0x6,
+    /// <summary>
+    ///     Callback to allow host to initialize import.meta object properties.
+    /// </summary>
+    JsModuleHostInfo_InitializeImportMetaCallback = 0x7
 } JsModuleHostInfoKind;
 
 /// <summary>
@@ -186,6 +190,22 @@ typedef JsErrorCode(CHAKRA_CALLBACK * FetchImportedModuleFromScriptCallBack)(_In
 ///     Returns a JsErrorCode - note, the return value is ignored.
 /// </returns>
 typedef JsErrorCode(CHAKRA_CALLBACK * NotifyModuleReadyCallback)(_In_opt_ JsModuleRecord referencingModule, _In_opt_ JsValueRef exceptionVar);
+
+/// <summary>
+///     User implemented callback to fill in module properties for the import.meta object.
+/// </summary>
+/// <remarks>
+///     This callback allows the host to fill module details for the referencing module in the import.meta object
+///     loaded by script.
+///     The callback is invoked on the current runtime execution thread, therefore execution is blocked until the
+///     callback completes.
+/// </remarks>
+/// <param name="referencingModule">The referencing module that is loading an import.meta object.</param>
+/// <param name="importMetaVar">The object which will be returned to script for the referencing module.</param>
+/// <returns>
+///     Returns a JsErrorCode - note, the return value is ignored.
+/// </returns>
+typedef JsErrorCode(CHAKRA_CALLBACK * InitializeImportMetaCallback)(_In_opt_ JsModuleRecord referencingModule, _In_opt_ JsValueRef importMetaVar);
 
 /// <summary>
 ///     A structure containing information about a native function callback.
@@ -299,17 +319,16 @@ JsCreateEnhancedFunction(
 /// <remarks>
 ///     Bootstrap the module loading process by creating a new module record.
 /// </remarks>
-/// <param name="referencingModule">The parent module of the new module - nullptr for a root module.</param>
-/// <param name="normalizedSpecifier">The normalized specifier for the module.</param>
-/// <param name="moduleRecord">The new module record. The host should not try to call this API twice
-///                            with the same normalizedSpecifier.</param>
+/// <param name="referencingModule">Unused parameter - exists for backwards compatability, supply nullptr</param>
+/// <param name="normalizedSpecifier">The normalized specifier or url for the module - used in script errors, optional.</param>
+/// <param name="moduleRecord">The new module record.</param>
 /// <returns>
 ///     The code <c>JsNoError</c> if the operation succeeded, a failure code otherwise.
 /// </returns>
 CHAKRA_API
 JsInitializeModuleRecord(
     _In_opt_ JsModuleRecord referencingModule,
-    _In_ JsValueRef normalizedSpecifier,
+    _In_opt_ JsValueRef normalizedSpecifier,
     _Outptr_result_maybenull_ JsModuleRecord* moduleRecord);
 
 /// <summary>
@@ -636,8 +655,8 @@ CHAKRA_API
 ///     </para>
 /// </remarks>
 /// <param name="name">
-///     The name of the property ID to get or create. The name may consist of only digits.
-///     The string is expected to be ASCII / utf8 encoded.
+///     The name of the property ID to get or create. The string is expected to be ASCII / utf8 encoded.
+///     The name can be any JavaScript property identifier, including all digits.
 /// </param>
 /// <param name="length">length of the name in bytes</param>
 /// <param name="propertyId">The property ID in this runtime for the given name.</param>
@@ -1201,6 +1220,22 @@ JsGetErrorPrototype(_Out_ JsValueRef * result);
 /// <param name="result">A reference to the Javascript iterator prototype object.</param>
 CHAKRA_API
 JsGetIteratorPrototype(_Out_ JsValueRef * result);
+
+/// <summary>
+///      Returns a value that indicates whether an object is callable.
+/// </summary>
+/// <remarks>
+///     Requires an active script context.
+/// </remarks>
+/// <param name="object">The object to test.</param>
+/// <param name="isConstructor">If the object is callable, <c>true</c>, <c>false</c> otherwise.</param>
+/// <returns>
+///     The code <c>JsNoError</c> if the operation succeeded, a failure code otherwise.
+/// </returns>
+CHAKRA_API
+JsIsCallable(
+    _In_ JsValueRef object,
+    _Out_ bool *isCallable);
 
 /// <summary>
 ///      Returns a value that indicates whether an object is a constructor.
@@ -1932,6 +1967,30 @@ JsGetArrayBufferFreeFunction(
 CHAKRA_API
 JsExternalizeArrayBuffer(
     _In_ JsValueRef arrayBuffer);
+
+/// <summary>
+///     Get host embedded data from the current object
+/// </summary>
+/// <param name="instance">Js object from which an embedder data to be fetched</param>
+/// <param name="embedderData">An embedder data to be returned, it will be nullptr if not found</param>
+/// <returns>
+///     The code <c>JsNoError</c> if the operation succeeded, a failure code
+///     otherwise.
+/// </returns>
+CHAKRA_API
+JsGetEmbedderData(_In_ JsValueRef instance, _Out_ JsValueRef* embedderData);
+
+/// <summary>
+///     Set host embedded data on the current object
+/// </summary>
+/// <param name="instance">Js object from which an embedder data to be fetched</param>
+/// <param name="embedderData">An embedder data to be set on the passed object</param>
+/// <returns>
+///     The code <c>JsNoError</c> if the operation succeeded, a failure code
+///     otherwise.
+/// </returns>
+CHAKRA_API
+JsSetEmbedderData(_In_ JsValueRef instance, _In_ JsValueRef embedderData);
 
 #ifdef _WIN32
 #include "ChakraCoreWindows.h"

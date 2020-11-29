@@ -324,6 +324,8 @@ PHASE(All)
                 PHASE(FinishPartial)
         PHASE(Host)
         PHASE(BailOut)
+        PHASE(BailIn)
+        PHASE(GeneratorGlobOpt)
         PHASE(RegexQc)
         PHASE(RegexOptBT)
         PHASE(InlineCache)
@@ -451,7 +453,7 @@ PHASE(All)
 #define DEFAULT_CONFIG_HybridFgJit          (false)
 #define DEFAULT_CONFIG_HybridFgJitBgQueueLengthThreshold (32)
 #define DEFAULT_CONFIG_Prejit               (false)
-#define DEFAULT_CONFIG_ParserStateCache     (false)
+#define DEFAULT_CONFIG_ParserStateCache     (true)
 #define DEFAULT_CONFIG_CompressParserStateCache (false)
 #define DEFAULT_CONFIG_DeferTopLevelTillFirstCall (true)
 #define DEFAULT_CONFIG_DirectCallTelemetryStats (false)
@@ -633,14 +635,7 @@ PHASE(All)
 #define DEFAULT_CONFIG_ES6DefaultArgs          (true)
 #define DEFAULT_CONFIG_ES6Destructuring        (true)
 #define DEFAULT_CONFIG_ES6ForLoopSemantics     (true)
-
-#ifdef COMPILE_DISABLE_ES6FunctionNameFull
-    // If ES6FunctionNameFull needs to be disabled by compile flag, COMPILE_DISABLE_ES6FunctionNameFull should be false
-    #define DEFAULT_CONFIG_ES6FunctionNameFull     (false)
-#else
-    #define DEFAULT_CONFIG_ES6FunctionNameFull     (false)
-#endif
-
+#define DEFAULT_CONFIG_ES6FunctionNameFull     (true)
 #define DEFAULT_CONFIG_ES6Generators           (true)
 #define DEFAULT_CONFIG_ES6IsConcatSpreadable   (true)
 #define DEFAULT_CONFIG_ES6Math                 (true)
@@ -659,7 +654,7 @@ PHASE(All)
 #define DEFAULT_CONFIG_ES6Spread               (true)
 #define DEFAULT_CONFIG_ES6String               (true)
 #define DEFAULT_CONFIG_ES6StringPrototypeFixes (true)
-#define DEFAULT_CONFIG_ES2018ObjectRestSpread  (false)
+#define DEFAULT_CONFIG_ES2018ObjectRestSpread  (true)
 
 #ifndef DEFAULT_CONFIG_ES6PrototypeChain
 #ifdef COMPILE_DISABLE_ES6PrototypeChain
@@ -679,6 +674,8 @@ PHASE(All)
 #define DEFAULT_CONFIG_ES6RegExSticky          (true)
 #define DEFAULT_CONFIG_ES2018RegExDotAll       (true)
 #define DEFAULT_CONFIG_ESBigInt                (false)
+#define DEFAULT_CONFIG_ESNumericSeparator      (true)
+#define DEFAULT_CONFIG_ESHashbang              (true)
 #define DEFAULT_CONFIG_ESSymbolDescription     (true)
 #define DEFAULT_CONFIG_ESGlobalThis            (true)
 #ifdef COMPILE_DISABLE_ES6RegExPrototypeProperties
@@ -699,8 +696,10 @@ PHASE(All)
 #define DEFAULT_CONFIG_ES7TrailingComma        (true)
 #define DEFAULT_CONFIG_ES7ValuesEntries        (true)
 #define DEFAULT_CONFIG_ESObjectGetOwnPropertyDescriptors (true)
-#define DEFAULT_CONFIG_ESDynamicImport         (false)
+#define DEFAULT_CONFIG_ESDynamicImport         (true)
+#define DEFAULT_CONFIG_ESImportMeta            (true)
 #define DEFAULT_CONFIG_ESExportNsAs            (true)
+#define DEFAULT_CONFIG_ES2018AsyncIteration    (true)
 
 #define DEFAULT_CONFIG_ESSharedArrayBuffer     (false)
 
@@ -1102,6 +1101,9 @@ FLAGR(Boolean, SkipSplitOnNoResult, "If the result of Regex split isn't used, sk
 #ifdef TEST_ETW_EVENTS
 FLAGNR(String,  TestEtwDll            , "Path of the TestEtwEventSink DLL", nullptr)
 #endif
+#ifdef ENABLE_TEST_HOOKS
+FLAGNR(Boolean, Force32BitByteCode, "Force CC to generate 32bit bytecode intended only for regenerating bytecode headers.", false)
+#endif
 
 FLAGNR(Boolean, CollectGarbage        , "Enable CollectGarbage API", DEFAULT_CONFIG_CollectGarbage)
 
@@ -1137,12 +1139,7 @@ FLAGPR           (Boolean, ES6, ES6DateParseFix        , "Enable ES6 Date.parse 
 FLAGPR           (Boolean, ES6, ES6DefaultArgs         , "Enable ES6 Default Arguments"                             , DEFAULT_CONFIG_ES6DefaultArgs)
 FLAGPR           (Boolean, ES6, ES6Destructuring       , "Enable ES6 Destructuring"                                 , DEFAULT_CONFIG_ES6Destructuring)
 FLAGPR           (Boolean, ES6, ES6ForLoopSemantics    , "Enable ES6 for loop per iteration bindings"               , DEFAULT_CONFIG_ES6ForLoopSemantics)
-
-#ifndef COMPILE_DISABLE_ES6FunctionNameFull
-    #define COMPILE_DISABLE_ES6FunctionNameFull 0
-#endif
-FLAGPR_REGOVR_EXP(Boolean, ES6, ES6FunctionNameFull    , "Enable ES6 Full function.name"                            , DEFAULT_CONFIG_ES6FunctionNameFull)
-
+FLAGPR           (Boolean, ES6, ES6FunctionNameFull    , "Enable ES6 Full function.name"                            , DEFAULT_CONFIG_ES6FunctionNameFull)
 FLAGPR           (Boolean, ES6, ES6Generators          , "Enable ES6 generators"                                    , DEFAULT_CONFIG_ES6Generators)
 FLAGPR           (Boolean, ES6, ES7ExponentiationOperator, "Enable ES7 exponentiation operator (**)"                , DEFAULT_CONFIG_ES7ExponentionOperator)
 
@@ -1178,6 +1175,7 @@ FLAGPR           (Boolean, ES6, ES6Unscopables         , "Enable ES6 With Statem
 FLAGPR           (Boolean, ES6, ES6RegExSticky         , "Enable ES6 RegEx sticky flag"                             , DEFAULT_CONFIG_ES6RegExSticky)
 FLAGPR           (Boolean, ES6, ES2018RegExDotAll      , "Enable ES2018 RegEx dotAll flag"                          , DEFAULT_CONFIG_ES2018RegExDotAll)
 FLAGPR           (Boolean, ES6, ESExportNsAs           , "Enable ES experimental export * as name"                  , DEFAULT_CONFIG_ESExportNsAs)
+FLAGPR           (Boolean, ES6, ES2018AsyncIteration   , "Enable ES2018 Async Iteration"                            , DEFAULT_CONFIG_ES2018AsyncIteration)
 
 #ifndef COMPILE_DISABLE_ES6RegExPrototypeProperties
     #define COMPILE_DISABLE_ES6RegExPrototypeProperties 0
@@ -1215,8 +1213,17 @@ FLAGR(Boolean, WinRTAdaptiveApps        , "Enable the adaptive apps feature, all
 // ES BigInt flag
 FLAGR(Boolean, ESBigInt, "Enable ESBigInt flag", DEFAULT_CONFIG_ESBigInt)
 
+// ES Numeric Separator support for numeric constants
+FLAGR(Boolean, ESNumericSeparator, "Enable Numeric Separator flag", DEFAULT_CONFIG_ESNumericSeparator)
+
+// ES Hashbang support for interpreter directive syntax
+FLAGR(Boolean, ESHashbang, "Enable Hashbang syntax", DEFAULT_CONFIG_ESHashbang)
+
 // ES Symbol.prototype.description flag
 FLAGR(Boolean, ESSymbolDescription, "Enable Symbol.prototype.description", DEFAULT_CONFIG_ESSymbolDescription)
+
+// ES import.meta keyword meta-property
+FLAGR(Boolean, ESImportMeta, "Enable import.meta keyword", DEFAULT_CONFIG_ESImportMeta)
 
 //ES globalThis flag
 FLAGR(Boolean, ESGlobalThis, "Enable globalThis", DEFAULT_CONFIG_ESGlobalThis)
@@ -1229,7 +1236,7 @@ FLAGR (String,  Filename              , "Jscript source file", nullptr)
 FLAGNR(Boolean, FreeRejittedCode      , "Free rejitted code", true)
 FLAGNR(Boolean, ForceGuardPages       , "Force the addition of guard pages", false)
 FLAGNR(Boolean, PrintGuardPageBounds  , "Prints the bounds of a guard page", false)
-FLAGNR(Boolean, ForceLegacyEngine     , "Force a jscrip9 dll load", false)
+FLAGNR(Boolean, ForceLegacyEngine     , "Force a jscript9 dll load", false)
 FLAGNR(Phases,  Force                 , "Force certain phase to run ignoring heuristics", )
 FLAGNR(Phases,  Stress                , "Stress certain phases by making them kick in even if they normally would not.", )
 FLAGNR(Boolean, ForceArrayBTree       , "Force enable creation of BTree for Arrays", false)

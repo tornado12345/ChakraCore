@@ -106,6 +106,7 @@ namespace Js
     class JavascriptEnumeratorIterator;
     class JavascriptArrayIterator;
     enum class JavascriptArrayIteratorKind;
+    class JavascriptAsyncFromSyncIterator;
     class JavascriptMapIterator;
     enum class JavascriptMapIteratorKind;
     class JavascriptSetIterator;
@@ -115,8 +116,6 @@ namespace Js
     class JavascriptPromise;
     class JavascriptPromiseCapability;
     class JavascriptPromiseReaction;
-    class JavascriptPromiseAsyncSpawnExecutorFunction;
-    class JavascriptPromiseAsyncSpawnStepArgumentExecutorFunction;
     class JavascriptPromiseCapabilitiesExecutorFunction;
     class JavascriptPromiseResolveOrRejectFunction;
     class JavascriptPromiseReactionTaskFunction;
@@ -124,8 +123,11 @@ namespace Js
     class JavascriptPromiseThunkFinallyFunction;
     class JavascriptPromiseResolveThenableTaskFunction;
     class JavascriptPromiseAllResolveElementFunction;
+    class JavascriptPromiseAllSettledResolveOrRejectElementFunction;
     struct JavascriptPromiseAllResolveElementFunctionRemainingElementsWrapper;
     struct JavascriptPromiseResolveOrRejectFunctionAlreadyResolvedWrapper;
+    class JavascriptAsyncSpawnExecutorFunction;
+    class JavascriptAsyncSpawnStepFunction;
     class JavascriptGenerator;
     class LiteralString;
     class JavascriptStringObject;
@@ -179,6 +181,7 @@ namespace Js
     class StackScriptFunction;
     class GeneratorVirtualScriptFunction;
     class JavascriptGeneratorFunction;
+    class JavascriptAsyncGeneratorFunction;
     class JavascriptAsyncFunction;
     class AsmJsScriptFunction;
     class WasmScriptFunction;
@@ -429,6 +432,7 @@ enum tagDEBUG_EVENT_INFO_TYPE
 
 #include "Library/JavascriptNumber.h"
 #include "Library/JavascriptFunction.h"
+#include "Library/BoundFunction.h"
 #include "Library/RuntimeFunction.h"
 #include "Library/JavascriptExternalFunction.h"
 #include "Library/CustomExternalIterator.h"
@@ -529,10 +533,12 @@ enum tagDEBUG_EVENT_INFO_TYPE
 //#include "Language/ModuleNamespace.h"
 #include "Types/ScriptFunctionType.h"
 #include "Library/ScriptFunction.h"
+#include "Library/StackScriptFunction.h"
 
 #ifdef _CHAKRACOREBUILD
 #include "Library/CustomExternalWrapperObject.h"
 #endif
+
 #include "Library/JavascriptProxy.h"
 
 #if ENABLE_TTD
@@ -550,6 +556,10 @@ enum tagDEBUG_EVENT_INFO_TYPE
 #include "Debug/TTActionEvents.h"
 #include "Debug/TTEventLog.h"
 #endif
+
+#include "Library/JavascriptGeneratorFunction.h"
+#include "Library/JavascriptAsyncFunction.h"
+#include "Library/JavascriptAsyncGeneratorFunction.h"
 
 #include "../WasmReader/WasmReader.h"
 
@@ -576,7 +586,6 @@ enum tagDEBUG_EVENT_INFO_TYPE
 #include "Language/InlineCachePointerArray.inl"
 #include "Language/JavascriptOperators.inl"
 #include "Language/TaggedInt.inl"
-#include "Library/JavascriptGeneratorFunction.h"
 
 #ifndef USED_IN_STATIC_LIB
 #ifdef ENABLE_INTL_OBJECT

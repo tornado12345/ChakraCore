@@ -14,8 +14,8 @@ namespace Js
     const int JavascriptRegExpConstructor::NumCtorCaptures;
 #endif
 
-    JavascriptRegExpConstructor::JavascriptRegExpConstructor(DynamicType * type) :
-        RuntimeFunction(type, &JavascriptRegExp::EntryInfo::NewInstance),
+    JavascriptRegExpConstructor::JavascriptRegExpConstructor(DynamicType* type, ConstructorCache* cache) :
+        RuntimeFunction(type, &JavascriptRegExp::EntryInfo::NewInstance, cache),
         reset(false),
         invalidatedLastMatch(false),
         lastPattern(nullptr),
@@ -360,6 +360,10 @@ namespace Js
                 EnsureValues(); // The last match info relies on the last input. Use it before it is changed.
                 this->lastInput = tempInput;
             }
+
+            // Set implicit call flags since we are not necessarily making the original stored value available on re-load
+            // and are killing the store that backs two exposed properties.
+            this->GetScriptContext()->GetThreadContext()->AddImplicitCallFlags(ImplicitCall_Accessor);
             *result = true;
             return true;
         case PropertyIds::lastMatch:

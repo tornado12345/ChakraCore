@@ -809,6 +809,16 @@ namespace Js
             mutationBpValue = nullptr;
         }
 
+        Var embedderData = nullptr;
+        if (this->GetInternalProperty(this, InternalPropertyIds::EmbedderData,  &embedderData, nullptr, this->GetScriptContext()))
+        {
+          this->SetInternalProperty(InternalPropertyIds::EmbedderData, nullptr, PropertyOperation_Force, nullptr);
+        }
+        else
+        {
+          embedderData = nullptr;
+        }
+
         // If value of TypeOfPrototypeObjectDictionary was set undefined above, reset it to nullptr so we don't type cast it wrongly to TypeTransitionMap* or we don't marshal the non-Var dictionary below
         Var typeTransitionMap = nullptr;
         if (this->GetInternalProperty(this, InternalPropertyIds::TypeOfPrototypeObjectDictionary, &typeTransitionMap, nullptr, this->GetScriptContext()))
@@ -832,6 +842,10 @@ namespace Js
             {
                 this->SetInternalProperty(InternalPropertyIds::MutationBp, mutationBpValue, PropertyOperation_Force, nullptr);
             }
+            if (embedderData)
+            {
+              this->SetInternalProperty(InternalPropertyIds::EmbedderData, embedderData, PropertyOperation_Force, nullptr);
+            }
         }
     }
 
@@ -852,11 +866,11 @@ namespace Js
             }
             return false;
         }
-        if (!from->GetTypeHandler()->IsPathTypeHandler())
+        if (!from->GetTypeHandler()->IsObjectCopyable())
         {
             if (PHASE_TRACE1(ObjectCopyPhase))
             {
-                Output::Print(_u("ObjectCopy: Can't copy: Don't have PathTypeHandler\n"));
+                Output::Print(_u("ObjectCopy: Can't copy: from obj does not have copyable type handler\n"));
             }
             return false;
         }
@@ -876,27 +890,11 @@ namespace Js
             }
             return false;
         }
-        if (PathTypeHandlerBase::FromTypeHandler(from->GetTypeHandler())->HasAccessors())
-        {
-            if (PHASE_TRACE1(ObjectCopyPhase))
-            {
-                Output::Print(_u("ObjectCopy: Can't copy: type handler has accessors\n"));
-            }
-            return false;
-        }
         if (this->GetPrototype() != from->GetPrototype())
         {
             if (PHASE_TRACE1(ObjectCopyPhase))
             {
                 Output::Print(_u("ObjectCopy: Can't copy: Prototypes don't match\n"));
-            }
-            return false;
-        }
-        if (!from->GetTypeHandler()->AllPropertiesAreEnumerable())
-        {
-            if (PHASE_TRACE1(ObjectCopyPhase))
-            {
-                Output::Print(_u("ObjectCopy: Can't copy: from obj has non-enumerable properties\n"));
             }
             return false;
         }

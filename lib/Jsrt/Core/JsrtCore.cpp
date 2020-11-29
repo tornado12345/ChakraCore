@@ -21,28 +21,21 @@
 CHAKRA_API
 JsInitializeModuleRecord(
     _In_opt_ JsModuleRecord referencingModule,
-    _In_ JsValueRef normalizedSpecifier,
+    _In_opt_ JsValueRef normalizedSpecifier,
     _Outptr_result_maybenull_ JsModuleRecord* moduleRecord)
 {
     PARAM_NOT_NULL(moduleRecord);
 
-    Js::SourceTextModuleRecord* childModuleRecord = nullptr;
+    Js::SourceTextModuleRecord* newModuleRecord = nullptr;
 
     JsErrorCode errorCode = ContextAPIWrapper_NoRecord<true>([&](Js::ScriptContext *scriptContext) -> JsErrorCode {
-        childModuleRecord = Js::SourceTextModuleRecord::Create(scriptContext);
-        if (referencingModule == nullptr)
-        {
-            childModuleRecord->SetIsRootModule();
-        }
-        if (normalizedSpecifier != JS_INVALID_REFERENCE)
-        {
-            childModuleRecord->SetSpecifier(normalizedSpecifier);
-        }
+        newModuleRecord = Js::SourceTextModuleRecord::Create(scriptContext);
+        newModuleRecord->SetSpecifier(normalizedSpecifier);
         return JsNoError;
     });
     if (errorCode == JsNoError)
     {
-        *moduleRecord = childModuleRecord;
+        *moduleRecord = newModuleRecord;
     }
     else
     {
@@ -85,9 +78,9 @@ JsParseModuleSource(
         {
             const char16 *moduleUrlSz = nullptr;
             size_t moduleUrlLen = 0;
-            if (moduleRecord->GetModuleUrl())
+            if (moduleRecord->GetSpecifier())
             {
-                Js::JavascriptString *moduleUrl = Js::VarTo<Js::JavascriptString>(moduleRecord->GetModuleUrl());
+                Js::JavascriptString *moduleUrl = Js::VarTo<Js::JavascriptString>(moduleRecord->GetSpecifier());
                 moduleUrlSz = moduleUrl->GetSz();
                 moduleUrlLen = moduleUrl->GetLength();
             }
@@ -158,7 +151,8 @@ JsSetModuleHostInfo(
     {
         if (moduleHostInfo != JsModuleHostInfo_FetchImportedModuleCallback &&
             moduleHostInfo != JsModuleHostInfo_FetchImportedModuleFromScriptCallback &&
-            moduleHostInfo != JsModuleHostInfo_NotifyModuleReadyCallback)
+            moduleHostInfo != JsModuleHostInfo_NotifyModuleReadyCallback &&
+            moduleHostInfo != JsModuleHostInfo_InitializeImportMetaCallback)
         {
             return JsErrorInvalidArgument;
         }
@@ -191,8 +185,11 @@ JsSetModuleHostInfo(
         case JsModuleHostInfo_NotifyModuleReadyCallback:
             currentContext->GetHostScriptContext()->SetNotifyModuleReadyCallback(reinterpret_cast<NotifyModuleReadyCallback>(hostInfo));
             break;
+        case JsModuleHostInfo_InitializeImportMetaCallback:
+            currentContext->GetHostScriptContext()->SetInitializeImportMetaCallback(reinterpret_cast<InitializeImportMetaCallback>(hostInfo));
+            break;
         case JsModuleHostInfo_Url:
-            moduleRecord->SetModuleUrl(hostInfo);
+            moduleRecord->SetSpecifier(hostInfo);
             break;
         default:
             return JsInvalidModuleHostInfoKind;
@@ -238,8 +235,11 @@ JsGetModuleHostInfo(
         case JsModuleHostInfo_NotifyModuleReadyCallback:
             *hostInfo = reinterpret_cast<void*>(currentContext->GetHostScriptContext()->GetNotifyModuleReadyCallback());
             break;
+        case JsModuleHostInfo_InitializeImportMetaCallback:
+            *hostInfo = reinterpret_cast<void*>(currentContext->GetHostScriptContext()->GetInitializeImportMetaCallback());
+            break;
         case JsModuleHostInfo_Url:
-            *hostInfo = reinterpret_cast<void*>(moduleRecord->GetModuleUrl());
+            *hostInfo = reinterpret_cast<void*>(moduleRecord->GetSpecifier());
             break;
         default:
             return JsInvalidModuleHostInfoKind;
@@ -495,6 +495,63 @@ JsSetArrayBufferExtraInfo(
         Js::VarTo<Js::ArrayBuffer>(arrayBuffer)->SetExtraInfoBits(extraInfo);
     }
     END_JSRT_NO_EXCEPTION
+}
+
+
+CHAKRA_API
+JsGetEmbedderData(
+    _In_ JsValueRef instance,
+    _Out_ JsValueRef* embedderData)
+{
+   VALIDATE_JSREF(instance);
+   PARAM_NOT_NULL(embedderData);
+   return ContextAPINoScriptWrapper_NoRecord([&](Js::ScriptContext* scriptContext) -> JsErrorCode {
+        Js::RecyclableObject* object = Js::JavascriptOperators::TryFromVar<Js::RecyclableObject>(instance);
+        if (!object)
+        {
+            return JsErrorInvalidArgument;
+        }
+
+        // Right now we know that we support these many. Lets find out if
+        // there are more.
+        Assert(Js::TypedArrayBase::Is(object->GetTypeId()) ||
+               object->GetTypeId() == Js::TypeIds_ArrayBuffer ||
+               object->GetTypeId() == Js::TypeIds_DataView ||
+               object->GetTypeId() == Js::TypeIds_SharedArrayBuffer);
+
+        if (!object->GetInternalProperty(object, Js::InternalPropertyIds::EmbedderData, embedderData, nullptr, scriptContext))
+        {
+            *embedderData = nullptr;
+        }
+        return JsNoError;
+    });
+}
+
+CHAKRA_API
+JsSetEmbedderData(_In_ JsValueRef instance, _In_ JsValueRef embedderData)
+{
+   VALIDATE_JSREF(instance);
+   return ContextAPINoScriptWrapper_NoRecord([&](Js::ScriptContext* scriptContext) -> JsErrorCode {
+        Js::RecyclableObject* object = Js::JavascriptOperators::TryFromVar<Js::RecyclableObject>(instance);
+        if (!object)
+        {
+            return JsErrorInvalidArgument;
+        }
+
+        // Right now we know that we support these many. Lets find out if
+        // there are more.
+        Assert(Js::TypedArrayBase::Is(object->GetTypeId()) ||
+               object->GetTypeId() == Js::TypeIds_ArrayBuffer ||
+               object->GetTypeId() == Js::TypeIds_DataView ||
+               object->GetTypeId() == Js::TypeIds_SharedArrayBuffer);
+
+        if (!object->SetInternalProperty(Js::InternalPropertyIds::EmbedderData, embedderData, Js::PropertyOperationFlags::PropertyOperation_None, nullptr))
+        {
+           return JsErrorInvalidArgument;
+        }
+
+        return JsNoError;
+    });
 }
 
 CHAKRA_API
@@ -1392,17 +1449,25 @@ CHAKRA_API JsAllocRawData(_In_ JsRuntimeHandle runtimeHandle, _In_ size_t sizeIn
     });
 }
 
+CHAKRA_API JsIsCallable(_In_ JsValueRef object, _Out_ bool *isCallable)
+{
+    return ContextAPINoScriptWrapper_NoRecord([&](Js::ScriptContext *scriptContext) -> JsErrorCode {
+        VALIDATE_INCOMING_OBJECT(object, scriptContext);
+        PARAM_NOT_NULL(isCallable);
+
+        *isCallable = Js::JavascriptConversion::IsCallable(object);
+
+        return JsNoError;
+    });
+}
+
 CHAKRA_API JsIsConstructor(_In_ JsValueRef object, _Out_ bool *isConstructor)
 {
-    return ContextAPIWrapper<JSRT_MAYBE_TRUE>([&](Js::ScriptContext *scriptContext, TTDRecorder& _actionEntryPopper) -> JsErrorCode {
-        PERFORM_JSRT_TTD_RECORD_ACTION_NOT_IMPLEMENTED(scriptContext);
+    return ContextAPINoScriptWrapper_NoRecord([&](Js::ScriptContext *scriptContext) -> JsErrorCode {
         VALIDATE_INCOMING_OBJECT(object, scriptContext);
         PARAM_NOT_NULL(isConstructor);
 
-        Js::RecyclableObject * instance = Js::VarTo<Js::RecyclableObject>(object);
-        AssertMsg(scriptContext->GetThreadContext()->IsScriptActive(), "Caller is expected to be under ContextAPIWrapper!");
-
-        *isConstructor = Js::JavascriptOperators::IsConstructor(instance);
+        *isConstructor = Js::JavascriptOperators::IsConstructor(object);
 
         return JsNoError;
     });
@@ -1445,15 +1510,29 @@ JsDiscardBackgroundParse_Experimental(
 
 #ifdef _WIN32
 CHAKRA_API
+JsEnableOOPJIT()
+{
+#ifdef ENABLE_OOP_NATIVE_CODEGEN
+    JITManager::GetJITManager()->EnableOOPJIT();
+    return JsNoError;
+#else
+    return JsErrorNotImplemented;
+#endif
+}
+
+CHAKRA_API
 JsConnectJITProcess(_In_ HANDLE processHandle, _In_opt_ void* serverSecurityDescriptor, _In_ UUID connectionId)
 {
 #ifdef ENABLE_OOP_NATIVE_CODEGEN
     JITManager::GetJITManager()->EnableOOPJIT();
     ThreadContext::SetJITConnectionInfo(processHandle, serverSecurityDescriptor, connectionId);
-#endif
     return JsNoError;
+#else
+    return JsErrorNotImplemented;
+#endif
 }
 #endif
+
 CHAKRA_API
 JsGetArrayBufferFreeFunction(
     _In_ JsValueRef arrayBuffer,

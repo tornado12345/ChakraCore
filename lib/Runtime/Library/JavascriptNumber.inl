@@ -41,6 +41,17 @@ namespace Js
         }
     }
 
+#ifdef ENABLE_TEST_HOOKS
+    __forceinline Var JavascriptNumber::ToVarFor32BitBytecode(int32 nValue, ScriptContext* scriptContext)
+    {
+        if ((1073741824 > nValue) && (nValue > -1073741824))
+        {
+            return TaggedInt::ToVarUnchecked(nValue);
+        }
+        return JavascriptNumber::NewInlined((double) nValue, scriptContext);
+    }
+#endif
+
 #if defined(__clang__) && defined(_M_IX86)
     __forceinline Var JavascriptNumber::ToVar(intptr_t nValue, ScriptContext* scriptContext)
     {
@@ -147,7 +158,7 @@ namespace Js
 
     inline Var JavascriptNumber::ToVar(double value)
     {
-        uint64 val = *(uint64*)&value;
+        const uint64 val = ToSpecial(value);
         AssertMsg(!IsNan(value) || ToSpecial(value) == k_NegativeNan || ToSpecial(value) == 0x7FF8000000000000ull, "We should only produce a NaN with this value");
         return reinterpret_cast<Var>(val ^ FloatTag_Value);
     }
